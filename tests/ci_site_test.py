@@ -64,7 +64,8 @@ class ProvenanceTests(unittest.TestCase):
             (self.workflow, "repository", {"full_name": "Shopify/roundhouse"}),
             (self.workflow, "path", ".github/workflows/ci.yml"), (self.workflow, "event", "pull_request"),
             (self.job, "conclusion", "failure"), (self.job, "run_id", 101),
-            (self.status, "log_url", "https://github.com/elsewhere/roundhouse/actions/runs/100/job/200"),
+            (self.status, "log_url", "https://example.invalid/not-an-actions-url"),
+            (self.status, "state", "failure"),
         ]:
             before = copy.deepcopy(record)
             with self.subTest(key=key, value=value):
@@ -73,6 +74,12 @@ class ProvenanceTests(unittest.TestCase):
                     self.choose()
                 record.clear()
                 record.update(before)
+
+    def test_pre_transfer_log_url_spelling_is_trusted_via_canonical_api_fields(self):
+        self.status["log_url"] = "https://github.com/rubys/roundhouse/actions/runs/100/job/200"
+        selected = self.choose()
+        self.assertEqual(selected["artifact"]["id"], 2)
+        self.assertEqual(selected["run_id"], 100)
 
     def test_does_not_fall_back_when_deployed_artifact_expired_or_is_ambiguous(self):
         for candidates in [[artifact(1), artifact(2, expired=True)], [artifact(1), artifact(2, digest=None)], [artifact(2), artifact(2, id=99)]]:

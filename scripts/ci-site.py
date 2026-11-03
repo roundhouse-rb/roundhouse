@@ -91,8 +91,10 @@ class GitHub:
 
 
 def deployment_run(status):
+    # log_url may still spell a pre-transfer owner; trust is the canonical
+    # Actions API check in trusted_baseline, not the host path spelling.
     match = re.fullmatch(
-        rf"https://github\.com/{re.escape(REPOSITORY)}/actions/runs/([1-9][0-9]*)/job/([1-9][0-9]*)",
+        r"https://github\.com/[^/]+/[^/]+/actions/runs/([1-9][0-9]*)/job/([1-9][0-9]*)",
         status.get("log_url", ""),
     )
     if status.get("state") != "success" or not match:

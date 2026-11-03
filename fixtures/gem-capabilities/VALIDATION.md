@@ -2,7 +2,7 @@
 
 2026-09-30, Ruby 4.0.7p0 / Bundler 2.6.9 / Cargo 1.98.1 / GCC 12.2.0.
 Roundhouse was fetched directly from upstream main and rebuilt from a fresh
-`thomasklemm/roundhouse` checkout, with `roundhouse-rb/roundhouse` as upstream.
+`thomasklemm/roundhouse` checkout, with `rubys/roundhouse` as upstream.
 Chosen compiler pin: `f3d192810b53c61a73a52017e23d67df80265f72`;
 compiler baseline tree: `7d70768281220df2154b41caa41283dce8f7bd91`.
 The only source differences are the new corpus and its CLI; no compiler fix.

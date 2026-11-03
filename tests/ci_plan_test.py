@@ -62,6 +62,31 @@ def git_repository():
             os.chdir(previous)
 
 
+class PublicationBoundary(unittest.TestCase):
+    def test_scheduled_full_on_either_canonical_name_may_publish(self):
+        for repository in ci.CANONICAL_REPOSITORIES:
+            for event in ("schedule", "workflow_dispatch"):
+                with self.subTest(repository=repository, event=event):
+                    self.assertTrue(
+                        ci.publication_caller_allowed(
+                            repository, "refs/heads/main", event
+                        )
+                    )
+
+    def test_forks_topic_branches_and_pr_events_cannot_publish(self):
+        for repository, ref, event in [
+            ("Shopify/roundhouse", "refs/heads/main", "schedule"),
+            ("thomasklemm/roundhouse", "refs/heads/main", "workflow_dispatch"),
+            ("roundhouse-rb/roundhouse", "refs/heads/topic", "schedule"),
+            ("rubys/roundhouse", "refs/heads/main", "push"),
+            ("rubys/roundhouse", "refs/heads/main", "pull_request"),
+        ]:
+            with self.subTest(repository=repository, ref=ref, event=event):
+                self.assertFalse(
+                    ci.publication_caller_allowed(repository, ref, event)
+                )
+
+
 class Routing(unittest.TestCase):
     def test_websocket_lifecycle_sources_and_helpers_run_the_native_suite(self):
         for path in [

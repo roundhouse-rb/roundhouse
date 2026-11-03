@@ -41,9 +41,23 @@ class ProvenanceTests(unittest.TestCase):
 
     def test_only_manual_canonical_main_can_publish(self):
         self.assertEqual(site.publication_context(context()), SHA)
+        for repository in site.CANONICAL_REPOSITORIES:
+            with self.subTest(repository=repository):
+                self.assertEqual(
+                    site.publication_context(context() | {"GITHUB_REPOSITORY": repository}),
+                    SHA,
+                )
         for key, value in [("GITHUB_REPOSITORY", "Shopify/roundhouse"), ("GITHUB_REF", "refs/heads/topic"), ("GITHUB_EVENT_NAME", "pull_request"), ("GITHUB_SHA", "main")]:
             with self.subTest(key=key), self.assertRaises(ValueError):
                 site.publication_context(context() | {key: value})
+
+    def test_roundhouse_rb_deployment_provenance_is_trusted(self):
+        repository = "roundhouse-rb/roundhouse"
+        self.status["log_url"] = f"https://github.com/{repository}/actions/runs/100/job/200"
+        self.workflow["repository"] = {"full_name": repository}
+        selected = self.choose()
+        self.assertEqual(selected["artifact"]["id"], 2)
+        self.assertEqual(selected["run_id"], 100)
 
     def test_uses_successful_deployment_attempt_not_overall_run_or_newer_artifact(self):
         selected = self.choose()

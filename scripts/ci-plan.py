@@ -59,6 +59,9 @@ BASE = [
 # selected (scheduled full, or a change that owns them). Unselected skips
 # must not fail the Ruby PR floor.
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
+# Full-ci / publish-site accept either name after the rubys → roundhouse-rb
+# transfer. Forks and other repos stay rejected.
+CANONICAL_REPOSITORIES = frozenset({"rubys/roundhouse", "roundhouse-rb/roundhouse"})
 CORE = ["spinel-build", "spinel-toolchain", "spinel-compare"]
 JRUBY_BIND_INPUTS = {
     "tests/param_binds_jruby.rb",
@@ -1252,6 +1255,15 @@ def _advisory_complete(job, need, advisory, plan=None):
     return all(need.get("outputs", {}).get(key) == "success" for key in keys)
 
 
+def publication_caller_allowed(repository, ref, event_name):
+    """True only for scheduled / dispatched Full validation on canonical main."""
+    return (
+        repository in CANONICAL_REPOSITORIES
+        and ref == "refs/heads/main"
+        and event_name in {"schedule", "workflow_dispatch"}
+    )
+
+
 def write_outputs(values):
     output = os.environ.get("GITHUB_OUTPUT")
     lines = "".join(
@@ -1373,10 +1385,10 @@ def main():
                 "Ruby+Spinel only (extra-language SDKs not selected)"
             )
     publish = os.environ.get("CI_PUBLISH") == "true"
-    if publish and (
-        os.environ["GITHUB_REPOSITORY"] != "rubys/roundhouse"
-        or os.environ["GITHUB_REF"] != "refs/heads/main"
-        or event_name not in {"schedule", "workflow_dispatch"}
+    if publish and not publication_caller_allowed(
+        os.environ["GITHUB_REPOSITORY"],
+        os.environ["GITHUB_REF"],
+        event_name,
     ):
         raise ValueError("publication is only allowed by canonical main's full caller")
     plan = select(

@@ -220,7 +220,8 @@ fn apply_param_selector_dispatch(
                         }
                         Some((_, ty)) => {
                             let unknown = match ty {
-                                None | Some(Ty::Untyped) | Some(Ty::Var { .. }) => true,
+                                None | Some(Ty::Untyped { .. }) | Some(Ty::Var { .. }) => true,
+                                Some(t) if t.has_untyped_arm() => true,
                                 Some(Ty::Class { id, .. }) => target_classes.contains(id),
                                 _ => false,
                             };
@@ -765,7 +766,7 @@ fn build_arms(
                 class
                     .as_ref()
                     .and_then(|c| method_return_via_registry(registry, c, called.as_str()))
-                    .unwrap_or(Ty::Untyped),
+                    .unwrap_or(Ty::untyped()),
             );
             Arm { pattern, guard: None, body }
         })

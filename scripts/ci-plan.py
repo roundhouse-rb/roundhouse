@@ -499,6 +499,7 @@ def native_coverage(path):
         or (path.startswith("tests/spinel") and path.endswith((".rs", ".rb")))
         or path in {f"tests/{name}.rs" for name in SPINEL_TESTS}
         or path == "tests/support/db_concurrency_spinel.rb"
+        or path == "tests/support/gradual_returns.rs"
         or path == "tests/support/full_forwarding.rs"
     ) and not interpreter_only
     suites = set()
@@ -748,6 +749,15 @@ def select(
     wasm = site = spinel = False
     reasons = []
     for path in paths:
+        if path in {
+            "tests/block_exit_reason_cases.json",
+            "tests/selection_reason_main.json",
+            "tests/support/reason_returns.rs",
+            "tests/emit_and_run/gradual_returns.rs",
+            "tests/spinel_toolchain/gradual_returns.rs",
+        }:
+            reasons.append(f"{path}: unit (gradual-return regression inputs)")
+
         if path in {"runtime/ruby/action_controller/base.rb", "runtime/ruby/action_controller/base.rbs"}:
             targets.update(EXTRA_COMPARE_TARGETS)
             spinel_tests.add("render_json_encoder_spinel")

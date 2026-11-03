@@ -179,7 +179,7 @@ fn marked_and_structural_packets_keep_the_same_call_syntax() {
         let mut marked = value.clone();
         marked.decisions |= ERASED_KEYWORD_SPLAT;
         let structural = Expr::new(span, ExprNode::KeywordSplat { value });
-        let call = |packet| {
+        let call = |packet, block| {
             let mut args = vec![];
             if method == "[]=" {
                 args.push(Expr::new(span, ExprNode::Lit { value: Literal::Sym { value: Symbol::from("key") } }));
@@ -187,10 +187,17 @@ fn marked_and_structural_packets_keep_the_same_call_syntax() {
             args.push(packet);
             Expr::new(span, ExprNode::Send {
                 recv: Some(Expr::new(span, ExprNode::SelfRef)), method: Symbol::from(method),
-                args, block: None, parenthesized: true,
+                args, block, parenthesized: true,
             })
         };
-        assert_eq!(roundhouse::emit::ruby::emit_expr(&call(marked)),
-                   roundhouse::emit::ruby::emit_expr(&call(structural)), "{method}");
+        for block in [None, Some(Expr::new(span, ExprNode::Var {
+            id: roundhouse::ident::VarId(0), name: Symbol::from("fallback"),
+        }))] {
+            let has_block = block.is_some();
+            let emitted = roundhouse::emit::ruby::emit_expr(&call(marked.clone(), block.clone()));
+            assert_eq!(emitted,
+                       roundhouse::emit::ruby::emit_expr(&call(structural.clone(), block)), "{method}");
+            if has_block { assert!(emitted.contains("&fallback"), "{emitted}"); }
+        }
     }
 }

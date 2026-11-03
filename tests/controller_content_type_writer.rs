@@ -27,7 +27,7 @@ end
 "#), ("sig/probes_controller.rbs", "class ProbesController\ndef gradual: (untyped value) -> untyped\nend\n")]);
     assert_eq!(result(&app, "ProbesController", "literal"), Ty::Str);
     assert_eq!(result(&app, "ProbesController", "unset"), Ty::Nil);
-    assert_eq!(result(&app, "ProbesController", "gradual"), Ty::Untyped);
+    assert_eq!(result(&app, "ProbesController", "gradual"), Ty::gradual_untyped());
     assert!(matches!(result(&app, "ProbesController", "pending"), Ty::Var { .. }));
     let errors: Vec<_> = diagnose(&app).into_iter().filter(|d| d.severity == Severity::Error).collect();
     assert!(errors.is_empty(), "{errors:?}");
@@ -112,7 +112,7 @@ end
     assert_eq!(result(&app, "ProbesController", "literal"), Ty::Str);
     assert_eq!(result(&app, "ProbesController", "unset"), Ty::Nil);
     assert_eq!(result(&app, "ProbesController", "content_type="), Ty::Int);
-    assert_eq!(result(&app, "ProbesController", "gradual"), Ty::Untyped);
+    assert_eq!(result(&app, "ProbesController", "gradual"), Ty::gradual_untyped());
 }
 
 #[test]
@@ -128,15 +128,20 @@ fn an_unresolved_assignment_value_is_not_changed_into_gradual_or_string() {
         args: vec![Expr::new(Span::synthetic(), ExprNode::Var { name: Symbol::from("value"),
             id: VarId(0) })], block: None, parenthesized: false,
     });
-    for writer_result in [Ty::Untyped, Ty::Var { var: TyVar(13) }] {
+    for writer_result in [Ty::untyped(), Ty::Var { var: TyVar(13) }] {
         let mut info = ClassInfo::default();
         info.instance_methods.insert(Symbol::from("content_type="), writer_result);
         let classes = [(id.clone(), info)].into_iter().collect();
-        for value in [Ty::Var { var: TyVar(42) }, Ty::Untyped, Ty::Str, Ty::Nil] {
+        for value in [Ty::Var { var: TyVar(42) }, Ty::untyped(), Ty::gradual_untyped(), Ty::pending_untyped(), Ty::Str, Ty::Nil] {
             let mut context = Ctx { self_ty: Some(Ty::Class { id: id.clone(), args: vec![].into() }),
                 instance_body: true, ..Ctx::default() };
             context.local_bindings.insert(Symbol::from("value"), value.clone());
-            assert_eq!(BodyTyper::new(&classes).analyze_expr(&mut expression, &context), value);
+            let actual = BodyTyper::new(&classes).analyze_expr(&mut expression, &context);
+            assert_eq!(actual, value);
+            if let (Ty::Untyped { why: actual }, Ty::Untyped { why: expected }) = (&actual, &value) {
+                assert_eq!(actual.is_gradual(), expected.is_gradual());
+                assert_eq!(actual.is_pending_only(), expected.is_pending_only());
+            }
             assert_eq!(expression.diagnostic().is_some(), matches!(value, Ty::Var { .. }));
         }
     }

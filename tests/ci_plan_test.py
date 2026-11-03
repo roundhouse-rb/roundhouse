@@ -127,6 +127,32 @@ class PublicationBoundary(unittest.TestCase):
 
 
 class Routing(unittest.TestCase):
+    def test_shared_native_inputs_keep_both_ownership_rules(self):
+        for path in ["tests/support/gradual_returns.rs", "tests/support/full_forwarding.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertTrue(plan["spinel"])
+                self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
+
+    def test_return_inputs_and_class_body_inputs_keep_their_routes(self):
+        paths = [
+            "tests/block_exit_reason_cases.json",
+            "tests/selection_reason_main.json",
+            "tests/support/reason_returns.rs",
+            "tests/emit_and_run/gradual_returns.rs",
+            "tests/spinel_toolchain/gradual_returns.rs",
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertTrue(any("gradual-return regression inputs" in why
+                                    for why in ci.select([path])["reasons"]))
+        for path in ["tests/emit_and_run/class_body_calls.rs", "tests/support/class_body_calls.rs"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertTrue(plan["spinel"])
+                self.assertTrue(set(ci.CORE).issubset(plan["jobs"]))
+                self.assertTrue(any("ordinary class-body calls" in why for why in plan["reasons"]))
+
     def test_shared_controller_base_runs_every_extra_language(self):
         for suffix in ("rb", "rbs"):
             with self.subTest(suffix=suffix):

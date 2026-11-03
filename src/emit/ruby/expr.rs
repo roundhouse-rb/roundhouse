@@ -327,8 +327,8 @@ fn emit_node(n: &ExprNode) -> String {
         // `docs/limitations.md`'s `obj.method(:m)` coverage), so this
         // is not an approximation: the emitted call is exactly the
         // Ruby source's own construct. In block-argument position
-        // (`&method(:name)`), `emit_do_block`'s non-Lambda fallback
-        // re-attaches this as `&` — see its doc comment.
+        // (`&method(:name)`), the Send forwarding path
+        // re-attaches this as an explicit `&` argument.
         ExprNode::MethodRef { recv, name } => match recv {
             Some(r) => format!("{}.method(:{name})", emit_postfix_recv(r)),
             None => format!("method(:{name})"),
@@ -339,6 +339,11 @@ fn emit_node(n: &ExprNode) -> String {
             if let Some(b) = block { format!("{base} {{ {} }}", emit_expr(b)) } else { base }
         }
         ExprNode::Send { recv, method, args, block, parenthesized } => {
+            if let Some(b) = block.as_ref().filter(|b| !matches!(&*b.node, ExprNode::Lambda { .. })
+                || b.decisions & crate::expr::FORWARDED_BLOCK != 0)
+            {
+                return emit_send_base_with_forwarded_block(recv.as_ref(), method, args, true, Some(b));
+            }
             // A brace block binds to the nearest call: after paren-less
             // arguments it is the last argument's block (`f a, b { }` is
             // `f(a, b { })`) or a syntax error (`f a, k: 1 { }`). The
@@ -688,7 +693,7 @@ fn emit_cast(value: &Expr, target_ty: &crate::ty::Ty) -> String {
     // The Bool arm sits after `pure_read` so a nullable read keeps nil.
     let value_is_poly = matches!(
         value.ty.as_ref(),
-        Some(Ty::Untyped) | Some(Ty::Union { .. })
+        Some(Ty::Untyped { .. }) | Some(Ty::Union { .. })
     );
     if !value_is_poly && !is_bool_target(target_ty) {
         return inner;
@@ -1303,9 +1308,13 @@ fn coerce_str_sym_key(key: &Expr) -> String {
 /// emission. Symbol keys never match a string-keyed hash, so they're
 /// normalized here at the single emit chokepoint (covering the dynamic
 /// `h[x]` → `h[x.to_s]` case a literal-only pre-pass could not).
-fn emit_str_hash_access(recv: &Expr, method: &str, args: &[Expr]) -> Option<String> {
-    let recv_s = emit_expr(recv);
+fn emit_str_hash_access(recv: &Expr, method: &str, args: &[Expr], forwarded_block: Option<&Expr>) -> Option<String> {
+    let recv_s = if forwarded_block.is_some() { emit_postfix_recv(recv) } else { emit_expr(recv) };
     let indifferent = is_indifferent_params(recv);
+    let call = |mut parts: Vec<String>| {
+        if let Some(block) = forwarded_block { parts.push(format!("&{}", emit_expr(block))); }
+        format!("{recv_s}.{method}({})", parts.join(", "))
+    };
     match method {
         "[]" if args.len() == 1 => {
             let key = &args[0];
@@ -1319,21 +1328,22 @@ fn emit_str_hash_access(recv: &Expr, method: &str, args: &[Expr]) -> Option<Stri
             } else {
                 coerce_str_key(key, indifferent)
             };
-            Some(format!("{recv_s}[{key_s}]"))
+            Some(if forwarded_block.is_some() { call(vec![key_s]) } else { format!("{recv_s}[{key_s}]") })
         }
-        "[]=" if args.len() == 2 => Some(format!(
-            "{recv_s}[{}] = {}",
-            coerce_str_key(&args[0], indifferent),
-            emit_arg(&args[1])
-        )),
+        "[]=" if args.len() == 2 => {
+            let key = coerce_str_key(&args[0], indifferent);
+            let value = emit_arg(&args[1]);
+            Some(if forwarded_block.is_some() { call(vec![key, value]) }
+                else { format!("{recv_s}[{key}] = {value}") })
+        }
         "fetch" | "key?" | "has_key?" | "include?" | "delete" if !args.is_empty() => {
             let mut parts = vec![coerce_str_sym_key(&args[0])];
             parts.extend(args[1..].iter().map(emit_arg));
-            Some(format!("{recv_s}.{method}({})", parts.join(", ")))
+            Some(call(parts))
         }
         "dig" if !args.is_empty() => {
             let parts: Vec<String> = args.iter().map(coerce_str_sym_key).collect();
-            Some(format!("{recv_s}.dig({})", parts.join(", ")))
+            Some(call(parts))
         }
         _ => None,
     }
@@ -1347,25 +1357,25 @@ pub(super) fn emit_send_base(
     args: &[Expr],
     parenthesized: bool,
 ) -> String {
-    let args_s: Vec<String> = args.iter().map(emit_keyword_forward_arg).collect();
+    emit_send_base_with_forwarded_block(recv, method, args, parenthesized, None)
+}
+
+// Semantic send rewrites run before an explicit forwarded-block call is rendered.
+// Operator, index and setter prettification only applies when no block is forwarded.
+fn emit_send_base_with_forwarded_block(
+    recv: Option<&Expr>, method: &Symbol, args: &[Expr], parenthesized: bool,
+    forwarded_block: Option<&Expr>,
+) -> String {
+    let mut args_s: Vec<String> = args.iter().map(emit_keyword_forward_arg).collect();
     let m = method.as_str();
     // `...` is a send argument packet, never an index or infix operand.
     // Preserve explicit call syntax even for operator/setter method names
     // and `self`, before any surface-syntax prettification below.
-    if args.iter().any(|a| a.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0 || matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. } | ExprNode::KeywordSplat { .. })) {
-        return match recv {
-            Some(r) => {
-                let receiver = emit_expr(r);
-                let receiver = if recv_needs_parens(r) { format!("({receiver})") } else { receiver };
-                format!("{receiver}.{method}({})", args_s.join(", "))
-            }
-            None => format!("{method}({})", args_s.join(", ")),
-        };
-    }
+    let packet = args.iter().any(|a| a.decisions & crate::expr::ERASED_KEYWORD_SPLAT != 0 || matches!(&*a.node, ExprNode::ForwardArgs | ExprNode::ForwardKeywords | ExprNode::ForwardKeywordsWithPairs { .. } | ExprNode::KeywordSplat { .. }));
     // A receiverless call, or one the typer folded onto `self`, is the
     // backtick literal. An override of `` ` `` still runs through that
     // syntax. An explicit other receiver stays a normal send.
-    if m == "`" && args.len() == 1 && recv.is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) {
+    if !packet && forwarded_block.is_none() && m == "`" && args.len() == 1 && recv.is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)) {
         if let Some(literal) = emit_backtick_literal(&args[0]) {
             return literal;
         }
@@ -1380,7 +1390,7 @@ pub(super) fn emit_send_base(
     if m == "to_rfc3339" && args.is_empty() {
         if let Some(r) = recv {
             if crate::lower::time_calendar::is_time_rfc3339_receiver(r) {
-                return emit_send_base(Some(r), &Symbol::from("iso8601"), args, parenthesized);
+                return emit_send_base_with_forwarded_block(Some(r), &Symbol::from("iso8601"), args, parenthesized, forwarded_block);
             }
         }
     }
@@ -1391,20 +1401,28 @@ pub(super) fn emit_send_base(
                 if path.last().is_some_and(|s| s.as_str() == "Time")
                     && path.iter().rev().skip(1).all(|s| s.as_str().is_empty()))
             {
-                return format!("{}.now.utc", emit_expr(r));
+                return if let Some(block) = forwarded_block {
+                    format!("{}.now.utc(&{})", emit_expr(r), emit_expr(block))
+                } else { format!("{}.now.utc", emit_expr(r)) };
             }
         }
     }
-    // Indexing a statically string-keyed hash (`Hash[String, _]`, e.g.
-    // request `params`) with a Ruby symbol/dynamic key: coerce the key to
-    // a string here, the single emit chokepoint, so no `h[:sym]` survives
-    // to hit the hash as a never-matching symbol key (a silent nil read).
-    if let Some(r) = recv {
-        if is_string_keyed_hash(r) {
-            if let Some(s) = emit_str_hash_access(r, m, args) {
-                return s;
+    // Key conversion precedes forwarding a block; packets are not keys.
+    if !packet && let Some(r) = recv && is_string_keyed_hash(r)
+        && let Some(access) = emit_str_hash_access(r, m, args, forwarded_block)
+    {
+        return access;
+    }
+    if packet || forwarded_block.is_some() {
+        if let Some(block) = forwarded_block { args_s.push(format!("&{}", emit_expr(block))); }
+        return match recv {
+            Some(r) => {
+                let receiver = emit_expr(r);
+                let receiver = if recv_needs_parens(r) { format!("({receiver})") } else { receiver };
+                format!("{receiver}.{method}({})", args_s.join(", "))
             }
-        }
+            None => format!("{method}({})", args_s.join(", ")),
+        };
     }
     // Index-read (`recv[idx]`) and index-write (`recv[idx] = value`)
     // Sends round-trip to bracket-syntax regardless of receiver shape
@@ -1731,23 +1749,7 @@ fn lambda_params(params: &[Symbol], extra_params: &[crate::dialect::Param], rest
 pub(super) fn emit_do_block(base: &str, block: &Expr) -> String {
     use crate::expr::BlockStyle;
     let ExprNode::Lambda { params, rest_param, extra_params, body, block_style, .. } = &*block.node else {
-        // A non-Lambda block expression is a Proc FORWARD (`&block` —
-        // ingest lowers the block-pass arg to a bare Var in the block
-        // slot). Rendering it as a literal `{ block }` block made the
-        // callee YIELD THE PROC OBJECT instead of calling it —
-        // lobsters' `Rails.cache.fetch(key, &block)` forward returned
-        // the Proc, poisoning `@comments` to Proc under spinel and
-        // silently mis-caching on CRuby. Re-attach as a `&` argument.
-        let fwd = emit_expr(block);
-        return if let Some(stripped) = base.strip_suffix(')') {
-            if stripped.ends_with('(') {
-                format!("{stripped}&{fwd})")
-            } else {
-                format!("{stripped}, &{fwd})")
-            }
-        } else {
-            format!("{base}(&{fwd})")
-        };
+        unreachable!("forwarded expressions were handled above")
     };
     let body_str = emit_expr(body);
     // `|a, b|`, and `|*args|` for a block whose parameter is a REST.
@@ -2063,6 +2065,39 @@ mod tests {
 
     fn lit_str(s: &str) -> Expr {
         Expr::new(Span::default(), ExprNode::Lit { value: Literal::Str { value: s.to_string() } })
+    }
+
+    #[test]
+    fn forwarded_proc_keeps_loose_arity_and_nonlocal_return() {
+        for (source, prefix, suffix) in [
+            ("[1].map(&proc { |a, b| [a, b] })", "got = ", "; abort(got.inspect) unless got == [[1, nil]]"),
+            ("[1].each(&proc { return :escaped })", "def run; ", "; :after; end; abort unless run == :escaped"),
+            ("[1].map(&lambda { |a, b| [a, b] })", "begin; ", "; abort 'lambda arity changed'; rescue ArgumentError; end"),
+        ] {
+            let parsed = ruby_prism::parse(source.as_bytes());
+            let statement = parsed.node().as_program_node().unwrap().statements().body().iter().next().unwrap();
+            let expr = crate::ingest::ingest_expr(&statement, "proc.rb").unwrap();
+            let emitted = emit_expr(&expr);
+            let output = std::process::Command::new("ruby").args(["-e", &format!("{prefix}{emitted}{suffix}")]).output().unwrap();
+            assert!(output.status.success(), "{source}: {emitted}: {}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
+    #[test]
+    fn forwarded_params_fetch_preserves_string_key_rewrites() {
+        for source in ["params.fetch(:id) { fallback.call }", "params.fetch(:id, &fallback)",
+            "(true ? params : params).fetch(:id, &fallback)"] {
+            let parsed = ruby_prism::parse(source.as_bytes());
+            let program = parsed.node();
+            let statement = program.as_program_node().unwrap().statements().body().iter().next().unwrap();
+            let mut expr = crate::ingest::ingest_expr(&statement, "params.rb").unwrap();
+            let ExprNode::Send { recv: Some(recv), .. } = &mut *expr.node else { panic!("send") };
+            recv.ty = Some(Ty::Hash { key: Ty::Str.into(), value: Ty::Str.into() });
+            let emitted = emit_expr(&expr);
+            let script = format!("params = {{\"id\" => \"present\"}}; calls = 0; fallback = ->(*) {{ calls += 1; \"fallback\" }}; value = {emitted}; abort([value, calls].inspect) unless value == \"present\" && calls == 0");
+            let output = std::process::Command::new("ruby").args(["-e", &script]).output().unwrap();
+            assert!(output.status.success(), "{source}: {emitted}: {}", String::from_utf8_lossy(&output.stderr));
+        }
     }
 
     #[test]

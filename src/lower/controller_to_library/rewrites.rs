@@ -1195,7 +1195,7 @@ fn json_render_body(value: &Expr, jsonp: bool) -> Expr {
 
 fn may_be_str(ty: Option<&Ty>) -> bool {
     match ty {
-        None | Some(Ty::Str | Ty::Untyped | Ty::Var { .. }) => true,
+        None | Some(Ty::Str | Ty::Untyped { .. } | Ty::Var { .. }) => true,
         Some(Ty::Union { variants }) => variants.iter().any(|v| may_be_str(Some(v))),
         _ => false,
     }

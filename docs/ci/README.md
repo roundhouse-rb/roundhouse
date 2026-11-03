@@ -246,13 +246,13 @@ broaden comparison masks merely to turn CI green.
 
 ## Publication is separate
 
-PR checks never deploy Pages. Both publication workflows accept only canonical
-main (`rubys/roundhouse` or `roundhouse-rb/roundhouse` after the org transfer).
-Neither workflow publishes a PR or fork branch.
+PR checks never deploy Pages. Both publication workflows accept only
+`roundhouse-rb/roundhouse` main. Neither workflow publishes a PR or fork
+branch.
 
 ### Update the site without full validation
 
-1. Merge the site changes into canonical `main`.
+1. Merge the site changes into `roundhouse-rb/roundhouse` main.
 2. Start the site-only workflow:
 
    ```sh

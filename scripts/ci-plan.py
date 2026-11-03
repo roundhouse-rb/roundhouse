@@ -59,9 +59,9 @@ BASE = [
 # selected (scheduled full, or a change that owns them). Unselected skips
 # must not fail the Ruby PR floor.
 PUBLICATION = [*BASE, "compare", "browser-smoke-typescript"]
-# Full-ci / publish-site accept either name after the rubys → roundhouse-rb
-# transfer. Forks and other repos stay rejected.
-CANONICAL_REPOSITORIES = frozenset({"rubys/roundhouse", "roundhouse-rb/roundhouse"})
+# Canonical home after the org transfer. Forks and the retired rubys/
+# name stay rejected.
+CANONICAL_REPOSITORY = "roundhouse-rb/roundhouse"
 CORE = ["spinel-build", "spinel-toolchain", "spinel-compare"]
 JRUBY_BIND_INPUTS = {
     "tests/param_binds_jruby.rb",
@@ -1258,7 +1258,7 @@ def _advisory_complete(job, need, advisory, plan=None):
 def publication_caller_allowed(repository, ref, event_name):
     """True only for scheduled / dispatched Full validation on canonical main."""
     return (
-        repository in CANONICAL_REPOSITORIES
+        repository == CANONICAL_REPOSITORY
         and ref == "refs/heads/main"
         and event_name in {"schedule", "workflow_dispatch"}
     )

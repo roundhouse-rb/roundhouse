@@ -32,6 +32,8 @@ mod inertia_runtime_props;
 mod form_builder_fields;
 #[path = "emit_and_run/current_page.rs"]
 mod current_page;
+#[path = "emit_and_run/strict_json_render_escape.rs"]
+mod strict_json_render_escape;
 #[path = "emit_and_run/stylesheet_helper.rs"]
 mod stylesheet_helper;
 #[path = "emit_and_run/stylesheet_source.rs"]

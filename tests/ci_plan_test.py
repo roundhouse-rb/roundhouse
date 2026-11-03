@@ -87,6 +87,44 @@ class PublicationBoundary(unittest.TestCase):
                     ci.publication_caller_allowed(repository, ref, event)
                 )
 
+    def test_plan_entrypoint_publish_requires_canonical_full_caller(self):
+        with git_repository() as (root, git):
+            (root / "README.md").write_text("base\n")
+            git("add", ".")
+            git("commit", "-m", "base")
+            head = git("rev-parse", "HEAD")
+            event_path = root / "event.json"
+            event_path.write_text("{}")
+            base_env = {
+                **os.environ,
+                "GITHUB_EVENT_PATH": str(event_path),
+                "GITHUB_EVENT_NAME": "schedule",
+                "GITHUB_REF": "refs/heads/main",
+                "GITHUB_SHA": head,
+                "GITHUB_OUTPUT": os.devnull,
+                "CI_FULL": "true",
+                "CI_PUBLISH": "true",
+                "CI_SPINEL_REVISION": "a" * 40,
+            }
+            ok = subprocess.run(
+                ["python3", "-B", ci.__file__, "plan"],
+                env={**base_env, "GITHUB_REPOSITORY": ci.CANONICAL_REPOSITORY},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            denied = subprocess.run(
+                ["python3", "-B", ci.__file__, "plan"],
+                env={**base_env, "GITHUB_REPOSITORY": "rubys/roundhouse"},
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(denied.returncode, 0)
+            self.assertIn(
+                "publication is only allowed by canonical main's full caller",
+                denied.stderr,
+            )
+
 
 class Routing(unittest.TestCase):
     def test_websocket_lifecycle_sources_and_helpers_run_the_native_suite(self):

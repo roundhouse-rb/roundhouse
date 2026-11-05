@@ -58,9 +58,9 @@ pub(super) fn expand(app: &mut App) {
         if forwarders.is_empty() {
             continue;
         }
-        let kept: Vec<crate::span::Span> = lc.unknown_calls.iter().map(|e| e.span).collect();
-        let consumed: Vec<crate::span::Span> = delegates.iter().map(|e| e.span).filter(|s| !kept.contains(s)).collect();
-        controller.body.retain(|item| !matches!(item, ControllerBodyItem::Unknown { expr, .. } if consumed.contains(&expr.span)));
+        // Analysis needs these methods, while lowering needs the original
+        // declarations to resolve definitions and alias snapshots in order.
+        // Keep both; lowering recognizes the analysis copies by their span.
         for m in forwarders {
             let item = ControllerBodyItem::Action { action: action_of(m.clone()), leading_comments: Vec::new(), leading_blank_line: true };
             if m.visibility == MethodVisibility::Private {
@@ -105,7 +105,7 @@ fn action_of(m: MethodDef) -> Action {
         block_param: m.block_param.as_ref().map(|b| b.name.clone()),
         rest_param: None,
         anonymous_formal: None,
-        name_span: crate::span::Span::synthetic(),
+        name_span: m.name_span,
         body: m.body,
         renders: RenderTarget::Inferred,
         effects: crate::effect::EffectSet::pure(),

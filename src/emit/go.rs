@@ -301,11 +301,9 @@ func main() {\n\
         let model_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
             model_registry.into_iter().collect();
         let assocs = crate::lower::model_associations::compute_association_graph(app);
-        let controller_lcs = crate::lower::controller_to_library::lower_controllers_with_arel_views_and_assocs(
-            &app.controllers,
+        let controller_lcs = crate::lower::controller_to_library::lower_app_controllers(
+            app,
             model_extras.clone(),
-            Some(&app.schema),
-            &app.views,
             &assocs,
         );
         // Pass the lowered models as the callee-registry extras so
@@ -314,6 +312,9 @@ func main() {\n\
         // Cast inserted around the Str-flowing-into-Int arg. Without
         // extras, the controller-only ty_coerce_insertion pass can't
         // resolve Post_find and the coercion never fires.
+        if !crate::lower::controller_to_library::action_override::go_super_dispatch_supported(&controller_lcs) {
+            return Vec::new();
+        }
         let lowered_controllers = lower::lower_for_go_with_extras(controller_lcs, &lowered_models);
 
         // RouteHelpers module — `lower_routes_to_library_functions` produces
@@ -654,7 +655,7 @@ func main() {\n\
         // Location promoted from the embedded *ActionControllerBase)
         // sidesteps rust's thread_local + axum-extractor dance.
         out.push(emit_routes_table_file(app));
-        out.push(emit_dispatch_file(app));
+        out.push(emit_dispatch_file(app, &lowered_controllers));
 
         // Phase 6 step 1 — wire legacy test emit through v2 so
         // `go test ./app/v2/` exercises the same fixtures + per-model
@@ -930,7 +931,7 @@ fn emit_routes_table_file(app: &App) -> EmittedFile {
 /// reachable via Go field promotion from the embedded
 /// *ActionControllerBase). One switch arm per concrete controller in
 /// the app. Unknown controller names return a 404.
-fn emit_dispatch_file(app: &App) -> EmittedFile {
+fn emit_dispatch_file(app: &App, controllers: &[crate::dialect::LibraryClass]) -> EmittedFile {
     // Detect whether the app emits a layouts/application view —
     // real-blog has app/views/layouts/application.html.erb (View
     // name `layouts/application`); tiny-blog doesn't ship a layout
@@ -982,6 +983,7 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
     // Not left to the next request's reset: a goroutine ID is never reused, so a finished one's entry would stay
     s.push_str("\tdefer I18nHost_reset_request()\n\n");
     s.push_str("\tswitch controller {\n");
+    let request_controllers = crate::lower::controller_to_library::action_override::request_controllers(&app.controllers);
     for ctrl in &app.controllers {
         let raw = ctrl.name.0.as_str();
         let struct_name = raw.rsplit("::").next().unwrap_or(raw);
@@ -997,7 +999,16 @@ fn emit_dispatch_file(app: &App) -> EmittedFile {
         s.push_str("\t\tc.RequestPath = r.URL.Path\n");
         s.push_str("\t\tc.QueryString = r.URL.RawQuery\n");
         s.push_str("\t\tc.RequestFormat = requestFormat\n");
-        s.push_str("\t\tc.ProcessAction(action)\n");
+        let has_adapter = controllers.iter().any(|c| c.name == ctrl.name && c.methods.iter().any(|m| {
+            m.receiver == crate::dialect::MethodReceiver::Instance
+                && m.name.as_str() == crate::lower::controller_to_library::action_override::ENTRY
+        }));
+        let entry = if has_adapter && request_controllers.iter().any(|c| c.name == ctrl.name) {
+            shared::go_method_name(crate::lower::controller_to_library::action_override::ENTRY)
+        } else {
+            "ProcessAction".to_string()
+        };
+        s.push_str(&format!("\t\tc.{entry}(action)\n"));
         // Layout wrap — only for text/html responses with non-empty
         // body, and only when the app emits a Layouts::application
         // view. Redirects (empty body, 3xx) and JSON responses skip.

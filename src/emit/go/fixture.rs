@@ -52,6 +52,9 @@ pub(crate) fn emit_go_fixtures(app: &App) -> EmittedFile {
 
     for fixture in &lowered.fixtures {
         let class_name = fixture.class.0.as_str();
+        // The Go type, as the model emit names it (`Admin::Note` → `AdminNote`).
+        // `class_name` stays the Ruby name, the key of `nullable_columns`.
+        let go_type = super::library::sanitize_type_name(class_name);
         let ns = crate::naming::camelize(fixture.name.as_str());
 
         // LoadAll — insert each record via Save (validations +
@@ -63,7 +66,7 @@ pub(crate) fn emit_go_fixtures(app: &App) -> EmittedFile {
         for record in &fixture.records {
             let label = record.label.as_str();
             writeln!(s, "\t{{").unwrap();
-            writeln!(s, "\t\tr := &{class_name}{{}}").unwrap();
+            writeln!(s, "\t\tr := &{go_type}{{}}").unwrap();
             for field in &record.fields {
                 // Not the column's own field: the struct keeps a date or datetime as its stored text, in `<Col>Raw`.
                 if let crate::lower::LoweredFixtureValue::Literal { raw, .. } = &field.value
@@ -132,7 +135,7 @@ pub(crate) fn emit_go_fixtures(app: &App) -> EmittedFile {
             let label = record.label.as_str();
             let label_pascal = go_field_name(label);
             writeln!(s).unwrap();
-            writeln!(s, "func {ns}{label_pascal}() *{class_name} {{").unwrap();
+            writeln!(s, "func {ns}{label_pascal}() *{go_type} {{").unwrap();
             writeln!(
                 s,
                 "\tid := FixtureID({:?}, {:?})",
@@ -140,7 +143,7 @@ pub(crate) fn emit_go_fixtures(app: &App) -> EmittedFile {
                 label,
             )
             .unwrap();
-            writeln!(s, "\tr := {class_name}Find(id)").unwrap();
+            writeln!(s, "\tr := {go_type}Find(id)").unwrap();
             writeln!(
                 s,
                 "\tif r == nil {{ panic(\"fixture {}/{label} not loaded\") }}",

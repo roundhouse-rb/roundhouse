@@ -7,6 +7,9 @@
 use super::emit_and_run;
 use roundhouse::project::BuildTarget;
 
+#[path = "../support/go_namespaced_fixture.rs"]
+mod go_namespaced_fixture;
+
 fn with_models(models: &[(&str, &str, &str)]) -> emit_and_run::Overlay {
     let schema = std::fs::read_to_string("fixtures/real-blog/db/schema.rb").unwrap();
     let at = schema.find("  create_table").unwrap();
@@ -116,4 +119,37 @@ fn rust_appends_a_namespaced_model_s_record_methods_to_its_struct() {
     let model = std::fs::read_to_string(out.join("src/models/admin_note.rs")).unwrap();
     assert!(!model.contains("impl Admin::"), "{}", model.lines().filter(|l| l.starts_with("impl")).collect::<Vec<_>>().join("\n"));
     assert!(model.lines().filter(|l| *l == "impl Note {").count() >= 2, "{}", model.lines().filter(|l| l.starts_with("impl")).collect::<Vec<_>>().join("\n"));
+}
+
+/// #1820: Go's fixture loader names a namespaced model by its Go type
+/// (`AdminNote`), as the model and the test shims declare it; it wrote the
+/// Ruby constant (`r := NewAdmin::Note()`, `*Admin::Note`,
+/// `Admin::NoteFind(id)`), which doesn't parse. The nullable column is still
+/// found under the Ruby name: `body` keeps its `OptString`. A flat set with
+/// `_fixture: model_class: Admin::Tag` takes the model's name, not the set's.
+#[test]
+fn go_fixtures_name_a_namespaced_model_by_its_go_type() {
+    let (out, errors) = go_namespaced_fixture::app().emit(BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    let fixtures = std::fs::read_to_string(out.join("app/v2/fixtures_test.go")).unwrap();
+    assert!(!fixtures.contains("Admin::Note") && !fixtures.contains("Admin::Tag"), "{fixtures}");
+    for want in [
+        "r := NewAdminNote()",
+        "r.Body = OptString(\"B::C\")",
+        "func AdminNotesOne() *AdminNote {",
+        "r := AdminNoteFind(id)",
+        "r := NewAdminTag()",
+        "func TagsOne() *AdminTag {",
+        "r := AdminTagFind(id)",
+    ] {
+        assert!(fixtures.contains(want), "{want}: {fixtures}");
+    }
+}
+
+/// The fixture's model test on the ruby target (which writes it as
+/// `test/models/admin_note_test.rb`): the answers the Go run asserts
+/// (`go_toolchain`) are Ruby's.
+#[test]
+fn a_namespaced_model_s_fixture_loads_on_ruby() {
+    go_namespaced_fixture::app().run_test("test/models/admin_note_test.rb").assert_passes();
 }

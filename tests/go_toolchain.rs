@@ -33,6 +33,8 @@ mod go_test_literal_receiver;
 mod go_action_controller_api;
 #[path = "support/go_conditional_operand.rs"]
 mod go_conditional_operand;
+#[path = "support/go_namespaced_fixture.rs"]
+mod go_namespaced_fixture;
 #[path = "support/i18n_locales_app.rs"]
 #[allow(dead_code)]
 mod i18n_locales_app;
@@ -562,4 +564,22 @@ fn a_link_to_unless_block_over_an_expression_name_builds() {
 #[ignore]
 fn simple_format_renders() {
     assert_content_tag_test_passes(content_tag_options::app_rendering(simple_format::VIEW, simple_format::RENDERS));
+}
+
+/// #1820: a namespaced model's fixture file (`test/fixtures/admin/notes.yml`)
+/// passes the issue's `go vet ./app/v2/` and loads, and the model test that
+/// reads it back passes.
+#[test]
+#[ignore]
+fn a_namespaced_models_fixture_loads() {
+    let (emitted, errors) = go_namespaced_fixture::app().emit(roundhouse::project::BuildTarget::Go);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_go_passes("real-blog with namespaced fixtures", &emitted);
+    let output = Command::new("go")
+        .args(["test", "-count=1", "-v", "-run", "TestTheNamespacedFixtureLoads", "./app/v2/"])
+        .current_dir(&*emitted)
+        .output()
+        .expect("run go test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("--- PASS: TestTheNamespacedFixtureLoads"), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
 }

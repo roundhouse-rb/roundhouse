@@ -696,11 +696,13 @@ func main() {\n\
 /// the legacy-shape symbol references to the v2 names.
 fn emit_v2_test_files(app: &App) -> Vec<EmittedFile> {
     let mut out = Vec::new();
+    // Go type names (`Admin::Note` → `AdminNote`): the fixture loader writes
+    // `&AdminNote{}` and the model emit names the constructor `NewAdminNote()`.
     let model_names: Vec<String> = app
         .models
         .iter()
         .filter(|m| m.attributes.fields.keys().any(|k| k.as_str() != "id"))
-        .map(|m| m.name.0.as_str().to_string())
+        .map(|m| library::sanitize_type_name(m.name.0.as_str()))
         .collect();
     if !app.fixtures.is_empty() {
         let f = fixture::emit_go_fixtures(app);

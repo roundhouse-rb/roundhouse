@@ -202,7 +202,7 @@ def build(args: argparse.Namespace) -> int:
     # Reduce the serial project build while keeping dependencies optimized.
     selectors = [
         "--locked", "--lib", "--bins", "--test", "all_tests",
-        "--config", "profile.test.package.roundhouse.opt-level=0",
+        "--config", "profile.test.package.roundhouse.opt-level=1",
     ]
     command = nextest("archive", *selectors, "--profile", "ci", "--archive-file", str(archive))
     if args.timings:

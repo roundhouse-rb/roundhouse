@@ -520,7 +520,7 @@ jobs:
         run: |
           python3 scripts/ci-resources.py --out "$RUNNER_TEMP/unit-build-resources/docs" -- \
             cargo test --locked --doc \
-              --config 'profile.test.package.roundhouse.opt-level=0'
+              --config 'profile.test.package.roundhouse.opt-level=1'
       - name: Upload current-run test bundle
         id: unit-tests
         uses: actions/upload-artifact@v7

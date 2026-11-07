@@ -49,6 +49,8 @@ mod stylesheet_helper;
 mod stylesheet_source;
 #[path = "emit_and_run/time_tag.rs"]
 mod time_tag;
+#[path = "emit_and_run/nested_record_form.rs"]
+mod nested_record_form;
 #[path = "emit_and_run/attribute_name_escape.rs"]
 mod attribute_name_escape;
 #[path = "emit_and_run/multiparameter_params.rs"]

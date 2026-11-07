@@ -232,6 +232,94 @@ fn boolean_operands_keep_reachable_class_values() {
 
 const BOOLEAN_OUTPUT: &str = "class\nclass\nclass\nfalse\nclass\nother\nclass\ninstance\n\nclass\nclass\nclass\n";
 
+const RETURN_SOURCE: &str = r#"class Beacon
+  def self.label = "class"
+  def label = "instance"
+end
+module Catalog
+  def self.tuple(flag) = [(flag ? (return [Beacon.new, "early"]) : Beacon), "done"]
+  def self.array(flag) = [(flag ? (return [Beacon.new]) : Beacon)]
+  def self.hashed(flag) = { "item" => (flag ? (return { "item" => Beacon.new }) : Beacon) }
+  def self.keyed(flag) = { (flag ? (return { Beacon.new => "early" }) : Beacon) => "done" }
+  def self.boolean(flag) = [((flag ? (return [Beacon.new, "early"]) : nil) || Beacon), "done"]
+  def self.instance(flag) = [(flag ? (return [Beacon.new, "early"]) : Beacon.new), "done"]
+  def self.method_return(flag)
+    return Beacon.new if flag
+    Beacon
+  end
+  def self.method_class(flag)
+    return Beacon if flag
+    Beacon.new
+  end
+  def self.run
+    [tuple(false).first.label, tuple(true).first.label,
+      array(false).first.label, array(true).first.label,
+      hashed(false)["item"].label, hashed(true)["item"].label,
+      keyed(false).keys.first.label, keyed(true).keys.first.label,
+      boolean(false).first.label, boolean(true).first.label,
+      instance(false).first.label, instance(true).first.label,
+      method_return(false).label, method_return(true).label,
+      method_class(false).label, method_class(true).label]
+  end
+end
+"#;
+
+#[test]
+fn enclosing_returns_do_not_become_container_elements() {
+    let rbs = rbs(RETURN_SOURCE);
+    for expected in [
+        "def self.tuple: (bool flag) -> [(Beacon | singleton(Beacon)), String]",
+        "def self.array: (bool flag) -> Array[(Beacon | singleton(Beacon))]",
+        "def self.hashed: (bool flag) -> Hash[String, (Beacon | singleton(Beacon))]",
+        "def self.keyed: (bool flag) -> Hash[(Beacon | singleton(Beacon)), String]",
+        "def self.boolean: (bool flag) -> [(Beacon | singleton(Beacon)), String]",
+        "def self.instance: (bool flag) -> [Beacon, String]",
+        "def self.method_return: (bool flag) -> (Beacon | singleton(Beacon))",
+        "def self.method_class: (bool flag) -> (Beacon | singleton(Beacon))",
+    ] {
+        assert!(rbs.contains(expected), "missing {expected}\n{rbs}");
+    }
+}
+
+const RETURN_OUTPUT: &str = "class\ninstance\nclass\ninstance\nclass\ninstance\nclass\ninstance\nclass\ninstance\ninstance\ninstance\nclass\ninstance\ninstance\nclass\n";
+
+fn hoisted_return_source() -> String {
+    let mut source = RETURN_SOURCE.to_string();
+    for (name, early, tail) in [
+        ("tuple", "[Beacon.new, \"early\"]", "[Beacon, \"done\"]"),
+        ("array", "[Beacon.new]", "[Beacon]"),
+        ("hashed", "{ \"item\" => Beacon.new }", "{ \"item\" => Beacon }"),
+        ("keyed", "{ Beacon.new => \"early\" }", "{ Beacon => \"done\" }"),
+        ("boolean", "[Beacon.new, \"early\"]", "[(nil || Beacon), \"done\"]"),
+        ("instance", "[Beacon.new, \"early\"]", "[Beacon.new, \"done\"]"),
+    ] {
+        let line = source.lines().find(|line| line.starts_with(&format!("  def self.{name}("))).unwrap().to_string();
+        source = source.replace(&line, &format!("  def self.{name}(flag)\n    return {early} if flag\n    {tail}\n  end"));
+    }
+    source
+}
+
+#[test]
+fn return_containers_run_as_emitted_ruby() {
+    run(RETURN_SOURCE, false, RETURN_OUTPUT);
+    run(&hoisted_return_source(), false, RETURN_OUTPUT);
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn return_sidecars_seed_equivalent_hoisted_bodies_on_spinel() {
+    // Spinel refuses ReturnNode in literal expressions. Keep the original
+    // generated sidecars and exercise them with equivalent statement returns.
+    let mut files = emit(RETURN_SOURCE);
+    let hoisted = emit(&hoisted_return_source());
+    for file in &mut files {
+        if file.path.extension().is_some_and(|e| e == "rb") {
+            file.content = hoisted.iter().find(|other| other.path == file.path).unwrap().content.clone();
+        }
+    }
+    run_emitted(files, true, RETURN_OUTPUT);
+}
+
 #[test]
 fn boolean_containers_run_as_emitted_ruby() {
     run(BOOLEAN_SOURCE, false, BOOLEAN_OUTPUT);
@@ -244,9 +332,13 @@ fn boolean_containers_run_on_spinel_with_generated_sidecars() {
 }
 
 fn run(source: &str, native: bool, expected: &str) {
+    run_emitted(emit(source), native, expected);
+}
+
+fn run_emitted(files: Vec<roundhouse::emit::EmittedFile>, native: bool, expected: &str) {
     let dir = scratch::dir("class_container");
     let mut script = String::new();
-    for file in emit(source) {
+    for file in files {
         let path = dir.join(&file.path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, &file.content).unwrap();

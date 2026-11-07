@@ -1739,8 +1739,8 @@ impl<'a> BodyTyper<'a> {
                 for (k, v) in entries.iter_mut() {
                     let kt = self.analyze_expr(k, ctx);
                     let vt = self.analyze_expr(v, ctx);
-                    let kt = super::Analyzer::class_object_return_ty(k).unwrap_or(kt);
-                    let vt = super::Analyzer::class_object_return_ty(v).unwrap_or(vt);
+                    let kt = super::Analyzer::class_object_expr_ty(k).unwrap_or(kt);
+                    let vt = super::Analyzer::class_object_expr_ty(v).unwrap_or(vt);
                     key_ty = Some(match key_ty.take() {
                         Some(prev) => union_of(prev, kt),
                         None => kt,
@@ -1771,7 +1771,7 @@ impl<'a> BodyTyper<'a> {
                     let et = self.analyze_expr(e, ctx);
                     // A stored value keeps its class-object alternatives;
                     // the flat nominal type is only for receiver lookup.
-                    let et = super::Analyzer::class_object_return_ty(e).unwrap_or(et);
+                    let et = super::Analyzer::class_object_expr_ty(e).unwrap_or(et);
                     // `[*a, b]` holds `a`'s elements, not `a`.
                     let et = if matches!(&*e.node, ExprNode::Splat { .. }) {
                         match splat_elements(et) {
@@ -7346,12 +7346,12 @@ fn block_exits(e: &Expr, yielded: &mut Vec<Ty>, drop_false: bool) -> bool {
 
 pub(super) fn class_object_boolop_ty(left: &Expr, op: crate::expr::BoolOpKind, right: &Expr) -> Option<Ty> {
     use crate::expr::BoolOpKind::{And, Or};
-    let lt = super::Analyzer::class_object_return_ty(left)?;
+    let lt = super::Analyzer::class_object_expr_ty(left)?;
     let falsy = matches!(lt, Ty::Nil)
         || matches!(&*left.node, ExprNode::Lit { value: Literal::Bool { value: false } });
     let truthy = never_falsy(&lt)
         || matches!(&*left.node, ExprNode::Lit { value: Literal::Bool { value: true } });
-    let right = || super::Analyzer::class_object_return_ty(right);
+    let right = || super::Analyzer::class_object_expr_ty(right);
     Some(match op {
         Or if truthy => lt,
         And if falsy => lt,

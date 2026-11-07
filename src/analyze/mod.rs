@@ -5910,9 +5910,18 @@ impl Analyzer {
     /// `C.new`; the body typer's identity evidence does, including a local
     /// copy of `C`. An unresolved alternative keeps the whole return unknown.
     fn class_object_return_ty(body: &Expr) -> Option<Ty> {
+        Self::class_object_value_ty(body, true)
+    }
+
+    /// Values stored by an expression exclude returns from the enclosing method.
+    fn class_object_expr_ty(body: &Expr) -> Option<Ty> {
+        Self::class_object_value_ty(body, false)
+    }
+
+    fn class_object_value_ty(body: &Expr, include_returns: bool) -> Option<Ty> {
         let mut promoted = false;
         let mut tys = Vec::new();
-        for leaf in return_leaves(body) {
+        for leaf in value_leaves(body, include_returns) {
             let ty = leaf.ty.clone().unwrap_or_else(crate::analyze::body::unknown);
             // A runtime-created class has kind Class/Module but no named identity.
             let value = if let ExprNode::BoolOp { left, op, right, .. } = &*leaf.node {
@@ -11188,6 +11197,10 @@ mod yield_only_local_tests {
 }
 
 pub(crate) fn return_leaves(body: &Expr) -> Vec<&Expr> {
+    value_leaves(body, true)
+}
+
+fn value_leaves(body: &Expr, include_returns: bool) -> Vec<&Expr> {
     fn tails<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
         match &*e.node {
             ExprNode::If { then_branch, else_branch, .. } => {
@@ -11218,7 +11231,7 @@ pub(crate) fn return_leaves(body: &Expr) -> Vec<&Expr> {
     }
     let mut out = Vec::new();
     tails(body, &mut out);
-    returns(body, &mut out);
+    if include_returns { returns(body, &mut out); }
     out
 }
 
@@ -11244,7 +11257,7 @@ pub(crate) fn tuple_return_ty(body: &Expr) -> Option<Ty> {
         if elements.len() < 2 || elements.iter().any(|e| matches!(&*e.node, ExprNode::Splat { .. })) {
             return None;
         }
-        let tys: Vec<Ty> = elements.iter().map(Analyzer::class_object_return_ty).collect::<Option<_>>()?;
+        let tys: Vec<Ty> = elements.iter().map(Analyzer::class_object_expr_ty).collect::<Option<_>>()?;
         if tys.iter().any(|t| matches!(t, Ty::Var { .. })) {
             return None;
         }

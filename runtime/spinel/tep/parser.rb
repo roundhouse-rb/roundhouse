@@ -83,6 +83,9 @@ module Tep
             if req.req_headers.key?(name) && req.req_headers[name] != value
               return nil
             end
+          elsif name == "transfer-encoding"
+            value = value.gsub(/\A[ \t]+|[ \t]+\z/, "")
+            value = req.req_headers[name] + "," + value if req.req_headers.key?(name)
           else
             value = value.strip
           end
@@ -116,7 +119,7 @@ module Tep
       # request instead of appending them to the body or dropping them.
       body_start = end_of_headers + 4
       received = blob.bytesize - body_start
-      body_bytes = req.content_length
+      body_bytes = req.chunked? ? 0 : req.content_length
       if body_bytes < 0
         body_bytes = 0   # body_refusal will reject the invalid length
       end

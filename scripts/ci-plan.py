@@ -77,6 +77,7 @@ JRUBY_BIND_INPUTS = {
 }
 PARAM_BIND_TESTS = ["param_binds", "param_binds_values", "param_binds_planner", "param_binds_cleanup"]
 SPINEL_TESTS = [
+    "spinel_chunked_body",
     "spinel_stream_error",
     "did_you_mean",
     "validation_prepend",
@@ -559,6 +560,16 @@ def native_coverage(path):
         "runtime/spinel/tep/server_scheduled.rb", "runtime/spinel/tep/streamer.rb",
     }:
         suites.add("spinel_stream_error")
+    if path.startswith("tests/spinel_chunked_body") or path in {
+        "tests/spinel_toolchain/chunked_body.rs",
+        "tests/support/server_check_io.rb",
+        "tests/tep_server_harness.rb", "runtime/spinel/tep/chunked_body.rb",
+        "runtime/spinel/tep/request.rb", "runtime/spinel/tep/parser.rb",
+        "runtime/spinel/tep/net.rb", "runtime/spinel/tep/tep.rb",
+        "runtime/spinel/tep/server.rb", "runtime/spinel/tep/server_threaded.rb",
+        "runtime/spinel/tep/server_scheduled.rb",
+    }:
+        suites.add("spinel_chunked_body")
     if path.startswith("tests/spinel_faye_websocket/") or path == "runtime/spinel/faye_websocket.rb":
         suites.add("spinel_faye_websocket")
     if path.startswith(("tests/spinel_websocket_lifecycle", "runtime/spinel/tep/websocket")) or path in {

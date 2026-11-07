@@ -23,6 +23,7 @@ module Tep
     attr_accessor :json_body_malformed
     attr_accessor :remote_host
     attr_accessor :listener_transport
+    attr_accessor :body_failure_status
     attr_accessor :ivars
 
     def initialize
@@ -51,6 +52,7 @@ module Tep
       @raw_body     = +""             # same reasoning as req_headers
       @remote_host  = +""
       @listener_transport = ""
+      @body_failure_status = 0
       @passed       = false          # `pass` flag: skip to the next matching route
       @ivars        = Tep.str_hash   # per-request bag for `@name = ...`
                                      # set by handlers and `before` filters,
@@ -98,16 +100,27 @@ module Tep
       Tep.decimal_byte_count(@req_headers["content-length"])
     end
 
+    def chunked?
+      @req_headers["transfer-encoding"].downcase == "chunked"
+    end
+
     # What the server must answer instead of reading this request's body:
-    # 400 for unsupported Transfer-Encoding or an invalid Content-Length,
+    # 400 for invalid framing, 501 for an unsupported transfer coding,
     # 413 for a length past `max`, 0 to go ahead. Decided from the headers alone, so a refused
     # body is never read — each server asks this BEFORE its drain, since
     # the drain itself is what held the bytes.
     def body_refusal(max)
-      # There is no request chunk decoder. Even an empty field is a
-      # Transfer-Encoding, so check presence, not its string value.
       if @req_headers.key?("transfer-encoding")
-        return 400
+        return 400 if @req_headers.key?("content-length") || @http_version != "HTTP/1.1"
+        return 0 if chunked?
+        codings = @req_headers["transfer-encoding"].downcase.split(",", -1).map do |coding|
+          coding.gsub(/\A[ \t]+|[ \t]+\z/, "")
+        end
+        return 400 if codings.empty? || codings.any? { |coding| !coding.match?(/\A[!#$%&'*+.^_`|~0-9A-Za-z-]+\z/) }
+        return 400 if codings.count("chunked") > 1
+        return 400 if codings.length > 1 && codings.last != "chunked"
+        return 400 if ["compress", "deflate", "gzip"].include?(@req_headers["transfer-encoding"].downcase)
+        return 501
       end
       cl = content_length
       if cl < 0
@@ -180,7 +193,8 @@ module Tep
     # `application/x-www-form-urlencoded` and `multipart/form-data`
     # (see `parse_body_params`); JSON stays in @json_body_params and
     # @raw_body stays intact either way.
-    def consume_body(client_fd)
+    def consume_body(client_fd, input = InputBuffer.new)
+      return consume_chunked_body(client_fd, input, false) if chunked?
       cl = content_length
       # bytesize, not length: Content-Length counts bytes, and a body
       # carrying multibyte UTF-8 (a boost emoji, a multipart field)
@@ -248,7 +262,8 @@ module Tep
     # running while we wait for body bytes; a 5s per-recv timeout drops a
     # client that opened the request but never sent the body. Form parse
     # mirrors consume_body.
-    def consume_body_via_scheduler(client_fd)
+    def consume_body_via_scheduler(client_fd, input = InputBuffer.new)
+      return consume_chunked_body(client_fd, input, true) if chunked?
       cl = content_length
       while @raw_body.bytesize < cl
         ready = Tep::Scheduler.io_wait(client_fd, Tep::Scheduler::READ, 5)
@@ -274,7 +289,8 @@ module Tep
     # timed `wait_readable` parks this green thread until body bytes
     # arrive; a 5s per-recv timeout drops a client that opened the
     # request but never sent the body. Form parse mirrors consume_body.
-    def consume_body_via_io(io, client_fd)
+    def consume_body_via_io(io, client_fd, input = InputBuffer.new)
+      return consume_chunks(io, client_fd, input, false) if chunked?
       cl = content_length
       # bytesize throughout — same reasoning as consume_body above; on
       # this path the char/byte gap also cost a 5s wait per multibyte
@@ -294,6 +310,47 @@ module Tep
       if @raw_body.bytesize < cl
         return false
       end
+      parse_body_params
+      true
+    end
+
+    def consume_chunked_body(client_fd, input, scheduled)
+      return consume_chunks(nil, client_fd, input, true) if scheduled
+      begin
+        io = IO.for_fd(client_fd, autoclose: false)
+      rescue StandardError
+        return false
+      end
+      begin
+        consume_chunks(io, client_fd, input, scheduled)
+      ensure
+        io.close
+      end
+    end
+
+    def consume_chunks(io, client_fd, input, scheduled)
+      decoder = ChunkedBody.new(Tep.max_body_bytes)
+      decoder.feed(input.take_pending_input)
+      until decoder.finished?
+        if scheduled
+          return false if Tep::Scheduler.io_wait(client_fd, Tep::Scheduler::READ, 5) == 0
+        else
+          return false if io.nil?
+          return false if io.wait_readable(5).nil?
+        end
+        bytes = Sock.sphttp_recv_some(client_fd, 65535).b
+        if bytes.empty?
+          @body_failure_status = 400
+          return false
+        end
+        decoder.feed(bytes)
+      end
+      @body_failure_status = decoder.status
+      return false unless decoder.complete?
+      @raw_body = decoder.body
+      @req_headers.delete("transfer-encoding")
+      @req_headers["content-length"] = @raw_body.bytesize.to_s
+      input.keep_pending_input(decoder.pending_input)
       parse_body_params
       true
     end

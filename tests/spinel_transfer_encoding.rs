@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 #[test]
-fn transfer_codings_are_refused_before_dispatch() {
+fn transfer_codings_are_decoded_exactly_or_refused_before_dispatch() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let out = Command::new("ruby")
         .arg(root.join("tests/spinel_transfer_encoding.rb"))

@@ -12,6 +12,7 @@ require_relative "broadcast_subscription"
 # WebSocket stack must load before response.rb: Response#initialize
 # seeds an @ws_driver = Tep::WebSocket::Driver.new(0) slot.
 require_relative "websocket"
+require_relative "chunked_body"
 require_relative "request"
 require_relative "response"
 require_relative "parser"

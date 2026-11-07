@@ -35,7 +35,7 @@ end
 # opens a stream, which is spinel's business, not this test's.
 %w[
   tep_core url net streamer broadcast_subscription websocket
-  request response parser server server_threaded server_scheduled
+  chunked_body request response parser server server_threaded server_scheduled
 ].each do |f|
   require_relative "../runtime/spinel/tep/#{f}"
 end

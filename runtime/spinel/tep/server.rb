@@ -235,7 +235,11 @@ module Tep
         send_simple(client, refusal, refusal == 413 ? "request body too large" : "bad request")
         return false
       end
-      return false unless req.consume_body(client)
+      unless req.consume_body(client, input)
+        failure = req.body_failure_status
+        send_simple(client, failure, failure == 413 ? "request body too large" : "bad request") if failure != 0
+        return false
+      end
       res = Response.new
       begin
         @app.dispatch(req, res)

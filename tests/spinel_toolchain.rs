@@ -158,6 +158,8 @@ mod strong_params;
 mod params_wrapper;
 #[path = "spinel_toolchain/json_request_values.rs"]
 mod json_request_values;
+#[path = "spinel_toolchain/chunked_body.rs"]
+mod chunked_body;
 #[path = "spinel_toolchain/multipart_file_parts.rs"]
 mod multipart_file_parts;
 #[path = "support/default_format_dispatch.rs"]

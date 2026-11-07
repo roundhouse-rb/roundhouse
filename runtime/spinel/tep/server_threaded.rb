@@ -246,7 +246,11 @@ module Tep
           return false
         end
 
-        return false unless req.consume_body_via_io(io, client)
+        unless req.consume_body_via_io(io, client, input)
+          failure = req.body_failure_status
+          Tep::Server::Threaded.send_simple(client, failure, failure == 413 ? "request body too large" : "bad request") if failure != 0
+          return false
+        end
 
         res = Response.new
         begin

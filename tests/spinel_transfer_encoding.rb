@@ -1,4 +1,4 @@
-# Tep has no request chunk decoder: never dispatch a transfer-coded body.
+# Only supported, unambiguous transfer coding reaches the app.
 require_relative "tep_server_harness"
 
 FIELDS = [
@@ -25,14 +25,17 @@ SERVERS.each_key do |server|
               "2\r\né\r\n0\r\n\r\n" + "x" * 8192
       result = serve(server, bytes)
       status, recvs, bodies, raised, keep_alive = result
+      accepted = version == "1.1" && ["Transfer-Encoding: chunked\r\n", "tRaNsFeR-EnCoDiNg: CHUNKED\r\n"].include?(fields)
+      unsupported = version == "1.1" && ["Transfer-Encoding: identity\r\n", "Transfer-Encoding: gzip, chunked\r\n"].include?(fields)
+      expected = accepted ? 200 : (unsupported ? 501 : 400)
       check(
-        "#{server}: #{fields.inspect} is 400 without a body drain or dispatch",
-        raised.nil? && status == 400 && recvs == 1 && bodies.empty?,
+        "#{server}: #{fields.inspect} answers #{expected} with exact body framing",
+        raised.nil? && status == expected && recvs == 1 && bodies.map(&:b) == (accepted ? ["é".b] : []),
         describe(*result)
       )
       check(
-        "#{server}: a refused transfer coding closes the connection",
-        raised.nil? && keep_alive == false && Sock.wire.out.include?("Connection: close\r\n"),
+        "#{server}: only accepted chunked coding keeps the connection",
+        raised.nil? && keep_alive == accepted && (accepted || Sock.wire.out.include?("Connection: close\r\n")),
         describe(*result)
       )
     end

@@ -18,6 +18,7 @@
 mod alba;
 mod conditional_permit;
 mod unreachable_views;
+mod locale_templates;
 mod view_paths;
 mod uncalled_helper_copies;
 mod written_names;

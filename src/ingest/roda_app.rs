@@ -41,7 +41,7 @@ use crate::ty::Row;
 use crate::vfs::Vfs;
 use crate::{ClassId, Symbol};
 
-use super::app::{read_erb_files, read_rb_files};
+use super::app::{read_rb_files, read_view_templates, skip_non_locale_segments};
 use super::controller::infer_render_template;
 use super::expr::{ingest_expr, ingest_ruby_program};
 use super::model::ingest_method;
@@ -187,7 +187,8 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
         // channel a Rails `<%# locals: (…) %>` header feeds.
         let mut part_locals: crate::det::HashMap<String, Vec<Symbol>> =
             crate::det::HashMap::default();
-        for (erb_path, engine) in read_erb_files(vfs, &views_dir)? {
+        let (erb_files, lone_segments) = read_view_templates(vfs, &views_dir)?;
+        for (erb_path, engine) in erb_files {
             let source = vfs.read_to_string(&erb_path)?;
             let rel = erb_path
                 .strip_prefix(&views_dir)
@@ -209,6 +210,7 @@ pub fn ingest_roda_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestR
                 app.views.push(view);
             }
         }
+        skip_non_locale_segments(&mut app, &lone_segments)?;
         for view in &mut app.views {
             if let Some(locals) = part_locals.get(view.name.as_str()) {
                 view.strict_locals = Some(

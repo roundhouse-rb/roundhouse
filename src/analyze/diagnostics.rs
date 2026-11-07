@@ -1041,7 +1041,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
             .views
             .iter()
             .filter(|v| app.unreachable_views.contains(&v.name))
-            .map(|v| v.body.span.file)
+            .flat_map(|v| std::iter::once(v.body.span.file).chain(v.variant_files()))
             .collect();
         for d in &mut out {
             if d.severity == crate::diagnostic::Severity::Error && files.contains(&d.span.file) {

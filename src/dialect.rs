@@ -2311,6 +2311,27 @@ pub struct View {
     pub jbuilder: bool,
 }
 
+impl View {
+    /// The other files a template Rails picks by locale renders from:
+    /// `ingest::locale_templates` makes `show.en.html.erb` and
+    /// `show.de.html.erb` one view, whose body (the default locale's
+    /// file) holds each other locale's statements as an arm of a `case`.
+    pub fn variant_files(&self) -> Vec<crate::span::FileId> {
+        let mut out = Vec::new();
+        let ExprNode::Seq { exprs } = &*self.body.node else { return out };
+        for e in exprs {
+            let ExprNode::Case { arms, .. } = &*e.node else { continue };
+            for arm in arms {
+                let file = arm.body.span.file;
+                if file != self.body.span.file && !arm.body.span.is_synthetic() && !out.contains(&file) {
+                    out.push(file);
+                }
+            }
+        }
+        out
+    }
+}
+
 // Tests -----------------------------------------------------------------
 
 /// A Ruby test file (typically `test/models/*_test.rb`). One class per

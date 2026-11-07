@@ -419,6 +419,46 @@ fn filters_that_read_action_name_compile() {
     );
 }
 
+/// `<%= render @articles %>` as the view's only read of `@articles`.
+/// With no defensive clone to borrow from, the emitted `iter_mut()`
+/// borrows the view param itself, so the param must be declared `mut`.
+#[test]
+#[ignore]
+fn single_read_collection_render_compiles() {
+    let app_dir = scratch_dir("single-read-render-app").join("app");
+    let copied = Command::new("cp")
+        .arg("-R")
+        .arg(roundhouse::fixtures::real_blog())
+        .arg(&app_dir)
+        .status()
+        .expect("copy real-blog");
+    assert!(copied.success(), "copy real-blog");
+    let view = app_dir.join("app/views/articles/index.html.erb");
+    let source = std::fs::read_to_string(&view).expect("read view");
+    let start = source.find("<% if @articles.any? %>").expect("collection guard");
+    let end = source[start..].find("<% end %>").expect("guard end") + start + "<% end %>".len();
+    let edited = format!("{}<%= render @articles %>{}", &source[..start], &source[end..]);
+    assert_eq!(edited.matches("@articles").count(), 1, "the view reads @articles once");
+    std::fs::write(&view, edited).expect("write view");
+
+    let scratch = scratch_dir("single-read-render");
+    generate_project(&app_dir, &scratch);
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&scratch)
+        .output()
+        .expect("run cargo check");
+
+    assert!(
+        output.status.success(),
+        "cargo check failed on the emitted project at {}:\n\
+         \n=== stderr ===\n{}",
+        scratch.display(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 #[test]
 #[ignore]
 fn real_blog_i18n_locales_run() {

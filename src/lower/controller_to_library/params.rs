@@ -1340,7 +1340,8 @@ pub fn first_permit_in(body: &Expr) -> Option<(Symbol, Vec<Symbol>, Vec<String>)
 
 /// Push the permit list of each value `expr` can evaluate to, or answer
 /// false when one of them is not a permit. A local read resolves to the
-/// values `body` writes to that local.
+/// values `body` writes to that local; `except` and a `tap` block are
+/// seen through to their receiver.
 fn collect_returned_permits<'a>(
     expr: &'a Expr,
     body: &'a Expr,
@@ -1383,9 +1384,25 @@ fn collect_returned_permits<'a>(
         ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } | ExprNode::Return { value } => vec![value],
         ExprNode::BoolOp { left, right, .. } | ExprNode::RescueModifier { expr: left, fallback: right } => vec![left, right],
         ExprNode::Send { recv: Some(recv), method, .. } if method.as_str() == "except" => vec![recv],
+        ExprNode::Send { recv: Some(recv), method, args, block: Some(block), .. }
+            if method.as_str() == "tap" && args.is_empty() && !block_can_leave(block) => vec![recv],
         _ => Vec::new(),
     };
     !sources.is_empty() && sources.into_iter().all(|source| collect_returned_permits(source, body, resolving, permits))
+}
+
+/// Whether `block` can leave with a value other than its call's result:
+/// `tap { |p| ... }` returns its receiver unless the block ends it with
+/// `break value`, or ends the whole method with `return value`. A `break`
+/// in a nested block ends that block's call and is skipped; one in a loop
+/// is counted, and so is a `return` at any depth, which can only leave a
+/// helper untyped. A forwarded block (`tap(&check)`) isn't read: it counts.
+fn block_can_leave(block: &Expr) -> bool {
+    let ExprNode::Lambda { body, .. } = &*block.node else { return true };
+    let mut leaves = false;
+    for_each_outside_lambdas(body, &mut |e| leaves |= matches!(&*e.node, ExprNode::Break { .. }));
+    walk_all(body, &mut |e| leaves |= matches!(&*e.node, ExprNode::Return { .. }));
+    leaves
 }
 
 fn for_each_outside_lambdas<'a>(expr: &'a Expr, f: &mut dyn FnMut(&'a Expr)) {
@@ -1456,6 +1473,19 @@ fn rewrite_tail(e: &Expr, spec: &ParamsSpec) -> Expr {
                 cond: cond.clone(),
                 then_branch: rewrite_tail(then_branch, spec),
                 else_branch: rewrite_tail(else_branch, spec),
+            }),
+            ..e.clone()
+        },
+        // `<value>.tap { … }` answers `<value>` (see `block_can_leave`),
+        // so the rewrite belongs on the receiver.
+        ExprNode::Send { recv: Some(recv), method, args, block: Some(b), parenthesized }
+            if method.as_str() == "tap" && args.is_empty() && !block_can_leave(b) => Expr {
+            node: Box::new(ExprNode::Send {
+                recv: Some(rewrite_tail(recv, spec)),
+                method: method.clone(),
+                args: args.clone(),
+                block: Some(b.clone()),
+                parenthesized: *parenthesized,
             }),
             ..e.clone()
         },

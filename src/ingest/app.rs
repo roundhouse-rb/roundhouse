@@ -9221,32 +9221,84 @@ pub(super) fn app_roots<V: Vfs + ?Sized>(
 }
 
 /// In-repository `PATH` sources, normalized once for app and library discovery.
+///
+/// A remote that is itself a gem (`gem "billing", path: "lib/billing"`,
+/// a `.gemspec` in that directory) is one directory. A Bundler path block
+/// (`path "engines" do gem "accounts" … end`) locks the parent as the
+/// remote and each gem as a spec; those gems are the child directories
+/// whose `.gemspec` names a spec of that source. The parent is not a gem.
+/// A remote with no gemspec and no matching child stays the one directory
+/// it was, so a path source that is not a block is unchanged.
 fn path_gem_dirs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<PathBuf> {
     let Ok(lock) = vfs.read_to_string(&dir.join("Gemfile.lock")) else { return Vec::new() };
     let mut dirs = Vec::new();
-    for remote in crate::gems::lock_path_remotes(&lock) {
-        let remote = Path::new(&remote);
-        let remote = remote.strip_prefix(dir).unwrap_or(remote);
-        let mut relative = PathBuf::new();
-        let mut inside = true;
-        for component in remote.components() {
-            match component {
-                Component::CurDir => {}
-                Component::Normal(part) => relative.push(part),
-                _ => inside = false,
-            }
-        }
-        // The app itself already contributes its app/ and lib/ trees.
-        if !inside || relative.as_os_str().is_empty() {
+    for source in crate::gems::lock_path_sources(&lock) {
+        let Some(gem) = path_remote_inside_app(dir, &source.remote) else { continue };
+        if path_has_symlink_component(vfs, dir, &gem) || !vfs.is_dir(&gem) {
             continue;
         }
-        let gem = dir.join(relative);
-        if !path_has_symlink_component(vfs, dir, &gem) && vfs.is_dir(&gem) {
-            dirs.push(gem);
+        if gemspec_names(vfs, &gem).is_empty() {
+            let children = child_gem_dirs(vfs, dir, &gem, &source.specs);
+            if !children.is_empty() {
+                dirs.extend(children);
+                continue;
+            }
         }
+        dirs.push(gem);
     }
     dirs.sort();
     dirs.dedup();
+    dirs
+}
+
+/// `remote` as a directory inside `dir`. Absolute remotes, parent-directory
+/// components, and the app root itself are not path gems.
+fn path_remote_inside_app(dir: &Path, remote: &str) -> Option<PathBuf> {
+    let remote = Path::new(remote);
+    let remote = remote.strip_prefix(dir).unwrap_or(remote);
+    let mut relative = PathBuf::new();
+    for component in remote.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => relative.push(part),
+            _ => return None,
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return None;
+    }
+    Some(dir.join(relative))
+}
+
+/// Gem names declared by `*.gemspec` files directly in `dir`.
+fn gemspec_names<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<String> {
+    let Ok(entries) = vfs.read_dir(dir) else { return Vec::new() };
+    let mut names = Vec::new();
+    for entry in entries {
+        if vfs.is_dir(&entry) {
+            continue;
+        }
+        let Some(name) = entry.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(stem) = name.strip_suffix(".gemspec") else { continue };
+        if !stem.is_empty() {
+            names.push(stem.to_string());
+        }
+    }
+    names
+}
+
+/// Child directories of a path-block remote that are gems of that source.
+fn child_gem_dirs<V: Vfs + ?Sized>(vfs: &V, dir: &Path, parent: &Path, specs: &[String]) -> Vec<PathBuf> {
+    let Ok(entries) = vfs.read_dir(parent) else { return Vec::new() };
+    let mut dirs = Vec::new();
+    for entry in entries {
+        if !vfs.is_dir(&entry) || path_has_symlink_component(vfs, dir, &entry) {
+            continue;
+        }
+        if gemspec_names(vfs, &entry).iter().any(|name| specs.iter().any(|spec| spec == name)) {
+            dirs.push(entry);
+        }
+    }
     dirs
 }
 

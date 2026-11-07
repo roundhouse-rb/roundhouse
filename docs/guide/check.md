@@ -44,6 +44,37 @@ These entries come from `path:` declarations in the Gemfile:
 gem "billing", path: "components/billing"
 ```
 
+`path "engines" do` locks one `PATH` section. The `remote` of that section
+is the shared directory, and that directory is not a gem:
+
+```ruby
+path "engines" do
+  gem "accounts"
+  gem "billing"
+end
+```
+
+```text
+PATH
+  remote: engines
+  specs:
+    accounts (0.1.0)
+    billing (0.1.0)
+```
+
+`check` walks an immediate child of that remote when the child's gemspec
+filename is one of the spec names listed under the remote. The match is
+the filename stem, `accounts` from `accounts.gemspec`. The `s.name` inside
+the file is not read.
+
+A child directory that exists on disk and is absent from those spec names
+is left closed. With the lockfile above, `engines/not_in_lock/` can sit
+on disk with its own gemspec, and `check` leaves that directory closed.
+
+A remote directory that has its own gemspec stays that one gem.
+`gem "billing", path: "components/billing"` is this shape: `check` reads
+`components/billing` and leaves any child directory inside it closed.
+
 Each in-repository path gem contributes its `lib/` tree, even without
 an `app/` directory or a `Rails::Engine` subclass.
 An engine also contributes its `app/` tree when its `lib/` declares

@@ -261,24 +261,62 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     &RUNTIME_GEMS
 }
 
+/// One `PATH` source in a `Gemfile.lock`: the recorded directory and the
+/// gem names listed under it. A single `path:` gem has one spec. A path
+/// block (`path "engines" do`) records the parent once and lists each gem.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathSource {
+    pub remote: String,
+    pub specs: Vec<String>,
+}
+
+/// Every `PATH` source in a `Gemfile.lock`, lock order. Remotes are as
+/// written: relative to the lockfile unless the Gemfile gave an absolute
+/// path. Spec names are the indent-4 lines, not the indent-6 dependencies.
+pub fn lock_path_sources(text: &str) -> Vec<PathSource> {
+    let mut sources = Vec::new();
+    let mut in_path = false;
+    let mut current: Option<PathSource> = None;
+    for line in text.lines() {
+        if !line.starts_with(' ') {
+            if let Some(source) = current.take() {
+                sources.push(source);
+            }
+            in_path = line.trim() == "PATH";
+            continue;
+        }
+        if !in_path {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let body = line.trim();
+        if indent == 2 {
+            if let Some(remote) = body.strip_prefix("remote: ") {
+                if let Some(source) = current.take() {
+                    sources.push(source);
+                }
+                current = Some(PathSource { remote: remote.trim().to_string(), specs: Vec::new() });
+            }
+        } else if indent == 4 && current.is_some() && body != "specs:" {
+            let name = body.split(' ').next().unwrap_or(body);
+            if !name.is_empty() {
+                current.as_mut().expect("just checked").specs.push(name.to_string());
+            }
+        }
+    }
+    if let Some(source) = current {
+        sources.push(source);
+    }
+    sources
+}
+
 /// The `remote:` of every `PATH` section in a `Gemfile.lock`, lock
 /// order — the directories of the app's path-sourced gems
 /// (`gem "billing", path: "lib/billing"` locks as `remote: lib/billing`),
 /// as written: relative to the lockfile unless the Gemfile gave an
 /// absolute path.
 pub fn lock_path_remotes(text: &str) -> Vec<String> {
-    let mut remotes = Vec::new();
-    let mut in_path = false;
-    for line in text.lines() {
-        if !line.starts_with(' ') {
-            in_path = line.trim() == "PATH";
-        } else if in_path {
-            if let Some(remote) = line.strip_prefix("  remote: ") {
-                remotes.push(remote.trim().to_string());
-            }
-        }
-    }
-    remotes
+    lock_path_sources(text).into_iter().map(|source| source.remote).collect()
 }
 
 /// A parsed `Gemfile.lock`: every resolved spec and the direct
@@ -2227,6 +2265,13 @@ GEM
     rails (8.0.2)
 ";
         assert_eq!(lock_path_remotes(lock), vec!["lib/billing", "../shared"]);
+        assert_eq!(
+            lock_path_sources(lock),
+            vec![
+                PathSource { remote: "lib/billing".into(), specs: vec!["billing".into()] },
+                PathSource { remote: "../shared".into(), specs: vec!["shared".into()] },
+            ]
+        );
         assert!(lock_path_remotes(LOCK).is_empty());
         let parsed = Lockfile::parse(lock);
         assert!(parsed.is_from_git("widgets"));

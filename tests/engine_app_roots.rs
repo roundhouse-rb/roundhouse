@@ -113,6 +113,55 @@ fn path_engine_app_is_an_app_root() {
     );
 }
 
+/// A Bundler path block locks the parent directory and lists each gem
+/// as a spec. The parent is not a gem: the listed children are, and a
+/// child the lockfile does not name is not. A remote that is itself a
+/// gem stays that one directory.
+#[test]
+fn a_path_block_walks_listed_child_engines() {
+    let lock = "\
+PATH
+  remote: engines
+  specs:
+    accounts (0.1.0)
+    billing (0.1.0)
+
+PATH
+  remote: lib/catalog
+  specs:
+    catalog (0.1.0)
+
+DEPENDENCIES
+  accounts!
+  billing!
+  catalog!
+";
+    let gemspec = "Gem::Specification.new { |s| s.name = 'local' }\n";
+    let app = tree_app(&[
+        ("Gemfile.lock", lock),
+        ("db/schema.rb", SCHEMA),
+        ("app/models/application_record.rb", APPLICATION_RECORD),
+        ("engines/accounts/accounts.gemspec", gemspec),
+        ("engines/accounts/lib/accounts/engine.rb", "module Accounts\n  class Engine < ::Rails::Engine\n  end\nend\n"),
+        ("engines/accounts/app/models/account.rb", "class Account < ApplicationRecord\nend\n"),
+        ("engines/billing/billing.gemspec", gemspec),
+        ("engines/billing/lib/billing/engine.rb", ENGINE),
+        ("engines/billing/app/models/invoice.rb", INVOICE_MODEL),
+        ("engines/not_in_lock/not_in_lock.gemspec", gemspec),
+        ("engines/not_in_lock/lib/not_in_lock/engine.rb", "module NotInLock\n  class Engine < ::Rails::Engine\n  end\nend\n"),
+        ("engines/not_in_lock/app/models/secret.rb", "class Secret < ApplicationRecord\nend\n"),
+        ("lib/catalog/catalog.gemspec", gemspec),
+        ("lib/catalog/lib/catalog/engine.rb", "module Catalog\n  class Engine < ::Rails::Engine\n  end\nend\n"),
+        ("lib/catalog/app/models/catalog_item.rb", "class CatalogItem < ApplicationRecord\nend\n"),
+    ]);
+
+    assert_eq!(
+        app.app_roots,
+        vec!["app", "engines/accounts/app", "engines/billing/app", "lib/catalog/app"]
+    );
+    assert!(!app.app_roots.iter().any(|root| root == "engines/app" || root.contains("not_in_lock")));
+}
+
 /// (b) A path gem with an `app/` directory but no `Rails::Engine`
 /// subclass is a plain library: Rails never loads its `app/`.
 #[test]

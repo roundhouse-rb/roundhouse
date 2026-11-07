@@ -1482,6 +1482,24 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ]);
     }
     register_stdlib_class(classes, "Mutex", &[], &[]);
+    // `require "weakref"`: Ruby's own on the ruby family, packages/weakref
+    // on spinel. `__getobj__` answers whatever the reference was made over,
+    // so it stays untyped; the referent's methods go through it as through
+    // any delegate.
+    let weak_ref = class("WeakRef");
+    register_stdlib_class(classes, "WeakRef", &[("new", weak_ref)], &[
+        ("weakref_alive?", Ty::Bool), ("__getobj__", Ty::Untyped), ("__setobj__", Ty::Untyped),
+    ]);
+    register_stdlib_class(classes, "WeakRef::RefError", &[], &[]);
+    // `require "observer"`: the mixin an `include Observable` names. Its
+    // methods answer what observer.rb's do: `changed` and `changed?` the
+    // state flag, `count_observers` the count; the rest hand back the
+    // observer list or an observer, which no caller reads.
+    register_stdlib_class(classes, "Observable", &[], &[
+        ("add_observer", Ty::Untyped), ("delete_observer", Ty::Untyped), ("delete_observers", Ty::Untyped),
+        ("count_observers", Ty::Int), ("changed", Ty::Bool), ("changed?", Ty::Bool),
+        ("notify_observers", Ty::Untyped),
+    ]);
     // The queue constructors, Thread's core aliases, and the standard
     // mixins likewise need exact entries for source constant resolution.
     // No queue element, synchronization or mixin method types are added;

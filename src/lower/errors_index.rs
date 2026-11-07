@@ -1,5 +1,6 @@
 //! `errors[:field]` grounding: `<recv>.errors[:field]` →
-//! `<recv>.error_messages_for("field")`.
+//! `<recv>.error_messages_for("field")`, and `messages_for(:field)` with
+//! it; `full_messages_for(:field)` → `<recv>.error_full_messages_for("field")`.
 //!
 //! The shared runtime's `errors` is a plain `Array[String]` of FULL
 //! messages, and `error_details` holds the `ActiveRecord::ErrorDetail`
@@ -248,6 +249,7 @@ fn rewrite(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     expr.node.for_each_child_mut(&mut |c| rewrite(c, diags));
     rewrite_messages(expr, diags);
     rewrite_index(expr, diags);
+    rewrite_messages_for(expr, diags);
     rewrite_include(expr, diags);
     rewrite_of_kind(expr, diags);
     rewrite_delete(expr, diags);
@@ -286,8 +288,39 @@ fn rewrite_include(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
     *expr = has_errors_on(owner.clone(), &field, expr.span);
 }
 
-/// The field `errors.delete` removes, when it is the only argument and a literal.
-pub(crate) fn delete_field(args: &[Expr]) -> Option<String> {
+/// `errors.messages_for(:field)` reads as `errors[:field]` does, and `full_messages_for(:field)` the same details' full messages, as Rails' `where(:field).map(&:full_message)`.
+fn rewrite_messages_for(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
+    let ExprNode::Send { recv: Some(reader), method, args, block: None, .. } = &*expr.node else { return };
+    if !matches!(method.as_str(), "messages_for" | "full_messages_for") || !is_model_errors_read(reader) {
+        return;
+    }
+    let Some(field) = literal_field(args) else {
+        let mut d = crate::lower::residue_diagnostic(
+            "errors_index",
+            &format!("errors.{method}"),
+            expr.span,
+            "dynamic field",
+            format!("`errors.{method}` with a field that is not a literal is not grounded"),
+        );
+        d.severity = crate::diagnostic::Severity::Error;
+        diags.push(d);
+        return;
+    };
+    let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
+    *expr = if method.as_str() == "messages_for" {
+        messages_on(owner.clone(), &field, expr.span)
+    } else {
+        full_messages_on(owner.clone(), &field, expr.span)
+    };
+}
+
+/// Shared with analyze, which types `messages_for` and `full_messages_for` only on the shape `rewrite_messages_for` grounds: a literal field asked of an `errors` read, not of a local holding one.
+pub(crate) fn messages_for_grounds(recv: Option<&Expr>, args: &[Expr]) -> bool {
+    recv.is_some_and(is_errors_read) && literal_field(args).is_some()
+}
+
+/// The field, when it is the only argument and a literal: the one `errors.delete` removes and `messages_for` reads.
+pub(crate) fn literal_field(args: &[Expr]) -> Option<String> {
     match args {
         [field] => match &*field.node {
             ExprNode::Lit { value: Literal::Sym { value } } => Some(value.as_str().to_string()),
@@ -305,7 +338,7 @@ fn rewrite_delete(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
         return;
     }
     let ExprNode::Send { recv: owner, .. } = &*reader.node else { unreachable!("an errors reader") };
-    let (Some(field), true) = (delete_field(args), super::errors_add::owner_reads_once(owner.as_ref())) else {
+    let (Some(field), true) = (literal_field(args), super::errors_add::owner_reads_once(owner.as_ref())) else {
         let mut d = crate::lower::residue_diagnostic(
             "errors_index",
             "errors.delete",
@@ -613,11 +646,20 @@ fn rewrite_index(expr: &mut Expr, diags: &mut Vec<Diagnostic>) {
 
 /// `<owner>.error_messages_for("<field>")`, typed.
 pub(crate) fn messages_on(owner: Option<Expr>, field: &str, span: crate::span::Span) -> Expr {
+    field_read(owner, "error_messages_for", field, span)
+}
+
+/// `<owner>.error_full_messages_for("<field>")`, typed.
+fn full_messages_on(owner: Option<Expr>, field: &str, span: crate::span::Span) -> Expr {
+    field_read(owner, "error_full_messages_for", field, span)
+}
+
+fn field_read(owner: Option<Expr>, reader: &str, field: &str, span: crate::span::Span) -> Expr {
     let mut lit = Expr::new(span, ExprNode::Lit { value: Literal::Str { value: field.to_string() } });
     lit.ty = Some(Ty::Str);
     let mut e = Expr::new(
         span,
-        ExprNode::Send { recv: owner, method: Symbol::from("error_messages_for"), args: vec![lit], block: None, parenthesized: true },
+        ExprNode::Send { recv: owner, method: Symbol::from(reader), args: vec![lit], block: None, parenthesized: true },
     );
     // Stamp the result: callers run *after* analyze, and the post-lowering
     // `diagnose` walk reads stamped types without re-dispatching.

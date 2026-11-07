@@ -554,7 +554,12 @@ fn untyped_subexpressions_baseline() {
     // reads its value three times and `initialize` its `json_coder`
     // once, vars on this RBS-less probe (+4 in active_record/types.rb);
     // types.rbs types them for the RBS-paired gate.
-    const CEILING: usize = 1232;
+    // MEASURED 1234 on 2026-11-07 (on 1232): the ruby-family reopen of
+    // `Base#error_full_messages_for` answers the full messages frozen; it
+    // reads each error detail and its `attribute`, vars on this RBS-less
+    // probe (+2 in active_record/connection.rb); connection.rbs types it
+    // for the RBS-paired gate.
+    const CEILING: usize = 1234;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

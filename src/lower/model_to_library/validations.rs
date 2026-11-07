@@ -536,16 +536,20 @@ fn push_active_model_validation_surface(methods: &mut Vec<MethodDef>, model: &Mo
             mutates_self: false,
             block_param: None,
         });
-    }    if !defines("error_messages_for") {
+    }
+    for (name, message) in [("error_messages_for", "message"), ("error_full_messages_for", "full_message")] {
+        if defines(name) {
+            continue;
+        }
         methods.push(MethodDef {
             visibility: crate::dialect::MethodVisibility::Public,
             unsupported_formals: None,
             has_anonymous_block: false,
             name_span: crate::span::Span::synthetic(),
-            name: Symbol::from("error_messages_for"),
+            name: Symbol::from(name),
             receiver: MethodReceiver::Instance,
             params: vec![crate::dialect::Param::positional(Symbol::from("attribute"))],
-            body: error_messages_for_body(span, errors_readers),
+            body: error_messages_for_body(span, errors_readers, message),
             signature: Some(fn_sig(vec![(Symbol::from("attribute"), Ty::Str)], Ty::Array { elem: std::sync::Arc::new(Ty::Str) })),
             effects: EffectSet::default(),
             enclosing_class: Some(model.name.0.clone()),
@@ -578,10 +582,12 @@ fn errors_reader(span: Span, errors_readers: ErrorsReaders, name: &str, ty: Ty) 
     read
 }
 
-/// `out = []; error_details.each { |e| out << e.message if e.attribute == attribute }; out`,
-/// the body `ActiveRecord::Base#error_messages_for` has in the shared runtime
-/// (`@error_details.each` for `ErrorsReaders::FieldRead`).
-fn error_messages_for_body(span: Span, errors_readers: ErrorsReaders) -> Expr {
+/// `out = []; error_details.each { |e| out << e.<message> if e.attribute == attribute }; out`,
+/// the body `ActiveRecord::Base#error_messages_for` (`message`) and
+/// `#error_full_messages_for` (`full_message`) have in the shared runtime
+/// (`@error_details.each` for `ErrorsReaders::FieldRead`). The ruby family answers the full
+/// messages frozen, as its connection.rb reopen does; a strict target has no frozen Array.
+fn error_messages_for_body(span: Span, errors_readers: ErrorsReaders, message: &str) -> Expr {
     let str_array = Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
     let typed = |node: ExprNode, ty: Ty| {
         let mut e = Expr::new(span, node);
@@ -597,7 +603,7 @@ fn error_messages_for_body(span: Span, errors_readers: ErrorsReaders) -> Expr {
     let picked = typed(
         ExprNode::If {
             cond: call(call(error(), "attribute", vec![], Ty::Str), "==", vec![var("attribute", Ty::Str)], Ty::Bool),
-            then_branch: call(var("out", str_array.clone()), "<<", vec![call(error(), "message", vec![], Ty::Str)], str_array.clone()),
+            then_branch: call(var("out", str_array.clone()), "<<", vec![call(error(), message, vec![], Ty::Str)], str_array.clone()),
             else_branch: typed(ExprNode::Lit { value: Literal::Nil }, Ty::Nil),
         },
         Ty::Nil,
@@ -631,7 +637,12 @@ fn error_messages_for_body(span: Span, errors_readers: ErrorsReaders) -> Expr {
             value: typed(ExprNode::Array { elements: vec![], style: ArrayStyle::default() }, str_array.clone()),
         },
     );
-    seq(vec![init, each, var("out", str_array)])
+    let answer = if message == "full_message" && errors_readers == ErrorsReaders::CreatedOnFirstRead {
+        call(var("out", str_array.clone()), "freeze", vec![], str_array)
+    } else {
+        var("out", str_array)
+    };
+    seq(vec![init, each, answer])
 }
 
 /// Produce the list of helper-call expressions for one `ValidationRule` on

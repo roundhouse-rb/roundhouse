@@ -2976,9 +2976,17 @@ impl<'a> BodyTyper<'a> {
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
                     && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
                     && block.is_none()
-                    && crate::lower::errors_index::delete_field(args).is_some()
+                    && crate::lower::errors_index::literal_field(args).is_some()
                 {
                     return Ty::Union { variants: vec![Ty::Array { elem: std::sync::Arc::new(Ty::Str) }, Ty::Nil].into() };
+                }
+                if matches!(method.as_str(), "messages_for" | "full_messages_for")
+                    && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)
+                    && matches!(recv_ty.as_ref(), Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveModel::Errors")
+                    && block.is_none()
+                    && crate::lower::errors_index::messages_for_grounds(recv.as_ref(), args)
+                {
+                    return Ty::Array { elem: std::sync::Arc::new(Ty::Str) };
                 }
                 if matches!(method.as_str(), "import" | "merge!")
                     && matches!(dispatched, Ty::Var { .. } | Ty::Untyped)

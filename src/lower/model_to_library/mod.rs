@@ -2729,6 +2729,11 @@ fn build_class_info_with_finder_inputs(
         "error_messages_for",
         fn_sig(vec![(Symbol::from("attribute"), Ty::Str)], Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
     );
+    insert_default(
+        &mut info.instance_methods,
+        "error_full_messages_for",
+        fn_sig(vec![(Symbol::from("attribute"), Ty::Str)], Ty::Array { elem: std::sync::Arc::new(Ty::Str) }),
+    );
     insert_default(&mut info.instance_methods, "valid?", fn_sig(vec![], Ty::Bool));
     insert_default(
         &mut info.instance_methods,

@@ -1945,6 +1945,13 @@ module ActiveRecord
       status
     end
 
+    # base.rb's body, frozen as Rails answers `errors.full_messages_for`, empty or not.
+    def error_full_messages_for(attribute)
+      out = []
+      error_details.each { |error| out << error.full_message if error.attribute == attribute }
+      out.freeze
+    end
+
     # base.rb's body with before_validation able to halt it, as Rails'
     # can: the validations and after_validation are skipped and the
     # record is invalid with no errors. Rails clears the errors ahead

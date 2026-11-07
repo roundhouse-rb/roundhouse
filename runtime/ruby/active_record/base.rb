@@ -354,6 +354,14 @@ module ActiveRecord
       out
     end
 
+    # Rails' `errors.full_messages_for(attribute)`: the full messages of the errors on one attribute.
+    # The ruby-family connection.rb reopen answers them frozen, as Rails does; a strict target has no frozen Array.
+    def error_full_messages_for(attribute)
+      out = []
+      error_details.each { |error| out << error.full_message if error.attribute == attribute }
+      out
+    end
+
     # Not `errors`, the full messages: Rails renders a record's errors keyed by attribute, as `errors.as_json` answers.
     def errors_json
       out = {}

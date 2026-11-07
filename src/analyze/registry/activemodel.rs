@@ -82,7 +82,6 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("full_messages", str_arr()),
         // `errors[:title]` returns an Array<String> of messages for that attribute.
         ("[]", str_arr()),
-        ("messages_for", str_arr()),
         ("details", crate::lower::errors_index::details_ty()),
         ("messages", Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(str_arr()) }),
         ("to_hash", Ty::Hash { key: std::sync::Arc::new(Ty::Sym), value: std::sync::Arc::new(str_arr()) }),

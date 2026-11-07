@@ -143,6 +143,7 @@ module ActiveRecord
     @error_details: Array[ErrorDetail]
     def error_details: () -> Array[ErrorDetail]
     def error_messages_for: (String attribute) -> Array[String]
+    def error_full_messages_for: (String attribute) -> Array[String]
     def errors_json: () -> Hash[String, Array[String]]
 
     def initialize: (?Hash[Symbol, untyped] attrs) -> void

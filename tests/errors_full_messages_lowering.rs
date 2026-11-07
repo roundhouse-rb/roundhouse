@@ -169,5 +169,5 @@ end
     assert!(out.contains(r#"errors.join(", ")"#), "the owner's errors should fold:\n{out}");
     assert!(out.contains("self.errors\n") || out.contains("self.errors "), "self.errors should fold:\n{out}");
     assert!(out.contains("errors.full_messages"), "the library class should keep its call:\n{out}");
-    assert_eq!(out.matches("full_messages").count(), 2, "{out}");
+    assert_eq!(out.replace("error_full_messages_for", "").matches("full_messages").count(), 2, "{out}");
 }

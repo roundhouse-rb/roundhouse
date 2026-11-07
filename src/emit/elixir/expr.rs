@@ -1546,11 +1546,12 @@ fn emit_send(recv: Option<&Expr>, method: &str, args: &[Expr]) -> String {
             }
         }
     }
-    // `Base#error_messages_for(attribute)`: the messages of the details on `attribute`.
-    if method == "error_messages_for" && args.len() == 1 && (recv.is_some() || is_record_threading_context()) {
+    // `Base#error_messages_for(attribute)`: the messages of the details on `attribute`; `error_full_messages_for` their full messages.
+    if matches!(method, "error_messages_for" | "error_full_messages_for") && args.len() == 1 && (recv.is_some() || is_record_threading_context()) {
         let record = recv.map(emit_expr).unwrap_or_else(|| "record".to_string());
+        let message = if method == "error_messages_for" { "message" } else { "full_message" };
         return format!(
-            "(for detail <- {record}.error_details, detail.attribute == {}, do: detail.message)",
+            "(for detail <- {record}.error_details, detail.attribute == {}, do: detail.{message})",
             emit_expr(&args[0]),
         );
     }

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% if page.title contains "Roundhouse" %}{{ page.title | escape }}{% else %}{{ page.title | escape }} · Roundhouse{% endif %}</title>
+<meta name="description" content="{{ site.description }}">
+<link rel="icon" href="{{ '/logo-on-dark.svg' | relative_url }}" type="image/svg+xml">
+<link rel="stylesheet" href="{{ '/brand.css' | relative_url }}">
+<link rel="stylesheet" href="{{ '/docs/assets/docs.css' | relative_url }}">
+<link rel="stylesheet" href="{{ '/docs/assets/rouge.css' | relative_url }}">
+<script defer src="{{ '/docs/assets/docs.js' | relative_url }}"></script>
+</head>
+<body class="docs">
+<a class="skip" href="#main">Skip to content</a>
+{% include site-header.html menu=true chip="Docs" chip_url="/docs/guide/" active="docs" %}
+
+<div class="docs-grid">
+  <aside class="docs-sidebar" id="docs-sidebar" aria-label="Documentation">
+    <a class="sidebar-progress" href="{{ '/progress/' | relative_url }}">Progress: the gaps, and where to help <span aria-hidden="true">→</span></a>
+    {% for section in site.data.docs_nav %}
+    <p class="nav-section" id="nav-{{ forloop.index }}">{{ section.title }}</p>
+    <ul aria-labelledby="nav-{{ forloop.index }}">
+      {% for item in section.items %}
+      <li><a href="{{ item.url | relative_url }}"{% if item.url == page.url %} aria-current="page"{% endif %}>{{ item.title | escape }}</a></li>
+      {% endfor %}
+    </ul>
+    {% endfor %}
+  </aside>
+  <script>
+    // Restore the sidebar's scroll before first paint, so a clicked item stays exactly where it was.
+    (function () {
+      var side = document.getElementById("docs-sidebar");
+      try { var y = sessionStorage.getItem("rh-docs-sidebar"); if (side && y !== null) side.scrollTop = +y; } catch (e) {}
+    })();
+  </script>
+  <div class="scrim" hidden></div>
+
+  <main class="docs-main" id="main">
+    <div class="docs-topline">
+      <span class="crumb">{{ page.section | escape }}</span>
+      <a class="md-link" href="{{ page.source_url }}" title="{{ page.source_path }}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h13"/></svg>
+        View Markdown
+      </a>
+    </div>
+    <article class="prose">
+      <h1>{{ page.title_html }}</h1>
+      {{ content }}
+    </article>
+
+    <nav class="pager" aria-label="Previous and next">
+      {% if page.prev %}<a class="prev" href="{{ page.prev.url | relative_url }}"><span>← {{ page.prev.section | escape }}</span>{{ page.prev.title | escape }}</a>{% else %}<span></span>{% endif %}
+      {% if page.next %}<a class="next" href="{{ page.next.url | relative_url }}"><span>{{ page.next.section | escape }} →</span>{{ page.next.title | escape }}</a>{% endif %}
+    </nav>
+
+    <footer class="colophon">
+      <span>Source: <a href="{{ page.source_url }}">{{ page.source_path }}</a> · <a href="{{ page.edit_url }}">Edit on GitHub</a></span>
+      <span>Roundhouse · MIT / Apache-2.0</span>
+    </footer>
+  </main>
+
+  <aside class="docs-toc" aria-label="On this page"><!--repo-docs:toc--></aside>
+</div>
+</body>
+</html>

@@ -3815,6 +3815,27 @@ jobs:
 
   # Publication only: PR smoke jobs consume browse-archives, not Pages.
   # Finish Pages assembly without keeping blog smoke jobs behind Campfire.
+  docs-site:
+    # The docs pages and Progress, built offline from this checkout: the check
+    # for a change to docs-site/, and nothing else selects it. It needs no
+    # compiler, fixture or WASM, and only the summary waits on it. Publication
+    # renders the same pages, with live status, in assemble-site.
+    needs: plan
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'docs-site') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY }}
+          bundler-cache: true
+          working-directory: ./docs-site
+      - name: Render the docs pages and Progress (offline)
+        env:
+          ROUNDHOUSE_STATUS: 'off'
+        run: cd docs-site && bundle exec jekyll build --destination "$RUNNER_TEMP/docs-site"
+
   assemble-site:
     # campfire-conformance is here for ORDERING ONLY — its summary.json is
     # this job's input. Assembly can render a failed conformance report
@@ -3823,6 +3844,11 @@ jobs:
     # assembly does not override the separate publication guards.
     needs: [build-site, campfire-conformance, campfire-archive-build, archive-results, plan]
     if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.archive-results.result == 'success' }}
+    # actions: read lets Progress list this workflow's runs on main (its CI trend);
+    # the scheduled caller already grants it.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       ready: ${{ steps.ready.outputs.ready }}
     runs-on: ubuntu-latest
@@ -3903,6 +3929,79 @@ jobs:
             rmdir _site/bench 2>/dev/null || true
           fi
 
+      # The docs pages and Progress → _site/docs, _site/progress and the
+      # status files. Jekyll renders docs/*.md and RELEASES.md in place
+      # (docs-site/_plugins/repo_docs.rb), replacing the guide pages --site
+      # wrote, and reads the reports this run staged in _site. Only
+      # publication renders them, so other runs never install these gems or
+      # call the network. Collection takes about 3 s, at most 2 minutes;
+      # merged pull requests refresh about once a day (about 25 s). A page
+      # that doesn't convert links to its source with a warning. If the gems,
+      # the render or its time limit fail, the deployed docs pages, Progress
+      # and status files are published again: this never blocks deployment.
+      - name: Install the docs site's gems
+        id: docs-gems
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY }}
+          bundler-cache: true
+          working-directory: ./docs-site
+      - name: Render the docs pages and Progress
+        id: docs-render
+        if: ${{ steps.docs-gems.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 6
+        working-directory: docs-site
+        env:
+          # Public pull requests, issues and runs need no extra token permissions;
+          # the token only lifts the API rate limit.
+          GITHUB_TOKEN: ${{ github.token }}
+          ROUNDHOUSE_STATUS: 'on'
+          ROUNDHOUSE_STATUS_STAGED: ${{ github.workspace }}/_site
+          ROUNDHOUSE_DOCS_LENIENT: '1'
+        run: bundle exec jekyll build --destination "$RUNNER_TEMP/docs-site"
+      - name: Publish the docs pages and Progress
+        env:
+          RENDERED: ${{ steps.docs-render.outcome }}
+          SITE: https://roundhouse-rb.dev
+        run: |
+          built="$RUNNER_TEMP/docs-site" kept="$RUNNER_TEMP/docs-site-deployed"
+          if [ "$RENDERED" = success ]; then
+            rm -rf _site/docs _site/progress
+            cp -R "$built/docs" "$built/progress" "$built/status.json" "$built/status-history.json" _site/
+            # The list a later failed render republishes from.
+            (cd _site && find docs progress -type f | LC_ALL=C sort) > _site/ci/docs-site-files.txt
+            exit 0
+          fi
+          echo "::warning::The docs site didn't build; publishing the deployed docs pages, Progress and status files again."
+          mkdir -p "$kept"
+          # The list comes from the deployed site, so only plain paths under docs/ and progress/ are fetched.
+          if curl -fsS --max-time 20 "$SITE/ci/docs-site-files.txt" -o "$kept/files.txt" && [ -s "$kept/files.txt" ] \
+            && ! grep -Evxq '(docs|progress)(/[A-Za-z0-9_][A-Za-z0-9_.-]*)+' "$kept/files.txt" \
+            && xargs -P 8 -I{} curl -fsS --max-time 20 --create-dirs -o "$kept/{}" "$SITE/{}" < "$kept/files.txt"; then
+            for dir in docs progress; do
+              if [ -d "$kept/$dir" ]; then rm -rf "_site/$dir" && cp -R "$kept/$dir" _site/; fi
+            done
+            cp "$kept/files.txt" _site/ci/docs-site-files.txt
+          else
+            echo "::warning::The deployed docs pages couldn't be fetched; publishing the guide pages from --site, without Progress."
+          fi
+          # Into place only whole and readable: a cut-off history would restart the trend.
+          for file in status.json status-history.json; do
+            code=$(curl -sS --max-time 20 -o "$kept/$file" -w '%{http_code}' "$SITE/$file" || true)
+            if [ "$code" = 200 ] && python3 -m json.tool "$kept/$file" > /dev/null 2>&1; then
+              mv "$kept/$file" "_site/$file"
+            else
+              echo "::warning::$file couldn't be published again."
+              # Only a 404 means there's no history. Otherwise the next run says it's incomplete.
+              if [ "$file" = status-history.json ] && [ "$code" != 404 ]; then
+                echo '{"schema":1,"continuity":"interrupted","points":[]}' > "_site/$file"
+              fi
+            fi
+          done
+
       - name: Verify published archive bytes
         # Verify the copied download bytes against their producer/test report.
         # Failed validations may publish as repros; mismatched bytes may not.
@@ -3946,7 +4045,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain-plan, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, assemble-site]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain-plan, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, docs-site, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

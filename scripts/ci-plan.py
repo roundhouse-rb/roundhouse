@@ -868,6 +868,12 @@ def select(
             reasons.append(f"{path}: WASM/browser compiler")
         if path.startswith(("site/", "docs/guide/")):
             site = wasm = True
+        # The docs renderer and Progress build alone and offline, with no
+        # compiler, fixture or WASM; publication renders them in
+        # assemble-site. Other docs refresh with the next publication.
+        if path.startswith("docs-site/"):
+            jobs_selected.add("docs-site")
+            reasons.append(f"{path}: docs site")
         if (
             path.startswith("e2e/") and not path.startswith("e2e/campfire/")
         ) or path in {
@@ -934,7 +940,7 @@ def select(
         jobs_selected.add("archive-results")
     jobs.extend(
         j
-        for j in [*SPINEL, *SPINEL_FULL_OR_PATH, "archive-results"]
+        for j in [*SPINEL, *SPINEL_FULL_OR_PATH, "archive-results", "docs-site"]
         if j in jobs_selected
     )
     if publish:

@@ -1,0 +1,116 @@
+.prose .highlight table td { padding: 5px; }
+.prose .highlight table pre { margin: 0; }
+.prose .highlight, .highlight .w {
+  color: #c9d1d9;
+  background-color: transparent;
+}
+.prose .highlight .k, .highlight .kd, .highlight .kn, .highlight .kp, .highlight .kr, .highlight .kt, .highlight .kv {
+  color: #ff7b72;
+}
+.prose .highlight .gr {
+  color: #f0f6fc;
+}
+.prose .highlight .gd {
+  color: #ffdcd7;
+  background-color: #67060c;
+}
+.prose .highlight .nb {
+  color: #ffa657;
+}
+.prose .highlight .nc {
+  color: #ffa657;
+}
+.prose .highlight .no {
+  color: #ffa657;
+}
+.prose .highlight .nn {
+  color: #ffa657;
+}
+.prose .highlight .sr {
+  color: #7ee787;
+}
+.prose .highlight .na {
+  color: #7ee787;
+}
+.prose .highlight .nt {
+  color: #7ee787;
+}
+.prose .highlight .gi {
+  color: #aff5b4;
+  background-color: #033a16;
+}
+.prose .highlight .ges {
+  font-weight: bold;
+  font-style: italic;
+}
+.prose .highlight .kc {
+  color: #79c0ff;
+}
+.prose .highlight .l, .highlight .ld, .highlight .m, .highlight .mb, .highlight .mf, .highlight .mh, .highlight .mi, .highlight .il, .highlight .mo, .highlight .mx {
+  color: #79c0ff;
+}
+.prose .highlight .sb {
+  color: #79c0ff;
+}
+.prose .highlight .bp {
+  color: #79c0ff;
+}
+.prose .highlight .ne {
+  color: #79c0ff;
+}
+.prose .highlight .nl {
+  color: #79c0ff;
+}
+.prose .highlight .py {
+  color: #79c0ff;
+}
+.prose .highlight .nv, .highlight .vc, .highlight .vg, .highlight .vi, .highlight .vm {
+  color: #79c0ff;
+}
+.prose .highlight .o, .highlight .ow {
+  color: #79c0ff;
+}
+.prose .highlight .gh {
+  color: #1f6feb;
+  font-weight: bold;
+}
+.prose .highlight .gu {
+  color: #1f6feb;
+  font-weight: bold;
+}
+.prose .highlight .s, .highlight .sa, .highlight .sc, .highlight .dl, .highlight .sd, .highlight .s2, .highlight .se, .highlight .sh, .highlight .sx, .highlight .s1, .highlight .ss {
+  color: #a5d6ff;
+}
+.prose .highlight .nd {
+  color: #d2a8ff;
+}
+.prose .highlight .nf, .highlight .fm {
+  color: #d2a8ff;
+}
+.prose .highlight .err {
+  color: #f0f6fc;
+  background-color: #8e1519;
+}
+.prose .highlight .c, .highlight .ch, .highlight .cd, .highlight .cm, .highlight .cp, .highlight .cpf, .highlight .c1, .highlight .cs {
+  color: #8b949e;
+}
+.prose .highlight .gl {
+  color: #8b949e;
+}
+.prose .highlight .gt {
+  color: #8b949e;
+}
+.prose .highlight .ni {
+  color: #c9d1d9;
+}
+.prose .highlight .si {
+  color: #c9d1d9;
+}
+.prose .highlight .ge {
+  color: #c9d1d9;
+  font-style: italic;
+}
+.prose .highlight .gs {
+  color: #c9d1d9;
+  font-weight: bold;
+}

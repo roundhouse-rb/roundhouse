@@ -1,0 +1,69 @@
+# The docs pages and /progress/ of roundhouse-rb.dev. Build: bundle exec jekyll build (from this
+# directory); CI copies the output's docs/, progress/, status.json and status-history.json into
+# _site (see .github/workflows/ci.yml, assemble-site). Previews: ROUNDHOUSE_STATUS=off builds offline;
+# ROUNDHOUSE_STATUS_FROM=path/to/status.json renders a saved snapshot (_plugins/status.rb).
+title: Roundhouse
+description: Rails is the specification; deployment is a build flag.
+url: https://roundhouse-rb.dev
+baseurl: ""
+
+# CommonMark with GitHub's extensions, as GitHub and src/guide.rs render docs/ (see _plugins/commonmark.rb).
+markdown: RoundhouseCommonmark
+
+# The build takes about a second; a disk cache would keep converted pages stale when the plugins change.
+disable_disk_cache: true
+
+exclude:
+  - Gemfile
+  - Gemfile.lock
+  - vendor
+
+# The repository's Markdown, published in place by _plugins/repo_docs.rb.
+repo_docs:
+  root: ..
+  # Files the local preview needs from site/; production already serves them at the site root.
+  site_assets: [site/brand.css, site/logo-on-dark.svg]
+  github: https://github.com/roundhouse-rb/roundhouse
+  branch: main
+  # Index pages whose link order sets the reading order.
+  order_from:
+    - docs/guide/README.md
+    - docs/README.md
+    - docs/development/README.md
+  urls:
+    RELEASES.md: /docs/releases.html
+  sections:
+    - title: User guide
+      index: docs/guide/README.md
+      lead: [docs/guide/install.md]   # right after the overview
+      files: ["docs/guide/*.md"]
+    - title: Working on Roundhouse
+      index: docs/README.md
+      files: ["docs/README.md", "docs/development/*.md", "docs/ci/README.md"]
+    - title: Compiler inputs
+      files: ["docs/data/*.md"]
+    - title: Pipeline internals
+      files: ["docs/pipeline/*.md"]
+    - title: Reference
+      files: ["docs/writebook.md", "docs/ractor-ledger.md", "RELEASES.md"]
+  labels:
+    docs/guide/README.md: Overview
+    docs/guide/editor.md: Editor (LSP)
+    docs/guide/mcp.md: Agents (MCP)
+    docs/guide/spinel.md: Compile with Spinel
+    docs/guide/check.md: roundhouse check
+    docs/guide/transpile.md: Transpile
+    docs/guide/verifying.md: Verifying
+    docs/README.md: Map of the docs
+    docs/development/README.md: Development setup
+    docs/ci/README.md: CI
+    docs/data/schema-routes-seeds.md: Schema, routes, seeds
+    docs/ractor-ledger.md: Ractor ledger
+    docs/pipeline/specialization.md: Specialization
+
+# Project status for the Progress page and the home page's numbers (_plugins/status.rb).
+status:
+  site: https://roundhouse-rb.dev
+  repo: roundhouse-rb/roundhouse
+  lobsters_bench: https://roundbench.showcase.party/lobsters
+  weeks: 12

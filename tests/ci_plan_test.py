@@ -225,6 +225,28 @@ class Routing(unittest.TestCase):
         self.assertIn("browser-smoke-typescript", wasm["jobs"])
         self.assertNotIn("compare", wasm["jobs"])
 
+    def test_docs_renderer_builds_alone_and_other_docs_wait_for_publication(self):
+        # The renderer and Progress check offline, without the site, WASM or browsers.
+        for path in ["docs-site/_config.yml", "docs-site/_plugins/repo_docs.rb", "docs-site/progress/index.html"]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("docs-site", plan["jobs"])
+                self.assertFalse(plan["site"])
+                self.assertFalse(plan["wasm"])
+                self.assertNotIn("build-site", plan["jobs"])
+        # The guide still rebuilds the site, as before; the docs build isn't added to it.
+        guide = ci.select(["docs/guide/install.md"])
+        self.assertTrue(guide["site"])
+        self.assertNotIn("docs-site", guide["jobs"])
+        # Other published docs, and ordinary changes, select neither.
+        for path in ["docs/pipeline/runtime.md", "RELEASES.md", "docs/roda-sequel-plan.md", "src/emit/ruby.rs", "site/index.html"]:
+            with self.subTest(path=path):
+                self.assertNotIn("docs-site", ci.select([path])["jobs"])
+        # Full validation doesn't add it: shared-code merges run full mode, and
+        # publication already renders the docs in assemble-site.
+        self.assertNotIn("docs-site", ci.select([], full=True)["jobs"])
+        self.assertNotIn("docs-site", ci.select([], full=True, publish=True)["jobs"])
+
     def test_shared_emitters_select_cross_target_full_coverage(self):
         for path in [
             "src/emit/shared/schema_sql.rs",

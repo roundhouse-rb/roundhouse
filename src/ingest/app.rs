@@ -3320,6 +3320,8 @@ end
     super::settled_conditionals::settle(&mut app);
     // Not beside the hoists: later passes give an included module methods and ancestors (forwardable, carried includes, props bases, the queue adapter reader) or take an inactive branch's away.
     app.included_hoist_conflicts = super::library_class::included_hoist_conflicts(&app.library_classes);
+    // Here, once later passes stop giving modules methods: a concern's `to_param` before analysis types it on the model.
+    splice_concern_to_param_into_includers(&mut app);
     super::job_class_lookup::rewrite(&mut app);
     super::uncalled_definers::mark(&mut app);
     super::absence_guards::mark(&mut app, &source_gem_classes);
@@ -4649,6 +4651,77 @@ fn carry_included_block_includes_into_controllers(app: &mut App) {
             }
             *args = carried;
         }
+    }
+}
+
+/// A concern's `to_param`, copied onto each model that includes it and
+/// writes none of its own (#1897).
+///
+/// Rails fills a route helper's segment from the record's `to_param`, and
+/// an app often writes it in a concern (`include Sluggable`). A def in the
+/// concern's `included do` already reaches the model's body, with the
+/// block's other items (`splice_concerns_into_models`); a method of the
+/// module itself never did. Every model also gets a synthesized
+/// `to_param` (`lower::model_to_library::markers::push_to_param_method`),
+/// skipped only for a model whose body defines one. On the ruby target
+/// that default sat in the class, ahead of the module in Ruby's lookup,
+/// and answered `id.to_s`. The strict targets carry no module instance
+/// methods, so it was the only `to_param` they had. The view and route
+/// lowerings read the same model body to decide that a record fills its
+/// segment with `to_param` rather than its id.
+///
+/// The copy lands once in the IR for every target, like
+/// `splice_concern_class_methods_into_includers`, and takes its include
+/// order: the first module of the includer's include closure that defines
+/// `to_param` wins.
+fn splice_concern_to_param_into_includers(app: &mut App) {
+    use crate::det::{HashMap, HashSet};
+    use crate::dialect::{MethodReceiver, ModelBodyItem};
+    use crate::ident::{ClassId, Symbol};
+
+    let name = Symbol::from("to_param");
+    let mut defs: HashMap<ClassId, (crate::dialect::MethodDef, HashSet<Symbol>)> = HashMap::default();
+    let mut module_includes: HashMap<ClassId, Vec<ClassId>> = HashMap::default();
+    for lc in &app.library_classes {
+        module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.iter().cloned());
+        if !lc.is_module || defs.contains_key(&lc.name) {
+            continue;
+        }
+        // The last def of the name is the one Ruby keeps.
+        if let Some(m) = lc.methods.iter().rev().find(|m| m.name == name && m.receiver == MethodReceiver::Instance) {
+            defs.insert(lc.name.clone(), (m.clone(), lc.constants.iter().map(|(n, _)| n.clone()).collect()));
+        }
+    }
+    if defs.is_empty() {
+        return;
+    }
+    for model in &mut app.models {
+        if model.methods().any(|m| m.name == name && m.receiver == MethodReceiver::Instance) {
+            continue;
+        }
+        let mut queue = crate::analyze::model_includes(model);
+        let mut seen: HashSet<ClassId> = HashSet::default();
+        let mut found = None;
+        while !queue.is_empty() {
+            let id = queue.remove(0);
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(def) = defs.get(&id) {
+                found = Some((id, def));
+                break;
+            }
+            if let Some(nested) = module_includes.get(&id) {
+                queue.extend(nested.iter().cloned());
+            }
+        }
+        let Some((concern, (method, consts))) = found else { continue };
+        let mut method = method.clone();
+        method.enclosing_class = Some(model.name.0.clone());
+        if !consts.is_empty() {
+            qualify_lexical_consts(&mut method.body, &concern, consts);
+        }
+        model.body.push(ModelBodyItem::Method { method, leading_comments: Vec::new(), leading_blank_line: true });
     }
 }
 

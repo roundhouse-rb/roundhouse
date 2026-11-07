@@ -58,14 +58,14 @@ fn a_library_the_tree_defines_itself_is_not_required() {
 /// A library Spinel has no package for (`delegate`, ...) stays out of the
 /// spinel tree, whose `--strict-require` build would refuse it, and is
 /// carried on the ruby family. `date`, `yaml` and `weakref` have one
-/// (packages/date, packages/yaml, packages/weakref), `io/wait` is native,
-/// and all four are carried on both.
+/// (packages/date, packages/yaml, packages/weakref, packages/pp), `io/wait`
+/// is native, and all five are carried on both.
 #[test]
 fn a_library_spinel_lacks_is_required_on_the_ruby_family_only() {
     let overlay = || {
         emit_and_run::real_blog().write(
             "app/models/dated_probe.rb",
-            "require \"date\"\nrequire \"delegate\"\nrequire \"yaml\"\nrequire \"weakref\"\nrequire \"io/wait\"\nrequire \"open3\"\n\nclass DatedProbe\n  def self.size = 1\nend\n",
+            "require \"date\"\nrequire \"delegate\"\nrequire \"yaml\"\nrequire \"weakref\"\nrequire \"io/wait\"\nrequire \"pp\"\nrequire \"open3\"\n\nclass DatedProbe\n  def self.size = 1\nend\n",
         )
     };
     for (target, carried) in [(BuildTarget::Spinel, false), (BuildTarget::Ruby, true)] {
@@ -73,7 +73,7 @@ fn a_library_spinel_lacks_is_required_on_the_ruby_family_only() {
         assert!(errors.is_empty(), "{target:?} errors: {errors:?}");
         let boot = std::fs::read_to_string(emitted.join("boot.rb")).expect("read boot.rb");
         assert!(boot.lines().any(|l| l.trim() == "require \"open3\""), "{target:?}:\n{boot}");
-        for (lib, on_spinel) in [("delegate", false), ("date", true), ("yaml", true), ("weakref", true), ("io/wait", true)] {
+        for (lib, on_spinel) in [("delegate", false), ("date", true), ("yaml", true), ("weakref", true), ("io/wait", true), ("pp", true)] {
             let line = format!("require {lib:?}");
             let expected = carried || on_spinel;
             assert_eq!(boot.lines().take(12).any(|l| l.trim() == line), expected, "{target:?} {lib}:\n{boot}");

@@ -7722,11 +7722,12 @@ fn apply_puma_boot_hooks(files: &mut [(String, String)], app: &App, target: Requ
 /// tree's boot.rb leaves out; the ruby family loads them all. Spinel warns
 /// "is not available in Spinel" for `delegate`, `English`, `etc` and
 /// `io/nonblock`, and `--strict-require` makes that fatal. `ipaddr` stays
-/// on the port the tree carries (`runtime/ruby/ipaddr.rb`). `pp` and
-/// `observer` have packages this tree's shape still trips: a bare
-/// `require "pp"` is refused (PP's layout), and `require "observer"` leaves
-/// inference unsettled and fails the C compile once Observable is used.
-const SPINEL_LACKS: &[&str] = &["delegate", "English", "etc", "io/nonblock", "ipaddr", "observer", "pp"];
+/// on the port the tree carries (`runtime/ruby/ipaddr.rb`): Spinel's
+/// package keeps the address in one Integer, and an IPv6 address passes
+/// 2**64 without `--int-overflow=promote`. `observer` has a package this
+/// tree's shape still trips: `require "observer"` leaves inference
+/// unsettled and fails the C compile once Observable is used.
+const SPINEL_LACKS: &[&str] = &["delegate", "English", "etc", "io/nonblock", "ipaddr", "observer"];
 
 /// The app's own standard-library requires ([`App::app_requires`]) at
 /// the head of `boot.rb`, ahead of everything that file loads. Twice on

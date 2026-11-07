@@ -140,6 +140,7 @@ fn emit_migrations(app: &App) -> Vec<EmittedFile> {
 /// the DB-level cascade is the idiomatic equivalent (and what the
 /// reviewed exemplar does).
 fn migration_for(app: &App, table: &Table) -> String {
+    let ruby_str = crate::emit::ruby::expr::ruby_str_literal;
     let fk_cols: Vec<&str> = table
         .foreign_keys
         .iter()
@@ -177,7 +178,9 @@ fn migration_for(app: &App, table: &Table) -> String {
     for idx in &table.indexes {
         // The FK line above doesn't auto-index; keep the schema's
         // explicit indexes (minus any on the primary key).
-        let cols = if idx.columns.len() == 1 {
+        let cols = if let Some(expression) = &idx.expression {
+            format!("Sequel.lit({})", ruby_str(expression))
+        } else if idx.columns.len() == 1 {
             format!(":{}", idx.columns[0])
         } else {
             format!(
@@ -186,7 +189,13 @@ fn migration_for(app: &App, table: &Table) -> String {
             )
         };
         let unique = if idx.unique { ", unique: true" } else { "" };
-        lines.push(format!("      index {cols}{unique}"));
+        let name = idx.expression.as_ref().map(|_| format!(", name: {}", ruby_str(idx.name.as_str()))).unwrap_or_default();
+        let predicate = idx.predicate.as_ref().filter(|sql| crate::emit::shared::schema_sql::sqlite_reads_alike(sql, table)).map(|sql| format!(", where: Sequel.lit({})", ruby_str(sql))).unwrap_or_default();
+        lines.push(format!("      index {cols}{unique}{name}{predicate}"));
+    }
+    for check in &table.check_constraints {
+        let name = check.name.as_ref().map(|n| ruby_str(n)).unwrap_or_else(|| "nil".into());
+        lines.push(format!("      constraint({name}, Sequel.lit({}))", ruby_str(&check.expression)));
     }
     format!(
         "Sequel.migration do\n  change do\n    create_table(:{}) do\n{}\n    end\n  end\nend\n",

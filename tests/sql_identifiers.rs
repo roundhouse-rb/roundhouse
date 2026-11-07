@@ -215,6 +215,7 @@ fn virtual_table_name_is_quoted_without_rewriting_module_arguments() {
             columns: vec![],
             indexes: vec![],
             foreign_keys: vec![],
+            check_constraints: Vec::new(),
             known_keyless: false,
             primary_key_columns: Vec::new(),
             virtual_module: Some(roundhouse::schema::VirtualModule {

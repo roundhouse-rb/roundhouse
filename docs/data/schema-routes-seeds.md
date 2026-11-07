@@ -75,14 +75,14 @@ dialect-neutral) or the lowerer. `Dialect::Postgres` (stage (a) of
 adapter creates them, quotes every identifier, and gives a key Rails'
 default convention for its type: `bigserial`, `serial` for an
 `integer` key, and `uuid … DEFAULT gen_random_uuid()` for a `uuid`
-one. Neither dialect reproduces source column defaults, foreign keys
-or CHECK constraints: Postgres synthesizes the key defaults above, so
+one. Both dialects preserve supported CHECK constraints and expression indexes.
+Neither dialect reproduces source column defaults or foreign keys: Postgres synthesizes the key defaults above, so
 a custom or suppressed one is not reproduced, and the model layer
 applies supported literal defaults. A virtual table has no Postgres
 DDL, so that dialect returns an error for it. Postgres renders what
 ingest kept, so it shares the current ingest and IR limits.
 `schema.rb` ingest drops `array: true`; an index's `order:` and
-`opclass:`, and expression indexes; precision on `numeric`,
+`opclass:`; precision on `numeric`,
 `datetime` and `time`; and schema qualifiers. An `integer` `limit:` of 1
 or 2 still normalizes to `ColumnType::Integer` for ordinary typing, but
 its original smallint width is retained as negative evidence for generated
@@ -112,6 +112,9 @@ A Postgres dump's `::text` casts or `= ANY (ARRAY[…])` fall outside it;
 that index is unique over every row, and the transpile names it in a
 warning. The migration fold refuses to rename or remove a column a
 predicate names.
+Case conversion in expression keys and predicates uses the destination database's
+`lower` and `upper`. SQLite's built-in functions fold ASCII only: a unique `lower(email)` index accepts
+both `É@example.test` and `é@example.test`, unlike PostgreSQL with a Unicode-aware locale.
 An index's literal access method is kept from `schema.rb`'s `using:` or
 `structure.sql`'s `USING` clause and quoted in PostgreSQL DDL. Schema Ruby
 methods must be ASCII unquoted SQL identifiers and are folded to lowercase.

@@ -207,7 +207,7 @@ end
     assert_eq!(
         out[0],
         "CREATE TABLE IF NOT EXISTS accounts (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  \
-         fields TEXT,\n  last_ip TEXT,\n  username TEXT NOT NULL,\n  seen_at TEXT\n)"
+         fields TEXT,\n  last_ip TEXT,\n  username TEXT NOT NULL,\n  seen_at TEXT,\n  CONSTRAINT username_present CHECK (length(username) > 0)\n)"
     );
 }
 

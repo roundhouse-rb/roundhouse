@@ -26,6 +26,8 @@ pub struct Table {
     pub columns: Vec<Column>,
     pub indexes: Vec<Index>,
     pub foreign_keys: Vec<ForeignKey>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub check_constraints: Vec<CheckConstraint>,
     /// A plain `create_table id: false` declaration with no later key or
     /// id-column changes. False also means unknown: retain the default.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -167,6 +169,9 @@ pub enum ColumnType {
 pub struct Index {
     pub name: Symbol,
     pub columns: Vec<Symbol>,
+    /// SQL index keys are expressions, never a list of physical columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
     pub unique: bool,
     /// PostgreSQL's `USING <access_method>`, when present in the source.
     /// `None` is the database default (btree). The method is retained
@@ -188,6 +193,12 @@ pub struct ForeignKey {
     pub to_column: Symbol,
     pub on_delete: ReferentialAction,
     pub on_update: ReferentialAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CheckConstraint {
+    pub name: Option<String>,
+    pub expression: String,
 }
 
 /// Column a `pluck` or `pick` argument selects.

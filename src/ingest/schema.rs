@@ -13,6 +13,8 @@
 //! materialized into explicit datetime columns.
 
 use ruby_prism::Node;
+use sha2::{Digest, Sha256};
+use super::prism_api::PrismLocation;
 
 use indexmap::IndexMap;
 
@@ -97,6 +99,9 @@ pub fn ingest_schema_with_generated_expression_dialect(
                     .map(|a| a.arguments().iter().collect())
                     .unwrap_or_default();
                 apply_add_foreign_key(&args, &mut schema);
+            }
+            verb @ ("add_check_constraint" | "add_index") => {
+                if let Err(gap) = apply_table_verb(verb, &call_arguments(call), file, &mut schema, dialect) { gaps.push(gap); }
             }
             _ => {}
         }
@@ -465,17 +470,19 @@ fn apply_table_verb(
     // `remove_column(:idx, :"col_#{n}")` in an `each` loop
     // kept the dropped columns.
     let named = match verb {
-        "drop_table" | "add_timestamps" | "remove_timestamps" => 1,
+        "drop_table" | "add_timestamps" | "remove_timestamps"
+        | "add_index" | "add_check_constraint" | "remove_check_constraint" => 1,
         "rename_table" | "remove_column" | "change_column_null" | "change_column_default"
         | "add_reference" | "add_belongs_to" | "remove_reference" | "remove_belongs_to" => 2,
         "add_column" | "change_column" | "rename_column" | "rename_index" => 3,
         _ => 0,
     };
     if let Some(i) = (0..named).find(|&i| arg_name(i).is_none()) {
+        let line = args.get(i).and_then(|n| super::sources::line_at(file, n.location().start_offset())).unwrap_or(1);
         return Err(IngestError::Unsupported {
             file: file.into(),
             message: format!(
-                "migration `{verb}` argument {} is not a literal name; the schema fold cannot apply it",
+                "line {line}: migration `{verb}` argument {} is not a literal name; the schema fold cannot apply it",
                 i + 1
             ),
         });
@@ -653,11 +660,21 @@ fn apply_table_verb(
             }
         }
         "add_index" => {
-            if let (Some(t), Some(columns)) = (arg_name(0), args.get(1).map(column_name_list)) {
-                if !columns.is_empty() {
+            if let (Some(t), Some(keys)) = (arg_name(0), args.get(1)) {
+                let (columns, expression) = index_keys(keys, file)?;
+                if expression.is_some() || !columns.is_empty() {
                     if let Some(table) = schema.tables.get_mut(&Symbol::from(t.clone())) {
-                        if columns.iter().all(|c| table.columns.iter().any(|col| col.name == *c)) {
-                            table.indexes.push(build_index(&t, columns, args.iter().skip(2), file)?);
+                        if expression.is_some() || columns.iter().all(|c| table.columns.iter().any(|col| col.name == *c)) {
+                            if dialect == GeneratedExpressionDialect::Portable && expression.as_ref().is_some_and(|e| !crate::emit::shared::schema_sql::sqlite_reads_alike(e, table)) {
+                                return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported index expression on {t}") });
+                            }
+                            let index = build_index(&t, columns, expression, args.iter().skip(2), file)?;
+                            if dialect == GeneratedExpressionDialect::Portable && index.expression.is_some()
+                                && index.predicate.as_ref().is_some_and(|p| !crate::emit::shared::schema_sql::sqlite_reads_alike(p, table)) {
+                                let line = super::sources::line_at(file, keys.location().start_offset()).unwrap_or(1);
+                                return Err(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported index predicate on {t}") });
+                            }
+                            table.indexes.push(index);
                         }
                     }
                 }
@@ -666,20 +683,27 @@ fn apply_table_verb(
         "remove_index" => {
             if let Some(t) = arg_name(0) {
                 // `remove_index :t, :col`, or the `column:` / `name:` options.
-                let mut columns = args.get(1).map(column_name_list).unwrap_or_default();
-                if columns.is_empty() {
-                    columns = kwarg_value(args.iter().skip(1), "column")
-                        .map(|v| column_name_list(&v))
-                        .unwrap_or_default();
+                let keys = args.get(1).filter(|n| n.as_keyword_hash_node().is_none());
+                let (mut columns, mut expression) = keys.map(|n| index_keys(n, file)).transpose()?.unwrap_or_default();
+                if columns.is_empty() && expression.is_none() {
+                    if let Some(value) = kwarg_value(args.iter().skip(1), "column") {
+                        (columns, expression) = index_keys(&value, file)?;
+                    }
+                }
+                if expression.is_some() && (has_column_option_splats(&args[1..])
+                    || kwarg_value(args.iter().skip(1), "name").is_some_and(|v| name_value(&v).is_none())) {
+                    let line = super::sources::line_at(file, args[1].location().start_offset()).unwrap_or(1);
+                    return Err(IngestError::Unsupported { file: file.into(), message: format!("line {line}: expression index removal options must be literal") });
                 }
                 let by_name =
                     kwarg_value(args.iter().skip(1), "name").and_then(|v| string_value(&v).or_else(|| symbol_value(&v)));
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
                     table.indexes.retain(|idx| {
-                        let col_match = !columns.is_empty() && idx.columns == columns;
+                        let col_match = expression.as_ref().is_some_and(|e| idx.expression.as_ref() == Some(e))
+                            || expression.is_none() && !columns.is_empty() && idx.expression.is_none() && idx.columns == columns;
                         let name_match =
                             by_name.as_deref().is_some_and(|n| idx.name.as_str() == n);
-                        !(col_match || name_match)
+                        !(if expression.is_some() && by_name.is_some() { name_match } else { col_match || name_match })
                     });
                 }
             }
@@ -703,6 +727,28 @@ fn apply_table_verb(
         // ordinary integer column from `create_table`.
         "add_foreign_key" => apply_add_foreign_key(args, schema),
         "remove_foreign_key" => apply_remove_foreign_key(args, file, schema)?,
+        "add_check_constraint" | "remove_check_constraint" => {
+            if let Some(table) = arg_name(0).and_then(|n| schema.tables.get_mut(&Symbol::from(n))) {
+                if verb == "add_check_constraint" {
+                    let check = check_constraint(&args[1..], file, table.name.as_str())?;
+                    if dialect == GeneratedExpressionDialect::Portable && !crate::emit::shared::schema_sql::sqlite_reads_alike(&check.expression, table) {
+                        return Err(IngestError::Unsupported { file: file.into(), message: format!("unsupported CHECK expression on {}", table.name) });
+                    }
+                    table.check_constraints.push(check);
+                } else {
+                    let name = kwarg_value(args.iter().skip(1), "name").map(|n| name_value(&n).ok_or_else(|| IngestError::Unsupported { file: file.into(), message: "CHECK name must be literal".into() })).transpose()?;
+                    let expression = args.get(1).and_then(string_value);
+                    if has_column_option_splats(&args[1..]) || name.is_none() && expression.is_none()
+                        || args.get(1).is_some_and(|n| n.as_keyword_hash_node().is_none() && n.as_nil_node().is_none() && string_value(n).is_none()) {
+                        return Err(IngestError::Unsupported { file: file.into(), message: "remove_check_constraint requires a literal name or expression".into() });
+                    }
+                    table.check_constraints.retain(|c| !match &name {
+                        Some(name) => c.name.as_ref() == Some(name),
+                        None => expression.as_ref().is_some_and(|e| &c.expression == e),
+                    });
+                }
+            }
+        }
         // Extensions don't affect column typing; skipped like before.
         "enable_extension" | "disable_extension" => {}
         // Anything else receiver-less is arbitrary migration Ruby
@@ -1009,6 +1055,8 @@ fn apply_table_method<'pr>(
         "remove_timestamps" => delegate("remove_timestamps", schema),
         "foreign_key" => delegate("add_foreign_key", schema),
         "remove_foreign_key" => delegate("remove_foreign_key", schema),
+        "check_constraint" => delegate("add_check_constraint", schema),
+        "remove_check_constraint" => delegate("remove_check_constraint", schema),
         "column" => {
             delegate("add_column", schema)?;
             let args = call_arguments(inner);
@@ -1030,11 +1078,9 @@ fn apply_table_method<'pr>(
             }
             Ok(())
         }
-        // Questions about the table, and constraints the fold does not
-        // model (a constraint costs the DDL nothing).
+        // Questions about the table, and other unmodeled constraint kinds.
         "name" | "column_exists?" | "index_exists?" | "foreign_key_exists?"
-        | "check_constraint_exists?" | "check_constraint"
-        | "remove_check_constraint" | "validate_check_constraint" | "validate_constraint"
+        | "check_constraint_exists?" | "validate_check_constraint" | "validate_constraint"
         | "unique_constraint" | "remove_unique_constraint" | "exclusion_constraint"
         | "remove_exclusion_constraint" => Ok(()),
         // Everything else is a column type: `t.string :title, null:
@@ -1078,7 +1124,7 @@ fn add_column_index(
     if value.as_nil_node().is_some() || bool_value(&value) == Some(false) {
         return Ok(());
     }
-    let index = build_index(table, vec![Symbol::from(column)], std::iter::once(&value), file)?;
+    let index = build_index(table, vec![Symbol::from(column)], None, std::iter::once(&value), file)?;
     if let Some(table) = schema.tables.get_mut(&Symbol::from(table)) {
         if table.columns.iter().any(|col| col.name.as_str() == column) {
             table.indexes.push(index);
@@ -1098,6 +1144,11 @@ fn refuse_predicate_column(
     column: &str,
     file: &str,
 ) -> Result<(), IngestError> {
+    if table.check_constraints.iter().any(|c| predicate_names(&c.expression, column))
+        || table.indexes.iter().any(|i| i.expression.as_deref().is_some_and(|e| predicate_names(e, column)))
+    {
+        return Err(IngestError::Unsupported { file: file.into(), message: format!("migration `{verb}` on {}.{column} would change a CHECK or index expression; materialize db/schema.rb with Rails", table.name) });
+    }
     let Some(index) = table
         .indexes
         .iter()
@@ -1380,6 +1431,7 @@ fn column_name_list(node: &Node<'_>) -> Vec<Symbol> {
 fn build_index<'pr>(
     table_name: &str,
     columns: Vec<Symbol>,
+    expression: Option<String>,
     kwarg_nodes: impl Iterator<Item = &'pr Node<'pr>>,
     file: &str,
 ) -> IngestResult<Index> {
@@ -1397,26 +1449,62 @@ fn build_index<'pr>(
             continue;
         };
         for el in elements.iter() {
-            let Some(assoc) = el.as_assoc_node() else { continue };
+            let Some(assoc) = el.as_assoc_node() else {
+                return Err(IngestError::Unsupported { file: file.into(), message: format!("index options on {table_name} must be literal") });
+            };
             let Some(key) = symbol_value(&assoc.key()) else { continue };
             let value = &assoc.value();
             match key.as_str() {
-                "name" => explicit_name = string_value(value),
-                "unique" => unique = bool_value(value).unwrap_or(false),
+                "name" => explicit_name = Some(name_value(value).ok_or_else(|| IngestError::Unsupported { file: file.into(), message: format!("index name on {table_name} must be literal") })?),
+                "unique" => unique = bool_value(value).ok_or_else(|| IngestError::Unsupported { file: file.into(), message: format!("index unique: on {table_name} must be literal") })?,
                 // `where: "(archived_at IS NULL)"`: a partial index. On
                 // a unique one, dropping it widened the constraint to
                 // every row.
-                "where" => predicate = string_value(value),
+                "where" => predicate = Some(string_value(value).ok_or_else(|| IngestError::Unsupported { file: file.into(), message: format!("index where: on {table_name} must be literal") })?),
                 "using" => using = Some(index_access_method(value, file, table_name)?),
                 _ => {}
             }
         }
     }
     let name = explicit_name.unwrap_or_else(|| {
-        let cols: Vec<&str> = columns.iter().map(|c| c.as_str()).collect();
-        format!("index_{}_on_{}", table_name, cols.join("_and_"))
+        let cols: Vec<&str> = expression.as_deref().map(|e| {
+            e.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|s| !s.is_empty()).collect()
+        }).unwrap_or_else(|| columns.iter().map(|c| c.as_str()).collect());
+        format!("index_{}_on_{}", table_name, cols.join(if expression.is_some() { "_" } else { "_and_" }))
     });
-    Ok(Index { name: Symbol::from(name), columns, unique, using, predicate })
+    Ok(Index { name: Symbol::from(name), columns, expression, unique, using, predicate })
+}
+
+fn index_keys(node: &Node<'_>, file: &str) -> IngestResult<(Vec<Symbol>, Option<String>)> {
+    if let Some(sql) = string_value(node) {
+        if sql.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_') {
+            return Ok((Vec::new(), Some(sql)));
+        }
+    }
+    let columns = column_name_list(node);
+    let expected = node.as_array_node().map(|a| a.elements().len()).unwrap_or(1);
+    if columns.is_empty() || columns.len() != expected || columns.iter().any(|c| c.as_str().is_empty()) {
+        return Err(IngestError::Unsupported { file: file.into(), message: "index keys must be literal columns or SQL".into() });
+    }
+    Ok((columns, None))
+}
+
+fn check_constraint(args: &[Node<'_>], file: &str, table: &str) -> IngestResult<crate::schema::CheckConstraint> {
+    let gap = || IngestError::Unsupported { file: file.into(), message: "CHECK requires literal SQL and literal options".into() };
+    let expression = args.first().and_then(string_value).filter(|s| !s.trim().is_empty()).ok_or_else(gap)?;
+    if has_column_option_splats(&args[1..]) || args[1..].iter().any(|n| n.as_keyword_hash_node().is_none()) { return Err(gap()); }
+    for options in &args[1..] {
+        for element in options.as_keyword_hash_node().unwrap().elements().iter() {
+            let key = element.as_assoc_node().and_then(|a| symbol_value(&a.key()));
+            if !matches!(key.as_deref(), Some("name" | "validate")) { return Err(gap()); }
+        }
+    }
+    let name = kwarg_value(args.iter().skip(1), "name").map(|n| name_value(&n).ok_or_else(gap)).transpose()?.unwrap_or_else(|| {
+        let digest = format!("{:x}", Sha256::digest(format!("{table}_{expression}_chk")));
+        format!("chk_rails_{}", &digest[..10])
+    });
+    if kwarg_value(args.iter().skip(1), "validate").is_some_and(|v| bool_value(&v) != Some(true)) { return Err(gap()); }
+    Ok(crate::schema::CheckConstraint { name: Some(name), expression })
 }
 
 /// Rails interpolates `using:` as an unquoted SQL identifier. Fold its
@@ -1523,6 +1611,8 @@ fn table_from_create_table(
         && kwarg_value(table_options.iter(), "primary_key").is_none();
     let mut columns = Vec::new();
     let mut indexes: Vec<Index> = Vec::new();
+    let mut check_constraints = Vec::new();
+    let mut sql_locations = Vec::new();
     if has_id {
         let id_limit = hash_limit.unwrap_or(outer_limit);
         // `serial` and `bigserial` are the integer keys Postgres fills
@@ -1584,6 +1674,13 @@ fn table_from_create_table(
                 for stmt in flatten_statements(body) {
                     if let Some(call) = stmt.as_call_node() {
                         let call_name = constant_id_str(&call.name()).to_string();
+                        if matches!(call_name.as_str(), "index" | "check_constraint") {
+                            if let Some(value) = call_arguments(&call).first().and_then(|n| string_value(n).map(|s| (s, n.location().start_offset())))
+                                .filter(|(s, _)| call_name == "check_constraint" || s.bytes().any(|b| !b.is_ascii_alphanumeric() && b != b'_'))
+                            {
+                                sql_locations.push(value);
+                            }
+                        }
                         if call_name != "index" {
                             let column_args: Vec<_> = call.arguments()
                                 .map(|args| args.arguments().iter().collect()).unwrap_or_default();
@@ -1598,8 +1695,20 @@ fn table_from_create_table(
                         }
                         if call_name == "index" {
                             match index_from_call(&call, &table_name, file) {
-                                Ok(Some(idx)) => indexes.push(idx),
+                                Ok(Some(idx)) => {
+                                    if idx.expression.is_some() {
+                                        if let Some(value) = kwarg_value(call_arguments(&call).iter().skip(1), "where") {
+                                            if let Some(sql) = string_value(&value) { sql_locations.push((sql, value.location().start_offset())); }
+                                        }
+                                    }
+                                    indexes.push(idx);
+                                }
                                 Ok(None) => {}
+                                Err(gap) => gaps.push(gap),
+                            }
+                        } else if call_name == "check_constraint" {
+                            match check_constraint(&call_arguments(&call), file, &table_name) {
+                                Ok(check) => check_constraints.push(check),
                                 Err(gap) => gaps.push(gap),
                             }
                         } else if call_name == "timestamps" {
@@ -1628,6 +1737,7 @@ fn table_from_create_table(
         columns,
         indexes,
         foreign_keys: vec![],
+        check_constraints,
         virtual_module: None,
         known_keyless,
         primary_key_columns: Vec::new(),
@@ -1646,6 +1756,16 @@ fn table_from_create_table(
         table.indexes.retain(|idx| {
             idx.columns.iter().all(|name| table.columns.iter().any(|col| col.name == *name))
         });
+    }
+    for (expression, offset) in sql_locations {
+        if dialect == GeneratedExpressionDialect::Portable
+            && !crate::emit::shared::schema_sql::sqlite_reads_alike(&expression, &table)
+        {
+            let line = super::sources::line_at(file, offset).unwrap_or(1);
+            gaps.push(IngestError::Unsupported { file: file.into(), message: format!("line {line}: unsupported schema expression on {table_name}: {expression}") });
+            table.check_constraints.retain(|c| c.expression != expression);
+            table.indexes.retain(|i| i.expression.as_deref() != Some(expression.as_str()));
+        }
     }
     Some((Symbol::from(table_name), table))
 }
@@ -1695,6 +1815,7 @@ fn virtual_table_from_call(call: &ruby_prism::CallNode<'_>) -> Option<(Symbol, T
             columns,
             indexes: vec![],
             foreign_keys: vec![],
+            check_constraints: Vec::new(),
             virtual_module: Some(crate::schema::VirtualModule { module, args: module_args }),
             known_keyless: false,
             primary_key_columns: Vec::new(),
@@ -1738,6 +1859,7 @@ fn view_from_create_view(
             columns,
             indexes: vec![],
             foreign_keys: vec![],
+            check_constraints: Vec::new(),
             virtual_module: None,
             known_keyless: false,
             primary_key_columns: Vec::new(),
@@ -2318,8 +2440,8 @@ fn column_from_call(
         }
         return generated_column_from_options(col_name, table, file, None, &args[1..]).map(Some);
     }
-    // `t.<constraint>` lines are table-level declarations, not columns;
-    // the fold does not model them and they cost the DDL nothing.
+    // Table-level declarations are not columns. CHECKs are collected
+    // separately by table_from_create_table.
     if matches!(
         col_type_name.as_str(),
         "check_constraint" | "foreign_key" | "exclusion_constraint" | "unique_constraint"
@@ -2375,11 +2497,9 @@ fn index_from_call(
 
     let Some(args_node) = call.arguments() else { return Ok(None) };
     let args: Vec<Node<'_>> = args_node.arguments().iter().collect();
-    let Some(columns) = args.first().map(column_name_list) else { return Ok(None) };
-    if columns.is_empty() {
-        return Ok(None);
-    }
-    build_index(table_name, columns, args.iter().skip(1), file).map(Some)
+    let Some(first) = args.first() else { return Ok(None) };
+    let (columns, expression) = index_keys(first, file)?;
+    build_index(table_name, columns, expression, args.iter().skip(1), file).map(Some)
 }
 
 #[cfg(test)]

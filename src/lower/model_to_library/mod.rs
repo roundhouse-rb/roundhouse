@@ -2191,6 +2191,7 @@ pub(crate) fn push_scope_methods(
     scopes: &crate::lower::scope_chain::ScopeRegistry,
     models_set: &crate::det::HashSet<ClassId>,
     assocs: &crate::lower::scope_chain::AssocRegistry,
+    unique_keys: &crate::lower::scope_chain::UniqueKeys,
 ) {
     use crate::dialect::{AccessorKind, ModelBodyItem, Param};
     use crate::expr::{Expr, ExprNode, LValue};
@@ -2235,6 +2236,7 @@ pub(crate) fn push_scope_methods(
             scopes,
             models_set,
             assocs,
+            unique_keys,
         );
 
         // Rails relations are immutable, so every implicit-self root in

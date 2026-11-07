@@ -110,6 +110,7 @@ fn ingest_table_stmt(
                 columns: Vec::new(),
                 indexes: Vec::new(),
                 foreign_keys: Vec::new(),
+                check_constraints: Vec::new(),
                 virtual_module: None,
                 known_keyless: false,
                 primary_key_columns: Vec::new(),
@@ -262,6 +263,7 @@ fn ingest_column_stmt(
             table.indexes.push(Index {
                 name: Symbol::from(name),
                 columns,
+                expression: None,
                 unique: opt_bool("unique").unwrap_or(false),
                 using: None,
                 predicate: None,

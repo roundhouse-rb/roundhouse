@@ -764,10 +764,9 @@ class Routing(unittest.TestCase):
         ]:
             with self.subTest(path=path):
                 plan = ci.select([path])
-                if path in {
-                    "src/lower/arel/visitor.rs",
-                    "tests/support/emit_and_run.rs",
-                }:
+                if path == "tests/support/emit_and_run.rs":
+                    expected = [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_constraints"]
+                elif path == "src/lower/arel/visitor.rs":
                     expected = [*ci.PARAM_BIND_TESTS, "generated_columns_spinel"]
                 elif path.startswith("src/"):
                     expected = ci.PARAM_BIND_TESTS
@@ -787,7 +786,7 @@ class Routing(unittest.TestCase):
         # must too when that file is the only change.
         self.assertEqual(
             ci.select(["src/emit/ruby/library.rs"])["spinel_tests"],
-            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel"],
+            [*ci.PARAM_BIND_TESTS, "generated_columns_spinel", "schema_constraints"],
         )
         self.assertEqual(
             ci.select(["runtime/spinel/db.rb"])["spinel_tests"],
@@ -942,6 +941,20 @@ class Routing(unittest.TestCase):
         shared = ci.select(["src/emit/shared/schema_sql.rs"])
         self.assertEqual(shared["spinel_tests"], ci.SPINEL_TESTS)
         self.assertIn(suite, shared["spinel_tests"])
+
+    def test_schema_constraints_owns_ddl_and_index_consumers(self):
+        for path in [
+            "tests/schema_constraints.rs", "tests/support/schema_constraints_schema.rb",
+            "tests/support/schema_constraints_contract.rb", "src/schema.rs", "src/ingest/schema.rs",
+            "src/schema/generated.rs", "tests/support/emit_and_run.rs",
+            "src/emit/shared/schema_sql.rs", "src/lower/model_to_library/schema.rs", "src/lower/scope_chain.rs",
+            "src/emit/roda.rs", "src/emit/ruby/library.rs",
+            "src/lower/model_to_library/mod.rs",
+        ]:
+            with self.subTest(path=path):
+                plan = ci.select([path])
+                self.assertIn("schema_constraints", plan["spinel_tests"])
+                self.assertIn("spinel-framework", plan["jobs"])
 
     def test_jdbc_probes_select_the_existing_comparison_without_archives(self):
         for path, native_jobs, suites in [

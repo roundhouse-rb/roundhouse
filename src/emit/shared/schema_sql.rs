@@ -323,13 +323,19 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
                 lines.push(line);
             }
         }
+        for check in &table.check_constraints {
+            let name = check.name.as_ref().map(|n| format!("CONSTRAINT {} ", dialect.ident(n))).unwrap_or_default();
+            lines.push(format!("  {name}CHECK ({})", check.expression));
+        }
         writeln!(s, "{}", lines.join(",\n")).unwrap();
         s.push(')');
         out.push(s);
     }
     for (_name, table) in &schema.tables {
         for idx in &table.indexes {
-            let cols: Vec<String> = idx.columns.iter().map(|c| dialect.ident(c.as_str())).collect();
+            let cols = idx.expression.clone().unwrap_or_else(|| {
+                idx.columns.iter().map(|c| dialect.ident(c.as_str())).collect::<Vec<_>>().join(", ")
+            });
             let unique = if idx.unique { "UNIQUE " } else { "" };
             let using = match (dialect, idx.using.as_deref()) {
                 (Dialect::Postgres, Some(method)) => format!(" USING {}", dialect.ident(method)),
@@ -343,7 +349,7 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
                 "CREATE {unique}INDEX IF NOT EXISTS {} ON {}{using} ({}){predicate}",
                 dialect.ident(idx.name.as_str()),
                 dialect.ident(table.name.as_str()),
-                cols.join(", "),
+                cols,
             ));
         }
     }
@@ -371,6 +377,15 @@ pub fn validate_schema_for_dialect(schema: &Schema, dialect: Dialect) -> Result<
         Dialect::Postgres => crate::schema::generated::GeneratedExpressionDialect::Postgres,
     };
     for table in schema.tables.values() {
+        if dialect == Dialect::Sqlite {
+            for expression in table.check_constraints.iter().map(|c| c.expression.as_str())
+                .chain(table.indexes.iter().filter_map(|i| i.expression.as_deref()))
+            {
+                if !sqlite_reads_alike(expression, table) {
+                    return Err(format!("unsupported schema expression on {}: {expression}", table.name));
+                }
+            }
+        }
         if let Some(vm) = &table.virtual_module {
             if dialect != Dialect::Sqlite {
                 return Err(format!(
@@ -438,7 +453,7 @@ pub fn render_schema_sql(schema: &Schema) -> String {
 /// No rewriting: dropping a `::text` cast is not generally
 /// meaning-preserving (`status::text = '01'` is false for an integer 1
 /// in Postgres, and `status = '01'` is true in SQLite).
-fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
+pub(crate) fn sqlite_reads_alike(predicate: &str, table: &Table) -> bool {
     const WORDS: &[&str] = &["AND", "OR", "NOT", "IS", "NULL", "TRUE", "FALSE", "IN", "BETWEEN"];
     const FUNCTIONS: &[&str] = &["lower", "upper", "length", "coalesce", "nullif", "abs"];
     let is_column = |name: &str, quoted: bool| {
@@ -612,7 +627,7 @@ mod tests {
     }
 
     fn table(name: &str, columns: Vec<Column>, indexes: Vec<Index>) -> Table {
-        Table { name: Symbol::from(name), columns, indexes, foreign_keys: Vec::new(), virtual_module: None, known_keyless: false, primary_key_columns: Vec::new() }
+        Table { name: Symbol::from(name), columns, indexes, foreign_keys: Vec::new(), check_constraints: Vec::new(), virtual_module: None, known_keyless: false, primary_key_columns: Vec::new() }
     }
 
     fn schema_of(tables: Vec<Table>) -> Schema {
@@ -957,6 +972,7 @@ end
             vec![Index {
                 name: Symbol::from("index_user_on_createdAt"),
                 columns: vec![Symbol::from("createdAt")],
+                expression: None,
                 unique: true,
                 using: None,
                 predicate: None,

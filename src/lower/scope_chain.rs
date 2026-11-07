@@ -33,21 +33,26 @@ pub type ScopeRegistry = HashMap<ClassId, HashMap<Symbol, Vec<Param>>>;
 /// Per-model UNIQUE key column sets — the conflict targets an
 /// `insert_all` has to skip on (see the inlining in [`rewrite`]).
 ///
-/// Only indexes whose every column is NOT NULL are carried. A unique
+/// Column guards carry only indexes whose every column is NOT NULL. A unique
 /// index over a nullable column is a conflict target the guard cannot
 /// read: `where(col: nil)` asks for rows whose column IS NULL, which is
 /// a different question from "no value here" and, in SQLite, is not
 /// even the question the index answers (NULLs compare distinct, so such
 /// rows never conflict). Dropping those indexes leaves the guard
 /// conservative — it skips only rows it positively found.
-pub type UniqueKeys = HashMap<ClassId, Vec<UniqueKey>>;
+pub type UniqueKeys = HashMap<ClassId, ModelUniqueKeys>;
 
-/// One unique index the guard reads: its columns, and the predicate of
-/// a partial one (`where:`), which only conflicts with the rows it
-/// selects. The predicate is the one the SQLite DDL renders
-/// ([`crate::emit::shared::schema_sql::Dialect::index_predicate`]), so
-/// the guard and the index agree; an index whose predicate SQLite isn't
-/// trusted to run is unique over every row in both.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModelUniqueKeys {
+    pub columns: Vec<UniqueKey>,
+    /// Constraints the row-wise bulk path cannot preserve. App-defined
+    /// methods keep their own behavior instead of receiving this refusal.
+    pub insert_all_refusal: Option<&'static str>,
+    pub insert_all_bang_refusal: Option<&'static str>,
+}
+
+/// A schema key's columns and normalized SQLite predicate. The existing
+/// service-call guard tests partial predicates only on existing rows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UniqueKey {
     pub columns: Vec<Symbol>,
@@ -55,17 +60,26 @@ pub struct UniqueKey {
 }
 
 /// Read the unique keys off the schema, keyed by model.
-pub fn build_unique_keys(models: &[Model], schema: &crate::schema::Schema) -> UniqueKeys {
+pub fn build_unique_keys(app: &crate::App) -> UniqueKeys {
     let mut out: UniqueKeys = HashMap::default();
-    for m in models {
-        let Some(table) = schema.tables.get(&m.table.0) else { continue };
+    for m in &app.models {
+        let Some(table) = app.schema.tables.get(&m.table.0) else { continue };
+        let refusal = if table.indexes.iter().any(|i| i.unique && i.expression.is_some()) {
+            Some("a unique expression index requires atomic conflict handling")
+        } else if !table.check_constraints.is_empty() {
+            Some("a CHECK constraint requires an atomic batch")
+        } else {
+            None
+        };
+        let insert_all_refusal = refusal.filter(|_| !crate::analyze::source_class_method(app, &m.name, "insert_all"));
+        let insert_all_bang_refusal = refusal.filter(|_| !crate::analyze::source_class_method(app, &m.name, "insert_all!"));
         let not_null = |name: &Symbol| {
             table.columns.iter().any(|c| &c.name == name && !c.nullable)
         };
         let mut keys: Vec<UniqueKey> = table
             .indexes
             .iter()
-            .filter(|i| i.unique && !i.columns.is_empty())
+            .filter(|i| i.unique && i.expression.is_none() && !i.columns.is_empty())
             .filter(|i| i.columns.iter().all(not_null))
             .map(|i| UniqueKey {
                 columns: i.columns.clone(),
@@ -85,8 +99,8 @@ pub fn build_unique_keys(models: &[Model], schema: &crate::schema::Schema) -> Un
         if !primary.is_empty() && !keys.iter().any(|k| k.columns == primary && k.predicate.is_none()) {
             keys.push(UniqueKey { columns: primary, predicate: None });
         }
-        if !keys.is_empty() {
-            out.insert(m.name.clone(), keys);
+        if !keys.is_empty() || insert_all_refusal.is_some() || insert_all_bang_refusal.is_some() {
+            out.insert(m.name.clone(), ModelUniqueKeys { columns: keys, insert_all_refusal, insert_all_bang_refusal });
         }
     }
     out
@@ -3651,9 +3665,9 @@ fn var_expr(span: crate::span::Span, name: &Symbol) -> Expr {
 /// ```
 ///
 /// One `unless` per unique key, OR'd, so a table with two unique
-/// indexes skips a row conflicting on either. A partial index adds its
-/// predicate, `.where("(revoked_at IS NULL)")`, so only a row it covers
-/// counts as a conflict. A model with no usable unique key (none
+/// indexes skips a row conflicting on either. A partial predicate is tested
+/// only on the existing row, preserving this path's existing limitation.
+/// A model with no usable unique key (none
 /// declared, or every one of them nullable — see [`UniqueKeys`]) keeps
 /// the bare save: there is nothing to conflict on that this can read.
 fn guard_on_unique_keys(
@@ -3663,9 +3677,12 @@ fn guard_on_unique_keys(
     save: Expr,
     ctx: &Ctx<'_>,
 ) -> Expr {
+    // Relation-taking bodies previously had no column-key registry. Carry
+    // the new constraint refusals there without adding a column guard.
+    if ctx.scope_body.is_some() { return save; }
     let Some(keys) = ctx.unique_keys.get(model) else { return save };
     let mut cond: Option<Expr> = None;
-    for key in keys {
+    for key in &keys.columns {
         // `<Model>.where(col: __attrs[:col], …).exists?`, with a partial
         // index's predicate as a second `where`.
         let entries = key
@@ -4775,7 +4792,27 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 // the same read-then-write shape `increment!` already
                 // carries, and under single-threaded dispatch the window
                 // it opens is not observable. Ledgered with the rest.
-                if method.as_str() == "insert_all" && args.len() == 1 && block.is_none() {
+                let source_bulk = matches!(method.as_str(), "insert_all" | "insert_all!")
+                    && crate::analyze::ClassInfo::source_class_method(&ctx.assocs.finder_classes, &m, &method);
+                let rowwise_bulk = !source_bulk && block.is_none() && match method.as_str() {
+                    "insert_all" => args.len() == 1,
+                    "insert_all!" => !args.is_empty() && args.len() <= 2 && insert_all_bang_returning(args.get(1)).is_some(),
+                    _ => false,
+                };
+                if rowwise_bulk {
+                    let refusal = ctx.unique_keys.get(&m).and_then(|keys| {
+                        if method.as_str() == "insert_all" { keys.insert_all_refusal } else { keys.insert_all_bang_refusal }
+                    });
+                    if let Some(reason) = refusal {
+                        crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
+                            span, None, method.as_str(),
+                            format!("{m}.{method} with {reason}; row-wise lowering does not support it"),
+                        ));
+                        *expr = put(span, Some(r), method, args, block, parenthesized);
+                        return None;
+                    }
+                }
+                if !source_bulk && method.as_str() == "insert_all" && args.len() == 1 && block.is_none() {
                     let attrs = Symbol::from("__attrs");
                     let build = syn(
                         span,
@@ -4838,7 +4875,7 @@ fn rewrite_send(expr: &mut Expr, ctx: &Ctx, locals: &mut Locals) -> Option<Class
                 //
                 // Only a literal column list (Strings or Symbols) lowers;
                 // anything else declines.
-                if method.as_str() == "insert_all!" && !args.is_empty() && args.len() <= 2 && block.is_none() {
+                if !source_bulk && method.as_str() == "insert_all!" && !args.is_empty() && args.len() <= 2 && block.is_none() {
                     let returning = insert_all_bang_returning(args.get(1));
                     if let Some(columns) = returning {
                         let attrs = Symbol::from("__attrs");
@@ -5663,8 +5700,9 @@ pub fn rewrite_scope_body(
     scopes: &ScopeRegistry,
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
+    unique_keys: &UniqueKeys,
 ) {
-    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, false);
+    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, unique_keys, false);
 }
 
 /// The same rewrite for an ASSOCIATION-scoped class method's body, which
@@ -5678,8 +5716,9 @@ pub fn rewrite_assoc_scope_body(
     scopes: &ScopeRegistry,
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
+    unique_keys: &UniqueKeys,
 ) {
-    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, true);
+    rewrite_relation_taking_body(body, self_model, rel_param, scopes, models, assocs, unique_keys, true);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5690,6 +5729,7 @@ fn rewrite_relation_taking_body(
     scopes: &ScopeRegistry,
     models: &HashSet<ClassId>,
     assocs: &AssocRegistry,
+    unique_keys: &UniqueKeys,
     self_const_is_implicit: bool,
 ) {
     // Scope bodies don't consult user-method return types (none
@@ -5698,15 +5738,11 @@ fn rewrite_relation_taking_body(
     // after this runs) — conservative empty registries.
     let empty_returns = UserMethodReturns::new();
     let empty_assoc_cm = AssocClassMethods::default();
-    // A scope body's `insert_all` (none in the corpus) keeps the
-    // unguarded inline: this entry point takes registries, not the app,
-    // so there is no schema here to read a conflict target from.
-    let empty_unique = UniqueKeys::default();
     let ctx = Ctx {
         scopes,
         models,
         assocs,
-        unique_keys: &empty_unique,
+        unique_keys,
         assoc_class_methods: &empty_assoc_cm,
         scope_body: Some((self_model.clone(), rel_param.clone())),
         self_const_is_implicit,

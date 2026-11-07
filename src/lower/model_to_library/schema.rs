@@ -441,7 +441,7 @@ pub(super) fn push_schema_methods(
     // only when some target has a predicate; the runtime's default
     // answers "" for everyone else. The predicate is the one the DDL of
     // the emit's dialect renders (`Dialect::current`).
-    let mut unique: Vec<&crate::schema::Index> = table.indexes.iter().filter(|i| i.unique).collect();
+    let mut unique: Vec<&crate::schema::Index> = table.indexes.iter().filter(|i| i.unique && i.expression.is_none()).collect();
     unique.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
     let mut targets: Vec<(String, Option<String>)> = Vec::new();
     for i in unique {
@@ -508,19 +508,22 @@ pub(super) fn push_schema_methods(
     // "index_x_on_a_and_b")`) means its columns, as in Rails'
     // `InsertAll`. Emitted only for a table with a unique index; the
     // runtime's default answers "" for everyone else.
-    let named: Vec<(String, String)> = {
+    let named: Vec<(String, Option<String>)> = {
         let mut unique: Vec<&crate::schema::Index> = table.indexes.iter().filter(|i| i.unique).collect();
         unique.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
         unique
             .into_iter()
             .filter(|i| !i.name.as_str().is_empty())
-            .map(|i| (i.name.as_str().to_string(), i.columns.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", ")))
+            .map(|i| (i.name.as_str().to_string(), i.expression.is_none().then(|| i.columns.iter().map(|c| c.as_str()).collect::<Vec<_>>().join(", "))))
             .collect()
     };
     if !named.is_empty() {
         let name = Symbol::from("name");
         let mut body = lit_str(String::new());
         for (index, cols) in named.into_iter().rev() {
+            let target = cols.map(lit_str).unwrap_or_else(|| with_ty(Expr::new(
+                Span::synthetic(), ExprNode::Raise { value: lit_str(format!("unique_by expression index `{index}` is not supported")) },
+            ), Ty::Bottom));
             let cond = with_ty(
                 Expr::new(
                     Span::synthetic(),
@@ -535,7 +538,7 @@ pub(super) fn push_schema_methods(
                 Ty::Bool,
             );
             body = with_ty(
-                Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: lit_str(cols), else_branch: body }),
+                Expr::new(Span::synthetic(), ExprNode::If { cond, then_branch: target, else_branch: body }),
                 Ty::Str,
             );
         }

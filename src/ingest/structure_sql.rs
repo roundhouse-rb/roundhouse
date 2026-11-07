@@ -294,6 +294,7 @@ fn handle_create_table(
         columns,
         indexes: Vec::new(),
         foreign_keys: Vec::new(),
+        check_constraints: Vec::new(),
         virtual_module: None,
         known_keyless: false,
         primary_key_columns,
@@ -692,6 +693,7 @@ fn handle_create_index(stmt: &str, file: &str, schema: &mut Schema, gaps: &mut V
             table.indexes.push(Index {
                 name: Symbol::from(index_name),
                 columns: cols,
+                expression: None,
                 unique,
                 using,
                 predicate,

@@ -1418,6 +1418,7 @@ mod tests {
                 ],
                 indexes: vec![],
                 foreign_keys: vec![],
+                check_constraints: Vec::new(),
                 virtual_module: None,
                 known_keyless: false,
                 primary_key_columns: Vec::new(),

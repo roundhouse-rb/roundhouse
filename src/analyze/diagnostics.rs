@@ -979,6 +979,7 @@ pub fn diagnose_with_coverage(app: &App) -> (Vec<Diagnostic>, PreloadCoverage) {
     out.extend(app.unknown_association_targets.iter().cloned());
     out.extend(app.gem_middleware_refusals.iter().cloned());
     out.extend(app.included_hoist_conflicts.iter().cloned());
+    out.extend(app.superclass_refusals.iter().cloned());
     for class in &app.library_classes {
         for initializer in &class.class_ivar_initializers {
             diagnose_expr(initializer, &mut out);

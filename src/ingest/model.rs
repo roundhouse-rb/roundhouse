@@ -3392,7 +3392,7 @@ pub(super) fn ingest_method(
     params.extend(formals.anonymous.map(super::forwarding::AnonymousFormal::into_param));
 
     let body = match def.body() {
-        Some(b) => ingest_expr(&b, file)?,
+        Some(b) => super::expr::with_block_param(block_param.as_ref().map(|p| p.name.clone()), || ingest_expr(&b, file))?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };
 
@@ -4104,7 +4104,20 @@ fn parse_association(
             let value = assoc.value();
             match key.as_str() {
                 // `"::Portal"` names the top-level class `Portal`; kept as written it is a class no one defines.
-                "class_name" => class_name = string_value(&value).map(|s| s.trim_start_matches("::").to_string()),
+                "class_name" => {
+                    class_name = string_value(&value).map(|s| s.trim_start_matches("::").to_string());
+                    // `class_name: Doorkeeper.config.access_token_class.to_s`: what the initializers leave it naming, once known.
+                    if class_name.is_none()
+                        && let Ok(expr) = ingest_expr(&value, file)
+                    {
+                        let span = Span {
+                            file: super::sources::file_id(file),
+                            start: call.location().start_offset() as u32,
+                            end: call.location().end_offset() as u32,
+                        };
+                        super::configured_superclass::defer_class_name(span, expr);
+                    }
+                }
                 "foreign_key" => {
                     foreign_key = string_value(&value).or_else(|| symbol_value(&value))
                 }

@@ -1719,6 +1719,10 @@ fn retag_scope(entries: &mut Vec<RouteSpec>, scope: ResourceScope) {
 /// time the outer block merges here, any param the inner block set is
 /// already present on the child's `constraints` map and `or_insert`
 /// leaves it alone.
+pub(super) fn apply_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, String>) {
+    merge_outer_constraints(entries, outer)
+}
+
 fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, String>) {
     if outer.is_empty() {
         return;
@@ -1740,6 +1744,11 @@ fn merge_outer_constraints(entries: &mut [RouteSpec], outer: &IndexMap<Symbol, S
                 merge_outer_constraints(entries, outer);
             }
             RouteSpec::Root { .. } | RouteSpec::RackMount { .. } => {}
+            RouteSpec::Deferred { constraints, .. } => {
+                for (k, v) in outer {
+                    constraints.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
         }
     }
 }
@@ -2318,6 +2327,15 @@ fn redirect_expression_is_string_in(
     }
 }
 
+thread_local! {
+    static GEM_DSL: RefCell<HashSet<String>> = RefCell::new(HashSet::default());
+}
+
+/// The routing methods gems add to the mapper (`ingest::gem_routes`), read in place for later.
+pub(super) fn set_gem_dsl(names: HashSet<String>) {
+    GEM_DSL.with(|g| *g.borrow_mut() = names);
+}
+
 /// Recognize a route DSL call; unknown calls return an unsupported-DSL error.
 fn ingest_route_call(
     call: &ruby_prism::CallNode<'_>,
@@ -2461,6 +2479,16 @@ fn ingest_route_call(
             suppress_helpers: false, mount: false, within: ResourceScope::Nested,
             entries: block_entries(call, file, parent, cx)?,
         })),
+        // A gem's own routing method: kept where it stands, drawn once its body can run.
+        _ if call.receiver().is_none() && GEM_DSL.with(|g| g.borrow().contains(method)) => {
+            let call_expr = super::expr::ingest_expr(&call.as_node(), file)?;
+            let span = Span {
+                file: super::sources::file_id(file),
+                start: call.location().start_offset() as u32,
+                end: call.location().end_offset() as u32,
+            };
+            Ok(Some(RouteSpec::Deferred { call: call_expr, span, constraints: IndexMap::new() }))
+        }
         // Unknown DSL — `concern`, `use_doorkeeper`, and Devise's
         // route-authentication guards (`authenticate` / `authenticated` /
         // `unauthenticated`), among others, land here. Strict ingest fails

@@ -115,6 +115,8 @@ mod external_include;
 mod hook_class_attribute;
 pub(crate) mod inherited_alias;
 mod class_macros;
+mod configured_superclass;
+mod gem_routes;
 mod column_accessors;
 mod model_macros;
 mod referenced_carriers;

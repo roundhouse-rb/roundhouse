@@ -624,6 +624,7 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
 fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[String]) -> IngestResult<App> {
     // Not left from an earlier ingest in this process: the hoists are checked against this app's modules.
     super::library_class::included_hoist_conflicts(&[]);
+    super::configured_superclass::reset();
     super::sources::reset();
     super::each_validator::reset();
     let _source_root = super::sources::set_root(dir);
@@ -2217,6 +2218,8 @@ end
     );
     if !route_roots.is_empty() {
         let block_wrappers = mapper_extension_block_methods(&app, vfs, dir, &engine_dirs);
+        super::routes::set_gem_dsl(super::gem_routes::mapper_methods(&app));
+        super::devise_routes::set_model_modules(devise_modules(&app));
         // The constants the route files read, folded from their owners
         // as a model body's are, for `constraints:` values. A route
         // names a controller's constant as often as a model's, so its
@@ -3106,6 +3109,8 @@ end
     super::on_load_reopen::apply_pending(&mut app);
     splice_concerns_into_models(&mut app, &concern_class_method_spans);
     splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
+    // After both splices: a concern's `included do self.table_name = compute_…` and the class method it calls are the model's now.
+    super::configured_superclass::fold_table_names(vfs, dir, &mut app);
     let owned_validate_calls = decline_owned_validate_calls(&mut app, &sources, &concern_class_method_spans, &const_resolver.for_sources(&sources));
     // After the splice, so a concern's DSL on a tableless parent reaches
     // its subclasses too; before the macros, which read the result.
@@ -3150,6 +3155,10 @@ end
     // The sources do not change between the two: one word index serves both.
     let mentions = super::class_macros::Mentions::new(&sources);
     super::class_macros::expand_class_macros(&mut app, &sources, &mentions);
+    // After the macros: a configured object's readers and its builder's writers are methods by now.
+    super::configured_superclass::fold(vfs, dir, &mut app);
+    super::configured_superclass::fold_class_names(vfs, dir, &mut app);
+    super::gem_routes::expand(vfs, dir, &mut app);
     super::class_macros::drop_expanded_hook_macros(&mut app, &hook_macros_called, &mentions);
     super::model_callbacks::expand_model_callbacks(&mut app);
     // After the macros: an expanded `has_ancestry` is what writes the `extend`.
@@ -14154,3 +14163,25 @@ mod path_gem_vfs_tests {
         }
     }
 }
+
+/// Each model's `devise :a, :b` declaration, by class name: the modules whose routes `devise_for` draws.
+fn devise_modules(app: &App) -> crate::det::HashMap<String, Vec<String>> {
+    let mut out: crate::det::HashMap<String, Vec<String>> = crate::det::HashMap::default();
+    for model in &app.models {
+        for item in &model.body {
+            let crate::dialect::ModelBodyItem::Unknown { expr, .. } = item else { continue };
+            let crate::expr::ExprNode::Send { recv: None, method, args, .. } = &*expr.node else { continue };
+            if method.as_str() != "devise" {
+                continue;
+            }
+            let modules = out.entry(model.name.0.as_str().to_string()).or_default();
+            for arg in args {
+                if let crate::expr::ExprNode::Lit { value: crate::expr::Literal::Sym { value } } = &*arg.node {
+                    modules.push(value.as_str().to_string());
+                }
+            }
+        }
+    }
+    out
+}
+

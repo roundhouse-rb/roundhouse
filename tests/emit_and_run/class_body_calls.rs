@@ -70,6 +70,8 @@ module LabelMethods
   end
 end
 "#)
+        // Not a literal: a name known when the class loads is one the expansion defines ahead of time.
+        .write("app/models/extended_document.rb", "class ExtendedDocument < ExtendedBase\n  label ENV.fetch(\"LABEL\", \"extended\")\nend\n")
         .emit(BuildTarget::Spinel);
     assert!(errors.iter().any(|e| e.contains("runtime-defined method")), "{errors:#?}");
 }

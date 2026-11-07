@@ -46,6 +46,10 @@ mod rack_mounts;
 mod time_change_usec_contract;
 #[path = "spinel_toolchain/time_change_usec.rs"]
 mod time_change_usec;
+#[path = "support/option_dsl.rs"]
+mod option_dsl;
+#[path = "spinel_toolchain/option_dsl.rs"]
+mod option_dsl_native;
 #[path = "support/string_truncate.rs"]
 mod string_truncate;
 #[path = "spinel_toolchain/string_truncate.rs"]

@@ -184,6 +184,7 @@ fn tiny_blog_round_trips() {
         gem_middlewares: Vec::new(),
         gem_middleware_refusals: Vec::new(),
         included_hoist_conflicts: Vec::new(),
+        superclass_refusals: Vec::new(),
         importmap: None,
         engine_importmaps: Vec::new(),
         inertia: None,

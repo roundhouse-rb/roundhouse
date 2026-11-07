@@ -3,6 +3,23 @@
 # spinel tree swaps in the real bcrypt package (its surface is
 # inferred from the package source).
 module BCrypt
+  class Error < StandardError
+  end
+
+  module Errors
+    class InvalidSalt < BCrypt::Error
+    end
+
+    class InvalidHash < BCrypt::Error
+    end
+
+    class InvalidCost < BCrypt::Error
+    end
+
+    class InvalidSecret < BCrypt::Error
+    end
+  end
+
   module Engine
     DEFAULT_COST: Integer
   end

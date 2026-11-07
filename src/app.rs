@@ -148,6 +148,9 @@ pub struct App {
     /// A def hoisted out of a concern's `included do` that a module the same block includes also defines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub included_hoist_conflicts: Vec<crate::diagnostic::Diagnostic>,
+    /// A superclass expression read off a configured object that did not fold to a constant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub superclass_refusals: Vec<crate::diagnostic::Diagnostic>,
     /// Pins from `config/importmap.rb`, expanded (each
     /// `pin_all_from` has been resolved into explicit per-file
     /// pins via `app/javascript/**` walking). Consumed by the
@@ -1256,6 +1259,7 @@ impl App {
             gem_middlewares: Vec::new(),
             gem_middleware_refusals: Vec::new(),
             included_hoist_conflicts: Vec::new(),
+            superclass_refusals: Vec::new(),
             importmap: None,
             engine_importmaps: Vec::new(),
             inertia: None,

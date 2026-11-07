@@ -276,6 +276,28 @@ pub(crate) fn resolve_default_controller(module_prefix: &str, controller: &str) 
     Some(format!("{module}::{}Controller", crate::naming::camelize(mapping)))
 }
 
+thread_local! {
+    static MODEL_MODULES: std::cell::RefCell<HashMap<String, Vec<String>>> = std::cell::RefCell::new(HashMap::default());
+}
+
+/// Each model's `devise :database_authenticatable, …` modules, by class name, read before the routes.
+pub(super) fn set_model_modules(modules: HashMap<String, Vec<String>>) {
+    MODEL_MODULES.with(|m| *m.borrow_mut() = modules);
+}
+
+/// `Devise::ROUTES`: the route a module draws, by the mapping this table models; `None` for one it does not.
+fn module_route(module: &str) -> Option<Option<&'static str>> {
+    match module {
+        "database_authenticatable" => Some(Some("sessions")),
+        "registerable" => Some(Some("registrations")),
+        "recoverable" => Some(Some("passwords")),
+        "confirmable" => Some(Some("confirmations")),
+        "lockable" | "omniauthable" => Some(None),
+        "rememberable" | "trackable" | "validatable" | "timeoutable" => Some(Some("")),
+        _ => None,
+    }
+}
+
 /// Expand `devise_for :users[, path:, path_names:, format:, controllers:
 /// { sessions: "users/sessions", … }]`.
 ///
@@ -492,6 +514,31 @@ pub(super) fn ingest_devise_for(
             None => default_controller_marker(mapping),
         }
     };
+    // `Devise::Mapping#used_routes`: the routes of the modules the model declares, as Rails draws them.
+    let class_name = crate::naming::camelize_path(&singular);
+    let declared = MODEL_MODULES.with(|m| m.borrow().get(&class_name).cloned());
+    let used: Option<Vec<&str>> = match &declared {
+        Some(modules) => {
+            let mut used = Vec::new();
+            let mut known = true;
+            for module in modules {
+                match module_route(module) {
+                    Some(Some(mapping)) => used.push(mapping),
+                    Some(None) => {
+                        return Err(IngestError::Unsupported {
+                            file: file.into(),
+                            message: format!("devise_for: the routes `{class_name}`'s `:{module}` draws are not modeled"),
+                        });
+                    }
+                    // Another gem's module (devise-two-factor's `:two_factor_authenticatable`, `route: :session`): which route it adds is its `Devise.add_module`'s, not read here.
+                    None => known = false,
+                }
+            }
+            known.then_some(used)
+        }
+        None => None,
+    };
+    let in_use = |mapping: &str| used.as_ref().is_none_or(|u| u.contains(&mapping));
     let mut resolved: HashMap<&str, String> = HashMap::default();
     for route in DEVISE_ROUTES {
         resolved
@@ -500,6 +547,7 @@ pub(super) fn ingest_devise_for(
     }
     let entries = DEVISE_ROUTES
         .iter()
+        .filter(|route| in_use(route.mapping))
         .map(|route| {
             let controller = resolved.get(route.mapping).expect("mapping pre-resolved");
             let as_name = route.as_name.replace("{singular}", &singular);

@@ -12,6 +12,24 @@
 # Own file rather than a gem_facades.rb section so the swap is
 # whole-file — the same grain every other façade mechanism uses.
 module BCrypt
+  class Error < StandardError
+  end
+
+  # The gem's own, raised where it rejects its input: a caller's `rescue BCrypt::Errors::InvalidHash` names one.
+  module Errors
+    class InvalidSalt < BCrypt::Error
+    end
+
+    class InvalidHash < BCrypt::Error
+    end
+
+    class InvalidCost < BCrypt::Error
+    end
+
+    class InvalidSecret < BCrypt::Error
+    end
+  end
+
   module Engine
     DEFAULT_COST = 12
   end

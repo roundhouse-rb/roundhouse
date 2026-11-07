@@ -18,6 +18,21 @@ class AddressGuard
   def self.inside?(net, text)
     IPAddr.new(net).include?(IPAddr.new(text))
   end
+
+  # doorkeeper's `URIChecker`: the base class Ruby's errors share, an ArgumentError.
+  def self.address?(text)
+    IPAddr.new(text)
+    true
+  rescue IPAddr::Error
+    false
+  end
+
+  def self.argument_error?(text)
+    IPAddr.new(text)
+    false
+  rescue ArgumentError
+    true
+  end
 end
 "#;
 
@@ -28,6 +43,8 @@ fn app() -> emit_and_run::Overlay {
 const ASSERTIONS: &str = r##"got = [AddressGuard.blocked?("10.1.2.3"), AddressGuard.blocked?("100.127.0.1"), AddressGuard.blocked?("8.8.8.8"),
        AddressGuard.blocked?("fd00::1"), AddressGuard.inside?("10.0.0.0/8", "::ffff:10.1.2.3"), AddressGuard.inside?("192.168.0.0/16", "192.168.255.255")]
 raise got.inspect unless got == [true, true, false, true, false, true]
+errors = [AddressGuard.address?("10.1.2.3"), AddressGuard.address?("not an address"), AddressGuard.argument_error?("999.1.1.1")]
+raise errors.inspect unless errors == [true, false, true]
 puts "ipaddr include passed"
 "##;
 

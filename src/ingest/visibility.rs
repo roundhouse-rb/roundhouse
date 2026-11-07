@@ -386,6 +386,16 @@ impl Visibility {
                 defaults.extend(visibility.defaults);
             }
             for statement in flatten_statements(body) {
+                // `X = Struct.new(…) do … end`: the block is that class's body, with defaults of its own.
+                if let Some(cw) = statement.as_constant_write_node()
+                    && super::library_class::struct_constant_block(&cw.value())
+                {
+                    let block_body = cw.value().as_call_node().and_then(|c| c.block()).and_then(|b| b.as_block_node()).and_then(|b| b.body());
+                    if let Ok(visibility) = Self::resolve_carrying_inherited(block_body.as_ref(), file, None) {
+                        defaults.extend(visibility.defaults);
+                    }
+                    continue;
+                }
                 let Some(call) = statement.as_call_node() else { continue };
                 if call.receiver().is_some() || constant_id_str(&call.name()) != "included" {
                     continue;
@@ -1096,7 +1106,7 @@ impl Visibility {
                 // not this body's; `library_class::data_block_classes`
                 // gives them a class of their own.
                 if node.as_constant_write_node().is_some_and(|cw| {
-                    super::library_class::data_define_block(&cw.value()).is_some()
+                    super::library_class::data_define_block(&cw.value()).is_some() || super::library_class::struct_constant_block(&cw.value())
                 }) {
                     continue;
                 }

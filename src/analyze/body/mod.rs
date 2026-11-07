@@ -3226,6 +3226,17 @@ impl<'a> BodyTyper<'a> {
                     Some(p) => narrowing::apply_narrowing(&base, p, true),
                     None => base.clone(),
                 };
+                // `if e.respond_to?(:response)` where nothing `e` can be answers it: the branch is for a value the
+                // inference has not seen, so `e` is untyped there rather than the class it would fail on.
+                if let ExprNode::Send { recv: Some(r), method, args, block: None, .. } = &*cond.node
+                    && method.as_str() == "respond_to?"
+                    && let ExprNode::Var { name, .. } = &*r.node
+                    && let Some(ExprNode::Lit { value: Literal::Sym { value: asked } }) = args.first().map(|a| &*a.node)
+                    && let Some(ty) = base.local_bindings.get(name)
+                    && self.never_responds(ty, asked)
+                {
+                    then_ctx.local_bindings.insert(name.clone(), Ty::Untyped);
+                }
                 narrowing::drop_unstable_members(&mut then_ctx, &[&*cond, &*then_branch]);
                 let t = self.analyze_expr(then_branch, &then_ctx);
                 let mut else_ctx = match &pred {

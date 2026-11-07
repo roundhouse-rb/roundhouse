@@ -63,9 +63,18 @@
 # * `to_range`, `succ`, arithmetic, and `to_s`'s compressed IPv6 form.
 #   None is reached by the corpus.
 class IPAddr
+  class Error < ArgumentError
+  end
+
   # Raised by `IPAddr.new` on a string that is not an address, which is
   # the branch campfire's validation rescues.
-  class InvalidAddressError < StandardError
+  class InvalidAddressError < Error
+  end
+
+  class AddressFamilyError < Error
+  end
+
+  class InvalidPrefixError < InvalidAddressError
   end
 
   def initialize(addr)

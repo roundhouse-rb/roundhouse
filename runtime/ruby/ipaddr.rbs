@@ -1,5 +1,14 @@
 class IPAddr
-  class InvalidAddressError < StandardError
+  class Error < ArgumentError
+  end
+
+  class InvalidAddressError < Error
+  end
+
+  class AddressFamilyError < Error
+  end
+
+  class InvalidPrefixError < InvalidAddressError
   end
 
   @octets: Array[Integer]

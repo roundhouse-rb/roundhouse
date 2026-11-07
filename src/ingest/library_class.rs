@@ -816,7 +816,9 @@ pub(super) fn library_class_and_struct_base(
         Some(_) => Some(struct_base_id(&owner)),
         None => parent,
     };
-    if parent.is_none() && class.superclass().is_some() {
+    let deferred = parent.is_none()
+        && class.superclass().is_some_and(|n| super::configured_superclass::defer(&owner, &n, source_parent_span, file));
+    if parent.is_none() && class.superclass().is_some() && !deferred {
         super::prism::push(crate::diagnostic::Diagnostic::unsupported(
             source_parent_span,
             None,
@@ -1897,9 +1899,18 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
                 return None;
             }
             let body = block.body();
-            // Not a general block body: only `def`s become the class's methods without running anything at definition time.
+            // Not a general block body: the class body's own declarations, which run nothing of the app's at definition time.
             if let Some(statements) = body.as_ref().and_then(|b| b.as_statements_node()) {
-                if !statements.body().iter().all(|stmt| stmt.as_def_node().is_some()) {
+                if !statements.body().iter().all(|stmt| struct_block_declaration(&stmt)) {
+                    return None;
+                }
+                // Not over a member: Ruby's block `attr_accessor :a` replaces the member's reader with one of `@a`, which this class cannot tell from the member.
+                if statements.body().iter().any(|stmt| {
+                    stmt.as_call_node().is_some_and(|call| {
+                        matches!(constant_id_str(&call.name()).as_ref(), "attr_reader" | "attr_writer" | "attr_accessor" | "delegate")
+                            && call.arguments().is_some_and(|a| a.arguments().iter().any(|arg| symbol_value(&arg).is_some_and(|n| members.iter().any(|m| m.as_str() == n))))
+                    })
+                }) {
                     return None;
                 }
                 // Not an `initialize` of its own: in Ruby the generated one is
@@ -1917,6 +1928,38 @@ fn struct_constant_spec<'pr>(value: &ruby_prism::Node<'pr>) -> Option<StructCons
         }
     };
     Some(StructConstant { name: Symbol::from(""), members, keyword_init, positional_written, body })
+}
+
+fn struct_block_declaration(stmt: &ruby_prism::Node<'_>) -> bool {
+    if stmt.as_def_node().is_some() {
+        return true;
+    }
+    if let Some(sc) = stmt.as_singleton_class_node() {
+        return sc.expression().as_self_node().is_some()
+            && sc.body().is_none_or(|b| flatten_statements(b).iter().all(|s| s.as_def_node().is_some() || struct_block_marker(s)));
+    }
+    struct_block_marker(stmt)
+        || stmt.as_call_node().is_some_and(|call| {
+            call.receiver().is_none()
+                && call.block().is_none()
+                && matches!(
+                    constant_id_str(&call.name()).as_ref(),
+                    "delegate" | "attr_reader" | "attr_writer" | "attr_accessor" | "include"
+                )
+        })
+}
+
+fn struct_block_marker(stmt: &ruby_prism::Node<'_>) -> bool {
+    stmt.as_call_node().is_some_and(|call| {
+        call.receiver().is_none()
+            && call.block().is_none()
+            && matches!(constant_id_str(&call.name()).as_ref(), "public" | "protected" | "private" | "private_class_method" | "public_class_method")
+    })
+}
+
+/// `X = Struct.new(…) do … end` whose block this ingest reads as the class's body: the walk of the enclosing body leaves it to that class.
+pub(super) fn struct_constant_block(value: &ruby_prism::Node<'_>) -> bool {
+    value.as_call_node().is_some_and(|c| c.block().is_some()) && struct_constant_spec(value).is_some_and(|s| s.body.is_some())
 }
 
 /// The classes `owner`'s body defines through `X = Struct.new(…)`, with
@@ -1940,7 +1983,13 @@ fn struct_constant_classes(
             },
         );
         if spec.body.is_some() {
-            class.methods.extend(walk_decl_body(spec.body, &id, file, DeclBodyMode::Instance)?.methods);
+            let body = walk_decl_body(spec.body, &id, file, DeclBodyMode::Instance)?;
+            class.methods.extend(body.methods);
+            class.includes.extend(body.includes);
+            class.include_spans.extend(body.include_spans);
+            class.constants.extend(body.constants);
+            class.unknown_calls.extend(body.unknown_calls);
+            class.class_ivar_initializers.extend(body.class_initializers);
         }
         out.push((spec.name, class));
     }
@@ -2115,6 +2164,19 @@ impl DeclBody {
             .class_initializers
             .iter()
             .any(|expr| !expr.span.is_synthetic());
+        // Not where no `@@` initializer is written: there a writer call runs in place as a body statement already.
+        if has_source_ordered_init {
+            let methods = &self.methods;
+            let writes: Vec<Expr> = self.unknown_calls.extract_if(.., |call| runs_own_writer(call, methods)).collect();
+            for write in writes {
+                let at = self
+                    .class_initializers
+                    .iter()
+                    .position(|init| !init.span.is_synthetic() && init.span.file == write.span.file && init.span.start > write.span.start)
+                    .unwrap_or(self.class_initializers.len());
+                self.class_initializers.insert(at, write);
+            }
+        }
         // Constants and `@@` initializers whose values are all literals
         // cannot observe one another, so emitting them in a different order
         // than the source wrote them changes nothing (lobsters' `Twitter`:
@@ -2123,7 +2185,7 @@ impl DeclBody {
         let order_independent = self.constants.iter().all(|(_, value)| is_order_safe_value(value))
             && self.class_initializers.iter().all(|expr| match &*expr.node {
                 ExprNode::Assign { value, .. } => is_order_safe_value(value),
-                _ => false,
+                _ => is_cvar_mutation(expr),
             });
         let literal_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
             ExprNode::Assign { value, .. } => is_literal_value(value),
@@ -2136,6 +2198,8 @@ impl DeclBody {
                     && !args.is_empty()
                     && args.iter().all(|a| matches!(&*a.node, ExprNode::Const { .. })))
                     // A visibility declaration over names reads no class variable.
+                    || (method.as_str() == "autoload"
+                        && matches!(args.as_slice(), [name, path] if matches!(&*name.node, ExprNode::Lit { value: Literal::Sym { .. } }) && matches!(&*path.node, ExprNode::Lit { value: Literal::Str { .. } })))
                     || (matches!(method.as_str(), "private_constant" | "public_constant" | "private_class_method" | "public_class_method")
                         && args.iter().all(|a| matches!(&*a.node, ExprNode::Lit { value: Literal::Sym { .. } | Literal::Str { .. } })))
             }
@@ -2143,7 +2207,7 @@ impl DeclBody {
         });
         let safe_inits = self.class_initializers.iter().all(|expr| match &*expr.node {
             ExprNode::Assign { value, .. } => is_order_safe_value(value),
-            _ => false,
+            _ => is_cvar_mutation(expr),
         });
         // Not an ancestor whose `@@x` this body's would share: Ruby's own mixins hold none.
         let builtin_includes = self.includes.iter().all(|i| matches!(i.0.as_str(), "Comparable" | "Enumerable" | "Kernel"));
@@ -2159,6 +2223,29 @@ impl DeclBody {
         }
         Ok(())
     }
+}
+
+/// `@@x << v`, or `self.x = v` through the body's own writer: a call whose arguments are order-safe values.
+fn is_cvar_mutation(expr: &Expr) -> bool {
+    match &*expr.node {
+        ExprNode::Send { recv: Some(recv), args, block: None, .. } => {
+            (matches!(&*recv.node, ExprNode::Var { name, .. } if name.as_str().starts_with("@@")) || matches!(&*recv.node, ExprNode::SelfRef))
+                && args.iter().all(is_order_safe_value)
+        }
+        ExprNode::Assign { target: LValue::Attr { recv, .. }, value } => matches!(&*recv.node, ExprNode::SelfRef) && is_order_safe_value(value),
+        _ => false,
+    }
+}
+
+fn runs_own_writer(expr: &Expr, methods: &[crate::dialect::MethodDef]) -> bool {
+    let writer = match &*expr.node {
+        ExprNode::Send { recv: Some(recv), method, .. } if matches!(&*recv.node, ExprNode::SelfRef) => format!("{}", method.as_str()),
+        ExprNode::Assign { target: LValue::Attr { recv, name }, .. } if matches!(&*recv.node, ExprNode::SelfRef) => format!("{}=", name.as_str()),
+        _ => return false,
+    };
+    writer.ends_with('=')
+        && is_cvar_mutation(expr)
+        && methods.iter().any(|m| m.receiver == crate::dialect::MethodReceiver::Class && m.name.as_str() == writer)
 }
 
 /// A value whose answer does not depend on where the class body runs it:
@@ -3088,6 +3175,18 @@ fn walk_decl_body_with_visibility<'pr>(
             if let Ok(e) = ingest_expr(&stmt, file) {
                 out.unknown_calls.push(e);
             }
+            continue;
+        }
+        // `@@helpers << Devise::Controllers::Helpers`: not a call the replay rules carry, which dropped it without a word; it is the initializer's next step.
+        if stmt.as_call_node().is_some_and(|call| call.receiver().is_some_and(|r| r.as_class_variable_read_node().is_some()) && call.block().is_none()) {
+            let mutation = ingest_expr(&stmt, file)?;
+            if !is_cvar_mutation(&mutation) {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: "class-variable mutation with a non-literal argument".into(),
+                });
+            }
+            out.class_initializers.push(mutation);
             continue;
         }
         // Retain native nil initialization in source order. Only a declared
@@ -4498,8 +4597,8 @@ pub(super) fn ingest_library_method_with_keywords(
         });
 
     let body = match def.body() {
-        Some(b) => super::expr::with_anonymous_rest(formals.forwarded_rest_name.clone(), || {
-            ingest_expr(&b, file)
+        Some(b) => super::expr::with_block_param(block_param.as_ref().map(|p| p.name.clone()), || {
+            super::expr::with_anonymous_rest(formals.forwarded_rest_name.clone(), || ingest_expr(&b, file))
         })?,
         None => Expr::new(Span::synthetic(), ExprNode::Seq { exprs: vec![] }),
     };

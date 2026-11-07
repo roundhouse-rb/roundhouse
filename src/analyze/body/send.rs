@@ -1225,6 +1225,44 @@ impl<'a> BodyTyper<'a> {
         false
     }
 
+    /// Whether no value of `ty` answers `method`: each variant is a class whose chain the program
+    /// defines, without it, up to a core class that does not answer it either.
+    pub(super) fn never_responds(&self, ty: &Ty, method: &Symbol) -> bool {
+        let variants: Vec<&Ty> = match ty {
+            Ty::Union { variants } => variants.iter().collect(),
+            t => vec![t],
+        };
+        !variants.is_empty()
+            && variants.iter().all(|v| match v {
+                Ty::Class { id, .. } => self.chain_lacks(id, method),
+                _ => false,
+            })
+    }
+
+    fn chain_lacks(&self, of: &ClassId, method: &Symbol) -> bool {
+        const CORE: &[&str] = &["Object", "BasicObject", "StandardError", "Exception", "RuntimeError", "ArgumentError"];
+        const EXCEPTION_METHODS: &[&str] = &["message", "backtrace", "backtrace_locations", "full_message", "detailed_message", "cause", "set_backtrace", "exception"];
+        let mut current = Some(of.clone());
+        for _ in 0..32 {
+            let Some(id) = current else { return !crate::emit::audit::OBJECT_METHODS.contains(&method.as_str()) };
+            let Some(cls) = self.classes().get(&id) else {
+                return CORE.contains(&id.0.as_str().trim_start_matches("::"))
+                    && !crate::emit::audit::OBJECT_METHODS.contains(&method.as_str())
+                    && !EXCEPTION_METHODS.contains(&method.as_str());
+            };
+            // Not settled past a module the program does not define, or a `method_missing`: either may answer it.
+            if cls.instance_methods.contains_key(method)
+                || cls.instance_methods.contains_key(&Symbol::from("method_missing"))
+                || cls.instance_methods.contains_key(&Symbol::from("respond_to_missing?"))
+                || cls.includes.iter().any(|m| self.classes().get(m).is_none() || self.lookup_in_module(m, method).is_some())
+            {
+                return false;
+            }
+            current = cls.parent.clone();
+        }
+        false
+    }
+
     fn defines_instance_method(&self, of: &ClassId, method: &Symbol) -> bool {
         let mut current = Some(of.clone());
         for _ in 0..32 {

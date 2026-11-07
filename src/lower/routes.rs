@@ -580,6 +580,8 @@ fn collect_flat_routes(spec: &RouteSpec, out: &mut Vec<FlatRoute>, ctx: &Ctx) {
         // Rack mounts use the ordered prefix dispatcher, not controller rows
         // or `(.:format)` URL helpers.
         RouteSpec::RackMount { .. } => {}
+        // Not drawn: ingest replaces every one with the routes its call draws.
+        RouteSpec::Deferred { .. } => {}
         RouteSpec::Explicit {
             method,
             path,

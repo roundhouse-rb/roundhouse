@@ -1171,19 +1171,41 @@ module ActionController
       url_from_path(loc)
     end
 
-    # Relative locations (`/path`, not `//host`) pass. An absolute URL
-    # must name this request's host; a missing request refuses any host.
-    # The port does not count, as in Rails' `_url_host_allowed?`
-    # (`URI(url).host == request.host`): `redirect_to articles_url` from
-    # a `Host: blog.test:80` request names `http://blog.test/articles`,
+    # Rails' `_url_host_allowed?` (actionpack 8.1 `redirecting.rb`), in
+    # its two branches:
+    #
+    #   host = URI(url).host
+    #   host.nil? ? url.start_with?("/") && !url.start_with?("//")
+    #             : host == request.host
+    #
+    # A location with an AUTHORITY (`scheme://host`, `//host`) must name
+    # this request's host; a missing request refuses any host. The port
+    # does not count: `redirect_to articles_url` from a
+    # `Host: blog.test:80` request names `http://blog.test/articles`,
     # the standard port dropped, and is the same host.
+    #
+    # A location with NO authority is allowed only when it is a
+    # single-slash path. That second half is the security boundary, not
+    # a formality: `URI` reports no host for a scheme written without
+    # `//` (`https:evil.com`, `https:/evil.com`, and `javascript:…`),
+    # and browsers apply WHATWG special-scheme parsing and navigate
+    # `https:evil.com` to `https://evil.com/`. Classifying those as
+    # "relative" and sending them as the `Location` is the open redirect
+    # this method exists to refuse — `redirect_to params[:back]` is the
+    # shape, and the host half alone does not cover it. Anything else
+    # with no authority (a bare `foo`, a `#fragment`, `""`) Rails refuses
+    # too, so it is refused here.
     def same_host_location(loc)
       host = ActionController.location_host(loc)
-      return loc if host.empty?
       req_host = request_host_for_redirect
-      if req_host.empty? ||
-         ActionController.url_host_without_port(host) !=
-           ActionController.url_host_without_port(req_host.downcase)
+      allowed = if host.empty?
+                  loc.start_with?("/") && !loc.start_with?("//")
+                else
+                  !req_host.empty? &&
+                    ActionController.url_host_without_port(host) ==
+                      ActionController.url_host_without_port(req_host.downcase)
+                end
+      unless allowed
         raise ArgumentError, "Unsafe redirect to \"" + loc + "\", pass allow_other_host: true to redirect anyway."
       end
       loc

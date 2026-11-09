@@ -1,6 +1,8 @@
-//! The app's own `config.middleware.use(Klass)` in config/application.rb,
-//! of a class the app itself defines: the middleware sits where Rails puts
-//! it, inside RequestId and before the routes.
+//! The app's own `config.middleware.use(Klass)` and
+//! `config.middleware.insert_before(0, Klass)` in config/application.rb, of a
+//! class the app itself defines: each middleware sits where Rails puts it
+//! (`use` inside RequestId and before the routes, position 0 in front of the
+//! static file server and RequestId).
 
 use roundhouse::build_target::BuildTarget;
 
@@ -19,11 +21,25 @@ const PROBE_USE: &str = r#"class ProbeUse
 end
 "#;
 
+const PROBE_GATE: &str = r#"class ProbeGate
+  def initialize(app)
+    @app = app
+  end
+
+  def call(env)
+    path = env["PATH_INFO"]
+    return [403, { "content-type" => "text/plain", "content-length" => "0" }, []] if path == "/gate" || path == "/robots.txt"
+
+    @app.call(env)
+  end
+end
+"#;
+
 const AUTOLOAD: &str = "    config.autoload_lib(ignore: %w[assets tasks])\n";
 
 /// The blog with `ProbeUse` in lib/ and `lines` in its Application class body.
 pub(crate) fn with_application_lines(overlay: emit_and_run::Overlay, lines: &str) -> emit_and_run::Overlay {
-    overlay.write("lib/probe_use.rb", PROBE_USE).edit("config/application.rb", AUTOLOAD, &format!("{AUTOLOAD}{lines}"))
+    overlay.write("lib/probe_use.rb", PROBE_USE).write("lib/probe_gate.rb", PROBE_GATE).edit("config/application.rb", AUTOLOAD, &format!("{AUTOLOAD}{lines}"))
 }
 
 const ASSERTIONS: &str = r#"
@@ -145,4 +161,84 @@ puts "cookies passed"
     let out = std::process::Command::new("ruby").args(["-e", &script]).output().expect("spawn ruby");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("cookies passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+const OUTERMOST_ASSERTIONS: &str = r#"
+require "rack"
+app, = Rack::Builder.parse_file("config.ru")
+get = ->(path) { app.call(Rack::MockRequest.env_for("http://localhost#{path}")) }
+
+# In front of the static file server: the gate answers for a file under public/.
+status, _headers, _body = get.("/robots.txt")
+raise "public file: #{status}" unless status == 403
+# In front of Rails' RequestId: the gate's own answer carries no request id.
+status, headers, body = get.("/gate")
+raise "gate: #{status} #{headers.inspect}" unless status == 403 && headers["x-request-id"].nil? && body.to_a.empty?
+status, headers, _body = get.("/articles")
+raise "past the gate: #{status} #{headers.inspect}" unless status == 200 && !headers["x-request-id"].to_s.empty?
+puts "outermost app middleware passed"
+"#;
+
+#[test]
+fn an_app_middleware_inserted_at_0_answers_in_front_of_the_static_files_and_request_id() {
+    let run = with_application_lines(emit_and_run::real_blog(), "    config.middleware.insert_before 0, ProbeGate\n")
+        .run_ruby(OUTERMOST_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("outermost app middleware passed"), "{}", run.stdout);
+}
+
+#[test]
+fn the_spinel_tree_stacks_middleware_inserted_at_0_around_dispatch_app() {
+    let lines = "    config.middleware.insert_before 0, ProbeGate\n    config.middleware.insert_before 0, ProbeUse\n";
+    let (tree, errors) = with_application_lines(emit_and_run::real_blog(), lines).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let stack = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    // A later insertion at 0 goes in front of an earlier one, as in Rails.
+    assert!(stack.contains("@stack ||= ProbeUse.new(ProbeGate.new(Rest.new))"), "{stack}");
+    let main = std::fs::read_to_string(tree.join("main.rb")).expect("main.rb");
+    assert!(main.contains("unless RequestHooks.request_begin(req, res)\n      OutermostMiddleware.dispatch(req, res)\n"), "{main}");
+}
+
+// Not served over HTTP: the Spinel toolchain lane builds no tree with app middleware, so the emitted adapter runs on CRuby over a stand-in server.
+#[test]
+fn the_spinel_adapter_answers_from_the_middleware_inserted_at_0() {
+    let (tree, errors) =
+        with_application_lines(emit_and_run::real_blog(), "    config.middleware.insert_before 0, ProbeGate\n").emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let adapter = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    let script = format!(
+        r#"{adapter}
+{PROBE_GATE}
+module Tep
+  def self.str_hash = {{}}
+end
+Res = Struct.new(:status, :headers, :body, :file_path, :streaming, :set_cookies, :header_fields)
+Req = Struct.new(:verb, :path, :raw_query, :remote_host, :http_version, :req_headers, :raw_body, :listener_transport)
+module Main
+  def self.dispatch_app(req, res)
+    res.status = 200
+    res.headers["x-request-id"] = "id"
+    res.headers["x-app"] = req.path
+    res.body = +""
+    res.file_path = +"public/robots.txt" if req.path == "/robots.txt"
+    res.file_path = +"public/icon.png" if req.path == "/icon.png"
+  end
+end
+def run(path)
+  res = Res.new(0, {{}}, +"", +"", false, [], [])
+  OutermostMiddleware.dispatch(Req.new("GET", path, "", "127.0.0.1", "HTTP/1.1", {{}}, "", "tcp"), res)
+  res
+end
+# The gate's own answer replaces the file the static server would send, and carries only its own headers.
+res = run("/robots.txt")
+raise "gate: #{{res.to_h}}" unless res.status == 403 && res.file_path == "" && res.body == "" && res.headers == {{ "content-type" => "text/plain", "content-length" => "0" }}
+# Past the gate the rest of the stack answers as it would alone: the file is still sent.
+res = run("/icon.png")
+raise "file: #{{res.to_h}}" unless res.status == 200 && res.file_path == "public/icon.png" && res.headers["x-request-id"] == "id"
+puts "outermost adapter passed"
+"#
+    );
+    let out = std::process::Command::new("ruby").args(["-e", &script]).output().expect("spawn ruby");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("outermost adapter passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
 }

@@ -5554,6 +5554,21 @@ fn ruby_family_runtime_files(
             }
         }
     }
+    // The middleware the class body inserts at 0, outermost first: in front of the static file server and run_rack's RequestId.
+    if !app.app_outermost_middlewares.is_empty() {
+        const ANCHOR: &str = "use ThrusterCache::Middleware\n";
+        let uses: String = app
+            .app_outermost_middlewares
+            .iter()
+            .map(|class| match app.gem_middleware_blocks.get(class) {
+                Some(block) => format!("use({class}) {block}\n"),
+                None => format!("use {class}\n"),
+            })
+            .collect();
+        let (_, config_ru) = files.iter_mut().find(|(p, _)| p == "config.ru").ok_or("ruby family: no config.ru")?;
+        let at = config_ru.find(ANCHOR).ok_or("ruby family: config.ru lost its `use ThrusterCache::Middleware`")? + ANCHOR.len();
+        config_ru.insert_str(at, &format!("# config.middleware.insert_before 0 (`App::app_outermost_middlewares`).\n{uses}"));
+    }
     // `ruby sidekiq.rb`, the worker role's entry, only where there is a
     // worker to run.
     if !sidekiq {
@@ -10203,6 +10218,50 @@ fn drop_solid_queue_standin(app: &App, files: &mut Vec<(String, String)>) {
     }
 }
 
+/// The response a Spinel middleware stack answered with its own headers, onto the server's response.
+/// `cookie_note` says why the server's cookies stay: Rails' Cookies middleware sits outside one stack and inside the other.
+fn spinel_replace_headers(cookie_note: &str) -> String {
+    format!(
+        r#"  def self.replace_headers(res, headers)
+    res.headers = Tep.str_hash
+    # Not cleared with the headers: {cookie_note}
+    routes_cookie_count = res.set_cookies.length
+    res.header_fields.pop while res.header_fields.length > 0
+    headers.each do |name, value|
+      key = name.to_s
+      # Not one header line: Rack 3 gives a repeated header as an Array, and Set-Cookie as one per line.
+      values = value.is_a?(Array) ? value.map {{ |part| part.to_s }} : value.to_s.split("\n")
+      if key.downcase == "set-cookie"
+        values.each {{ |cookie| res.set_cookies << cookie }}
+      else
+        res.headers[key] = values.join(", ")
+      end
+    end
+    while routes_cookie_count > 0
+      res.set_cookies << res.set_cookies.shift
+      routes_cookie_count -= 1
+    end
+  end
+"#
+    )
+}
+
+/// The Rack env keys a server sets for the request after `REQUEST_METHOD`, as Puma does, shared by each Spinel stack's env.
+const SPINEL_SERVER_ENV: &str = r#"    env["SCRIPT_NAME"] = ""
+    env["PATH_INFO"] = req.path
+    env["QUERY_STRING"] = req.raw_query
+    env["REMOTE_ADDR"] = req.remote_host
+    # Not from a header: the listener that accepted the connection, as the controller's request.env carries it.
+    env["roundhouse.listener"] = req.listener_transport
+    env["SERVER_PROTOCOL"] = req.http_version
+    env["rack.url_scheme"] = req.req_headers.fetch("x-forwarded-proto", "http") == "https" ? "https" : "http"
+    req.req_headers.each do |name, value|
+      key = name.upcase.tr("-", "_")
+      env[key == "CONTENT_TYPE" || key == "CONTENT_LENGTH" ? key : "HTTP_" + key] = value
+    end
+    env["rack.input"] = StringIO.new(req.raw_body.to_s)
+"#;
+
 /// The Spinel tree's `GemMiddleware` for an app whose gems' Railties
 /// `use` middleware (`App::gem_middlewares`): the request as a Rack env,
 /// through the stack, with the routes at the bottom.
@@ -10220,6 +10279,8 @@ fn stack_middlewares(classes: &[String], blocks: &crate::det::HashMap<String, St
 fn spinel_gem_middleware(classes: &[String], blocks: &crate::det::HashMap<String, String>, args: &crate::det::HashMap<String, String>) -> String {
     let stacked = stack_middlewares(classes, blocks, args, "App.new");
     let around = stack_middlewares(classes, blocks, args, "Inner.new(inner)");
+    let replace_headers = spinel_replace_headers("Rails' Cookies middleware sits outside this stack and writes the controller's cookies after the middleware's own.");
+    let server_env = SPINEL_SERVER_ENV;
     format!(
         r#"# frozen_string_literal: true
 # The Rack middleware the app's gems put on Rails' stack from their
@@ -10348,49 +10409,107 @@ module GemMiddleware
     nil
   end
 
-  def self.replace_headers(res, headers)
-    res.headers = Tep.str_hash
-    # Not cleared with the headers: Rails' Cookies middleware sits outside this stack and writes the controller's cookies after the middleware's own.
-    routes_cookie_count = res.set_cookies.length
-    res.header_fields.pop while res.header_fields.length > 0
-    headers.each do |name, value|
-      key = name.to_s
-      # Not one header line: Rack 3 gives a repeated header as an Array, and Set-Cookie as one per line.
-      values = value.is_a?(Array) ? value.map {{ |part| part.to_s }} : value.to_s.split("\n")
-      if key.downcase == "set-cookie"
-        values.each {{ |cookie| res.set_cookies << cookie }}
-      else
-        res.headers[key] = values.join(", ")
-      end
-    end
-    while routes_cookie_count > 0
-      res.set_cookies << res.set_cookies.shift
-      routes_cookie_count -= 1
-    end
-  end
-
+{replace_headers}
   # The Rack env a server builds for the request, as Puma does.
   def self.env_of(req, request_obj)
     # Not a Hash of its own: Rails' `request.env` is the Rack env, so what a controller writes there (Devise's
     # `devise.allow_params_authentication`) is what a middleware's strategy reads.
     env = request_obj.env
     env["REQUEST_METHOD"] = req.verb
-    env["SCRIPT_NAME"] = ""
-    env["PATH_INFO"] = req.path
-    env["QUERY_STRING"] = req.raw_query
-    env["REMOTE_ADDR"] = req.remote_host
-    # Not from a header: the listener that accepted the connection, as the controller's request.env carries it.
-    env["roundhouse.listener"] = req.listener_transport
-    env["SERVER_PROTOCOL"] = req.http_version
-    env["rack.url_scheme"] = req.req_headers.fetch("x-forwarded-proto", "http") == "https" ? "https" : "http"
-    req.req_headers.each do |name, value|
-      key = name.upcase.tr("-", "_")
-      env[key == "CONTENT_TYPE" || key == "CONTENT_LENGTH" ? key : "HTTP_" + key] = value
-    end
-    env["rack.input"] = StringIO.new(req.raw_body.to_s)
-    env["action_dispatch.request_id"] = request_obj.request_id.to_s
+{server_env}    env["action_dispatch.request_id"] = request_obj.request_id.to_s
     env["rack.session"] = request_obj.session
     env
+  end
+end
+"#
+    )
+}
+
+/// The Spinel tree's `OutermostMiddleware` for an app whose class body
+/// inserts middleware at 0 (`App::app_outermost_middlewares`): the request
+/// as a Rack env, through the stack, with `Main.dispatch_app` (the static
+/// file server, RequestId, the session and the routes) at the bottom.
+fn spinel_outermost_middleware(classes: &[String], blocks: &crate::det::HashMap<String, String>) -> String {
+    // Not `App::gem_middleware_args`: only a folded loop of the `use` stack sets them, and `insert_before 0` is read without arguments.
+    let args = crate::det::HashMap::default();
+    let stacked = stack_middlewares(classes, blocks, &args, "Rest.new");
+    let replace_headers = spinel_replace_headers("Rails' Cookies middleware sits inside this stack, so the cookies it was not handed in the headers stay, after the returned lines.");
+    let server_env = SPINEL_SERVER_ENV;
+    format!(
+        r#"
+require "stringio"
+
+# The Rack middleware the app's config/application.rb inserts at position 0
+# (`App::app_outermost_middlewares`), outermost first, in front of all of
+# Rails' own. Written by `project::spinel_outermost_middleware`.
+module OutermostMiddleware
+  # The rest of the stack under the middleware inserted at 0: Rails' own, then the routes.
+  class Rest
+    def call(env)
+      exchange = env["roundhouse.exchange"]
+      raise TypeError, "no roundhouse.exchange in the Rack env" unless exchange.is_a?(Exchange)
+      exchange.dispatch_app(env["PATH_INFO"].to_s)
+    end
+  end
+
+  # Not on Rest's own ivars: the stack is shared by every request the threaded server runs at once.
+  class Exchange
+    def initialize(req, res)
+      @req = req
+      @res = res
+      @app_body = nil
+      @body = nil
+    end
+
+    def dispatch_app(path)
+      @req.path = path
+      Main.dispatch_app(@req, @res)
+      @app_body = @res.body
+      @body = [@app_body]
+      [@res.status, @res.headers, @body]
+    end
+
+    # The body of the rest of the stack, as it left it: the same Array holding the same String.
+    def app_body?(body)
+      body.equal?(@body) && @body.length == 1 && @body[0].equal?(@app_body)
+    end
+  end
+
+  STACK_LOCK = Mutex.new
+
+  def self.stack
+    return @stack if @stack
+    # Not a bare `||=`: two first requests at once would each build a stack and run its constructors twice.
+    STACK_LOCK.synchronize {{ @stack ||= {stacked} }}
+  end
+
+  def self.dispatch(req, res)
+    exchange = Exchange.new(req, res)
+    env = OutermostMiddleware.env_of(req)
+    env["roundhouse.exchange"] = exchange
+    response = OutermostMiddleware.stack.call(env)
+    res.status = response[0].to_i
+    # Not merged into the app's headers: a response of the middleware's own carries only its own.
+    OutermostMiddleware.replace_headers(res, response[1]) unless response[1].equal?(res.headers)
+    # Not rebuilt from the app's own body: it may be no String (a file the static server sends).
+    return nil if exchange.app_body?(response[2])
+    begin
+      body = +""
+      response[2].each {{ |part| body << part.to_s }}
+      res.body = body
+      res.file_path = +""
+      res.streaming = false
+    ensure
+      response[2].close if response[2].respond_to?(:close)
+    end
+    nil
+  end
+
+{replace_headers}
+  # Not given a request id or a session: Rails' RequestId and session middleware sit inside these.
+  def self.env_of(req)
+    env = {{ "REQUEST_METHOD" => req.verb }}
+{server_env}    env
   end
 end
 "#
@@ -10427,6 +10546,18 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
                 *content = body.clone();
             }
         }
+    }
+    // Inside RequestHooks: a gem package's hook stands for a Railtie's insertion at 0, which runs after the class body's.
+    if !app.app_outermost_middlewares.is_empty() {
+        let outermost = spinel_outermost_middleware(&app.app_outermost_middlewares, &app.gem_middleware_blocks);
+        let (_, stack) = files.iter_mut().find(|(p, _)| p == "runtime/gem_middleware.rb").ok_or("spinel: no runtime/gem_middleware.rb")?;
+        stack.push_str(&outermost);
+        const CALL: &str = "    unless RequestHooks.request_begin(req, res)\n      Main.dispatch_app(req, res)\n";
+        let (_, main) = files.iter_mut().find(|(p, _)| p == "main.rb").ok_or("spinel: no main.rb")?;
+        if !main.contains(CALL) {
+            return Err("spinel: main.rb's Main.dispatch lost its `Main.dispatch_app(req, res)` call".to_string());
+        }
+        *main = main.replacen(CALL, "    unless RequestHooks.request_begin(req, res)\n      OutermostMiddleware.dispatch(req, res)\n", 1);
     }
 
     let needs_date = app_uses_date(app);

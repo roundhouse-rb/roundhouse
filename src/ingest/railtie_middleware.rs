@@ -43,6 +43,8 @@ struct Use {
     block: Option<String>,
     /// Run as its class body loads, not from an initializer: Bundler requires the gem before the app's class body runs.
     at_load: bool,
+    /// `insert_before 0`: in front of all of Rails' own middleware, not after it.
+    outermost: bool,
 }
 
 pub(super) struct MiddlewareLoop {
@@ -61,6 +63,8 @@ pub(super) struct Stack {
     pub env_writes: crate::det::HashMap<String, String>,
     /// What each class writes into the env, for a class stacked later (a loop's, `fold_middleware_loops`).
     pub env_writes_by_class: crate::det::HashMap<String, crate::det::HashMap<String, String>>,
+    /// The app's own `config.middleware.insert_before 0`, outermost first: in front of all of Rails' own.
+    pub outermost: Vec<String>,
     /// Where each stacked `config.middleware.use` of the app's `config/application.rb` starts.
     pub application_taken: Vec<u32>,
     pub diags: Vec<Diagnostic>,
@@ -160,6 +164,8 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
     }
     // Not after every gem's: a gem's class body runs as Bundler requires it, before the app's, and its initializers after.
     let mut app_uses = Vec::new();
+    let mut outermost = Vec::new();
+    let mut outermost_blocks = Vec::new();
     let mut application_taken = Vec::new();
     let mut defines = None;
     for u in application_uses(vfs, dir) {
@@ -175,7 +181,13 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
         // Not stacked: a class neither a source gem nor the app defines (`Rack::Deflater`) stays the ledger's warning, as before.
         if let Some(class) = resolve(&u, defines) {
             application_taken.push(u.span.start);
-            app_uses.push((class, false, u.span, u.block, true));
+            if u.outermost {
+                // A later `insert_before 0` goes in front of an earlier one.
+                outermost.insert(0, class.clone());
+                outermost_blocks.extend(u.block.map(|b| (class, b)));
+            } else {
+                app_uses.push((class, false, u.span, u.block, true));
+            }
         }
     }
     let out: Vec<_> = {
@@ -193,12 +205,12 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
             ));
         }
     }
-    let blocks = out.iter().filter_map(|(class, _, _, block, _)| block.clone().map(|b| (class.clone(), b))).collect();
+    let blocks = out.iter().filter_map(|(class, _, _, block, _)| block.clone().map(|b| (class.clone(), b))).chain(outermost_blocks).collect();
     let classes: Vec<String> = out.into_iter().map(|(class, _, _, _, _)| class).collect();
     let env_writes_by_class = env_writes_by_class(vfs, &every_lib_file, &every_gem_defines);
     let mut env_writes = crate::det::HashMap::default();
     stacked_env_writes(&env_writes_by_class, &classes, &mut env_writes);
-    Stack { classes, blocks, env_writes, env_writes_by_class, application_taken, diags, loops }
+    Stack { classes, blocks, env_writes, env_writes_by_class, outermost, application_taken, diags, loops }
 }
 
 /// `env["warden"] = Proxy.new(env, self)`: a stacked class writing a literal key with a constructed class, which is
@@ -229,7 +241,7 @@ fn env_writes_by_class<V: Vfs + ?Sized>(vfs: &V, files: &[PathBuf], defined: &Ha
         let receiver = value.receiver()?;
         let path = constant_path_of(&receiver)?;
         let rooted = receiver.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p));
-        resolve(&Use { path, rooted, lexical: lexical.to_vec(), span: Span::default(), ordered: false, block: None, at_load: false }, defined)
+        resolve(&Use { path, rooted, lexical: lexical.to_vec(), span: Span::default(), ordered: false, block: None, at_load: false, outermost: false }, defined)
     };
     let read_owner = |body: Node<'_>, lexical: &[String]| -> Owner {
         let mut owner = Owner::default();
@@ -238,7 +250,7 @@ fn env_writes_by_class<V: Vfs + ?Sized>(vfs: &V, files: &[PathBuf], defined: &Ha
                 for arg in include.arguments().map(|a| a.arguments().iter().collect::<Vec<_>>()).unwrap_or_default() {
                     let Some(path) = constant_path_of(&arg) else { continue };
                     let rooted = arg.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p));
-                    let u = Use { path, rooted, lexical: lexical.to_vec(), span: Span::default(), ordered: false, block: None, at_load: false };
+                    let u = Use { path, rooted, lexical: lexical.to_vec(), span: Span::default(), ordered: false, block: None, at_load: false, outermost: false };
                     owner.includes.extend(resolve(&u, defined));
                 }
                 continue;
@@ -359,7 +371,8 @@ pub(super) fn stacked_env_writes(by_class: &crate::det::HashMap<String, crate::d
     }
 }
 
-/// The app's own `config.middleware.use K` (with or without a block) in its `Rails::Application` body.
+/// The app's own `config.middleware.use K` and `config.middleware.insert_before 0, K` (with or without a
+/// block) in its `Rails::Application` body.
 fn application_uses<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec<Use> {
     let path = dir.join("config/application.rb");
     let Ok(bytes) = vfs.read(&path) else { return Vec::new() };
@@ -390,7 +403,7 @@ pub(super) fn application_use_paths<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> Vec
 }
 
 /// `config.app_middleware.use Warden::Manager do |config| … end` in an Engine's or Railtie's class
-/// body (Devise's), which Rails runs as the class loads; `config.middleware.use` in the Application's.
+/// body (Devise's), which Rails runs as the class loads; `config.middleware.use` and `insert_before 0` in the Application's.
 fn read_class_body_use(stmt: &Node<'_>, file: crate::span::FileId, lexical: &[String], application: bool, uses: &mut Vec<Use>, diags: &mut Vec<Diagnostic>) {
     let Some(call) = stmt.as_call_node() else { return };
     let on_stack = call.receiver().and_then(|r| r.as_call_node()).is_some_and(|stack| {
@@ -407,10 +420,12 @@ fn read_class_body_use(stmt: &Node<'_>, file: crate::span::FileId, lexical: &[St
     let span = Span { file, start: loc.start_offset() as u32, end: loc.end_offset() as u32 };
     let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
     let block = call.block().and_then(|b| b.as_block_node());
-    let target = match (constant_id_str(&call.name()), args.as_slice()) {
-        ("use", [only]) => constant_path_of(only).map(|path| (path, only.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)))),
-        _ => None,
+    let (outermost, class) = match (constant_id_str(&call.name()), args.as_slice()) {
+        ("use", [only]) => (false, Some(only)),
+        ("insert_before", [index, only]) if application && index.as_integer_node().is_some_and(|i| i.location().as_slice() == b"0") => (true, Some(only)),
+        _ => (false, None),
     };
+    let target = class.and_then(|only| constant_path_of(only).map(|path| (path, only.as_constant_path_node().is_some_and(|p| constant_path_is_rooted(&p)))));
     let Some((path, rooted)) = target else {
         diags.push(Diagnostic::unsupported(
             span,
@@ -426,7 +441,7 @@ fn read_class_body_use(stmt: &Node<'_>, file: crate::span::FileId, lexical: &[St
         let body = b.body().map(|body| String::from_utf8_lossy(body.location().as_slice()).into_owned()).unwrap_or_default();
         format!("{{ {params}\n{body}\n}}")
     });
-    uses.push(Use { path, rooted, lexical: lexical.to_vec(), span, ordered: false, block, at_load: true });
+    uses.push(Use { path, rooted, lexical: lexical.to_vec(), span, ordered: false, block, at_load: true, outermost });
 }
 
 #[derive(PartialEq)]
@@ -773,7 +788,7 @@ fn read_initializer(
             _ => None,
         };
         match class {
-            Some((path, rooted)) => uses.push(Use { path, rooted, lexical: lexical.to_vec(), span, ordered, block: None, at_load: false }),
+            Some((path, rooted)) => uses.push(Use { path, rooted, lexical: lexical.to_vec(), span, ordered, block: None, at_load: false, outermost: false }),
             None => diags.push(Diagnostic::unsupported(
                 span,
                 None,
@@ -893,6 +908,25 @@ mod tests {
         ]);
         assert_eq!(classes, ["Blog::Gate"], "{diags:?}");
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// The app's own `config.middleware.insert_before 0`: a later one in front of an earlier one, its block kept,
+    /// and not on the stack `use` builds.
+    #[test]
+    fn the_apps_own_insertions_at_0_are_outermost_first() {
+        let application = "module Blog\n  class Application < Rails::Application\n    config.middleware.insert_before 0, Gate\n    config.middleware.insert_before(0, Probe) { |probe| probe.on = true }\n    config.middleware.insert_before 1, Gate\n  end\nend\n";
+        let classes = "class Gate\nend\nclass Probe\nend\n";
+        let map = [("/app/config/application.rb", application), ("/app/lib/gate.rb", classes)]
+            .iter()
+            .map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec()))
+            .collect();
+        let super::Stack { classes, outermost, blocks, application_taken, .. } =
+            super::read(&MapVfs::new(map), std::path::Path::new("/app"), &[]);
+        assert!(classes.is_empty(), "{classes:?}");
+        assert_eq!(outermost, ["Probe", "Gate"]);
+        assert_eq!(blocks.get("Probe").map(String::as_str), Some("{ |probe|\nprobe.on = true\n}"));
+        // Position 1 is not read: it stays the ledger's warning.
+        assert_eq!(application_taken.len(), 2, "{application_taken:?}");
     }
 
     /// An Engine's own `config.middleware` runs only for a request routed into the engine, so the app's stack leaves it out.

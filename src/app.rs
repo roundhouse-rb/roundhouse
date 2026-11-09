@@ -165,6 +165,12 @@ pub struct App {
     /// The Rack env keys a stacked middleware writes, and the class there (`"warden"` → `Warden::Proxy`).
     #[serde(default, skip_serializing_if = "crate::det::HashMap::is_empty")]
     pub rack_env_writes: crate::det::HashMap<String, String>,
+    /// The Rack middleware `config/application.rb` inserts at position 0,
+    /// outermost first (`ingest::railtie_middleware`): stacked in front of
+    /// the static file server, RequestId and Runtime, where Rails puts them.
+    /// Their blocks are in [`App::gem_middleware_blocks`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub app_outermost_middlewares: Vec<String>,
     /// The insertions it could not read, reported by analyze.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gem_middleware_refusals: Vec<crate::diagnostic::Diagnostic>,
@@ -1336,6 +1342,7 @@ impl App {
             gem_middleware_blocks: Default::default(),
             gem_middleware_args: Default::default(),
             rack_env_writes: Default::default(),
+            app_outermost_middlewares: Vec::new(),
             gem_middleware_refusals: Vec::new(),
             included_hoist_conflicts: Vec::new(),
             superclass_refusals: Vec::new(),

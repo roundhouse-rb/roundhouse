@@ -248,3 +248,41 @@ puts "outermost adapter passed"
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("outermost adapter passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
 }
+
+const GATE_GEM: &str = "vendor/bundle/ruby/3.4.0/gems/gate_gem-0.1.0/lib";
+
+/// Every `.rb` file under `dir`, read.
+fn ruby_sources(dir: &std::path::Path, out: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).expect("read_dir").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            ruby_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rb") {
+            out.push(std::fs::read_to_string(&path).unwrap_or_default());
+        }
+    }
+}
+
+// Not reached from the app's code: only the `insert_before 0` line names the gem's class, so the Spinel gem shake must keep it.
+#[test]
+fn a_source_gems_class_inserted_at_0_stays_in_the_spinel_tree() {
+    let overlay = emit_and_run::real_blog()
+        .edit("Gemfile.lock", "    debug (1.11.1)\n", "    gate_gem (0.1.0)\n    debug (1.11.1)\n")
+        .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  gate_gem\n")
+        .write(".bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n")
+        .write("roundhouse.yml", "extensions:\n  - config/roundhouse\n")
+        .write("config/roundhouse/gems.yml", "source_gems:\n  - {gem: \"gate_gem\"}\n")
+        .write(
+            &format!("{GATE_GEM}/gate_gem.rb"),
+            "module GateGem\n  class Outer\n    def initialize(app)\n      @app = app\n    end\n\n    def call(env)\n      @app.call(env)\n    end\n  end\nend\n",
+        )
+        .edit("config/application.rb", AUTOLOAD, &format!("{AUTOLOAD}    config.middleware.insert_before 0, GateGem::Outer\n"));
+    let (tree, errors) = overlay.emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let stack = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    assert!(stack.contains("@stack ||= GateGem::Outer.new(Rest.new)"), "{stack}");
+    let mut sources = Vec::new();
+    ruby_sources(&tree, &mut sources);
+    let defines_outer = |text: &String| text.contains("class GateGem::Outer") || (text.contains("module GateGem") && text.contains("class Outer"));
+    assert!(sources.iter().any(defines_outer), "no GateGem::Outer in the Spinel tree");
+}

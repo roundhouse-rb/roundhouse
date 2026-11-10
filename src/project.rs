@@ -12268,8 +12268,8 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     for_each_app_constant(app, &mut |_, path| {
         owned.extend(ownership.owners(path).into_iter().map(str::to_string));
     });
-    // Not only the app's code: a middleware the app's `config.middleware.use` stacks (`Warden::Manager`) is the gem's class too.
-    for class in &app.gem_middlewares {
+    // Not only the app's code: a middleware the app's `config.middleware.use` or `insert_before 0` stacks (`Warden::Manager`) is the gem's class too.
+    for class in app.gem_middlewares.iter().chain(&app.app_outermost_middlewares) {
         owned.extend(ownership.owners(class).into_iter().map(str::to_string));
     }
     // Not only direct gems: a gem compiled from source no longer requires its own dependencies, so the real ones it names come in here (fugit's raabro and et-orbi).

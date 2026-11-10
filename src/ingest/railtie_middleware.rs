@@ -165,7 +165,6 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
     // Not after every gem's: a gem's class body runs as Bundler requires it, before the app's, and its initializers after.
     let mut app_uses = Vec::new();
     let mut outermost = Vec::new();
-    let mut outermost_blocks = Vec::new();
     let mut application_taken = Vec::new();
     let mut defines = None;
     for u in application_uses(vfs, dir) {
@@ -183,14 +182,13 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
             application_taken.push(u.span.start);
             if u.outermost {
                 // A later `insert_before 0` goes in front of an earlier one.
-                outermost.insert(0, class.clone());
-                outermost_blocks.extend(u.block.map(|b| (class, b)));
+                outermost.insert(0, (class, u.span, u.block));
             } else {
                 app_uses.push((class, false, u.span, u.block, true));
             }
         }
     }
-    let out: Vec<_> = {
+    let mut out: Vec<_> = {
         let (load, init): (Vec<_>, Vec<_>) = out.into_iter().partition(|u| u.4);
         load.into_iter().chain(app_uses).chain(init).collect()
     };
@@ -205,8 +203,35 @@ pub(super) fn read<V: Vfs + ?Sized>(vfs: &V, dir: &Path, gem_libs: &[PathBuf]) -
             ));
         }
     }
-    let blocks = out.iter().filter_map(|(class, _, _, block, _)| block.clone().map(|b| (class.clone(), b))).chain(outermost_blocks).collect();
+    // Not one block per stacking: the blocks are kept per class, so a class stacked twice with a block would get one block twice.
+    let stackings: Vec<(&String, Span, bool)> = out
+        .iter()
+        .map(|(class, _, span, block, _)| (class, *span, block.is_some()))
+        .chain(outermost.iter().map(|(class, span, block)| (class, *span, block.is_some())))
+        .collect();
+    let refused: HashSet<String> = stackings
+        .iter()
+        .filter(|(class, _, _)| stackings.iter().filter(|(other, _, _)| other == class).count() > 1)
+        .filter(|(class, _, _)| stackings.iter().any(|(other, _, block)| other == class && *block))
+        .map(|(class, _, _)| (*class).clone())
+        .collect();
+    for (class, span, _) in stackings.iter().filter(|(class, _, _)| refused.contains(*class)) {
+        diags.push(Diagnostic::unsupported(
+            *span,
+            None,
+            "railtie middleware",
+            format!("`{class}` is stacked more than once with a block: the emitted stack keeps one block per class"),
+        ));
+    }
+    out.retain(|(class, _, _, _, _)| !refused.contains(class));
+    outermost.retain(|(class, _, _)| !refused.contains(class));
+    let blocks = out
+        .iter()
+        .filter_map(|(class, _, _, block, _)| block.clone().map(|b| (class.clone(), b)))
+        .chain(outermost.iter().filter_map(|(class, _, block)| block.clone().map(|b| (class.clone(), b))))
+        .collect();
     let classes: Vec<String> = out.into_iter().map(|(class, _, _, _, _)| class).collect();
+    let outermost: Vec<String> = outermost.into_iter().map(|(class, _, _)| class).collect();
     let env_writes_by_class = env_writes_by_class(vfs, &every_lib_file, &every_gem_defines);
     let mut env_writes = crate::det::HashMap::default();
     stacked_env_writes(&env_writes_by_class, &classes, &mut env_writes);
@@ -927,6 +952,25 @@ mod tests {
         assert_eq!(blocks.get("Probe").map(String::as_str), Some("{ |probe|\nprobe.on = true\n}"));
         // Position 1 is not read: it stays the ledger's warning.
         assert_eq!(application_taken.len(), 2, "{application_taken:?}");
+    }
+
+    /// The blocks are kept per class, so a class stacked more than once with a block is refused rather than given one block twice.
+    #[test]
+    fn a_class_stacked_more_than_once_with_a_block_is_refused() {
+        let application = "module Blog\n  class Application < Rails::Application\n    config.middleware.use(Gate) { |gate| gate.mode = :inner }\n    config.middleware.insert_before(0, Gate) { |gate| gate.mode = :outer }\n    config.middleware.use(Twice) { |twice| twice.on = true }\n    config.middleware.use Twice\n    config.middleware.insert_before 0, Probe\n    config.middleware.insert_before 0, Probe\n    config.middleware.use Other\n  end\nend\n";
+        let classes = "class Gate\nend\nclass Twice\nend\nclass Probe\nend\nclass Other\nend\n";
+        let map = [("/app/config/application.rb", application), ("/app/lib/gate.rb", classes)]
+            .iter()
+            .map(|(path, text)| (PathBuf::from(path), text.as_bytes().to_vec()))
+            .collect();
+        let super::Stack { classes, outermost, blocks, diags, .. } =
+            super::read(&MapVfs::new(map), std::path::Path::new("/app"), &[]);
+        assert_eq!(classes, ["Other"]);
+        assert_eq!(outermost, ["Probe", "Probe"]);
+        assert!(blocks.is_empty(), "{blocks:?}");
+        let refused: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(refused.len(), 4, "{refused:?}");
+        assert!(refused.iter().all(|m| m.contains("is stacked more than once with a block")), "{refused:?}");
     }
 
     /// An Engine's own `config.middleware` runs only for a request routed into the engine, so the app's stack leaves it out.

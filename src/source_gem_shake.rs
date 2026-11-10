@@ -712,7 +712,7 @@ impl<'a> Gems<'a> {
             consts.push((None, "ActionView::Base".to_string()));
         }
         // Not only the app's code: the stack builds each middleware (`Warden::Manager.new(app) { … }`) and calls it.
-        for class in &app.gem_middlewares {
+        for class in app.gem_middlewares.iter().chain(&app.app_outermost_middlewares) {
             consts.push((None, class.clone()));
         }
         // Then Rails finalizes the routes (`ActionDispatch::Routing::RouteSet.finalize_app!`), which a gem prepends to.

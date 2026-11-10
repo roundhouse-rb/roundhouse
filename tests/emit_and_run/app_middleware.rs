@@ -29,6 +29,7 @@ const PROBE_GATE: &str = r#"class ProbeGate
   def call(env)
     path = env["PATH_INFO"]
     return [403, { "content-type" => "text/plain", "content-length" => "0" }, []] if path == "/gate" || path == "/robots.txt"
+    return [200, { "x-listener" => env["roundhouse.listener"].to_s }, []] if path == "/listener"
 
     @app.call(env)
   end
@@ -224,9 +225,9 @@ module Main
     res.file_path = +"public/icon.png" if req.path == "/icon.png"
   end
 end
-def run(path)
+def run(path, listener = "tcp")
   res = Res.new(0, {{}}, +"", +"", false, [], [])
-  OutermostMiddleware.dispatch(Req.new("GET", path, "", "127.0.0.1", "HTTP/1.1", {{}}, "", "tcp"), res)
+  OutermostMiddleware.dispatch(Req.new("GET", path, "", "127.0.0.1", "HTTP/1.1", {{}}, "", listener), res)
   res
 end
 # The gate's own answer replaces the file the static server would send, and carries only its own headers.
@@ -235,6 +236,11 @@ raise "gate: #{{res.to_h}}" unless res.status == 403 && res.file_path == "" && r
 # Past the gate the rest of the stack answers as it would alone: the file is still sent.
 res = run("/icon.png")
 raise "file: #{{res.to_h}}" unless res.status == 200 && res.file_path == "public/icon.png" && res.headers["x-request-id"] == "id"
+# The env names the listener that accepted the connection, as the env of the `use` stack does.
+%w[unix tcp].each do |listener|
+  res = run("/listener", listener)
+  raise "listener #{{listener}}: #{{res.to_h}}" unless res.headers == {{ "x-listener" => listener }}
+end
 puts "outermost adapter passed"
 "#
     );

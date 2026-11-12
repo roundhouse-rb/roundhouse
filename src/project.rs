@@ -5568,6 +5568,15 @@ fn ruby_family_runtime_files(
         let (_, config_ru) = files.iter_mut().find(|(p, _)| p == "config.ru").ok_or("ruby family: no config.ru")?;
         let at = config_ru.find(ANCHOR).ok_or("ruby family: config.ru lost its `use ThrusterCache::Middleware`")? + ANCHOR.len();
         config_ru.insert_str(at, &format!("# config.middleware.insert_before 0 (`App::app_outermost_middlewares`).\n{uses}"));
+        let around = stack_middlewares(&app.app_outermost_middlewares, &app.gem_middleware_blocks, &crate::det::HashMap::default(), "->(gem_env) { GemMiddleware.around(gem_env, &inner) }");
+        let outermost = format!(
+            "\n# The Rack middleware the class body inserts at 0 (`App::app_outermost_middlewares`), outermost first;\n# config.ru `use`s them for a served request.\nmodule OutermostMiddleware\n  # The test harness's request through them, then through the gem middleware's stack, the block at its bottom.\n  def self.around(env, &inner)\n    {around}.call(env)\n  end\nend\n"
+        );
+        for (path, content) in files.iter_mut() {
+            if path == "runtime/gem_middleware.rb" {
+                content.push_str(&outermost);
+            }
+        }
     }
     // `ruby sidekiq.rb`, the worker role's entry, only where there is a
     // worker to run.
@@ -10433,6 +10442,7 @@ fn spinel_outermost_middleware(classes: &[String], blocks: &crate::det::HashMap<
     // Not `App::gem_middleware_args`: only a folded loop of the `use` stack sets them, and `insert_before 0` is read without arguments.
     let args = crate::det::HashMap::default();
     let stacked = stack_middlewares(classes, blocks, &args, "Rest.new");
+    let around = stack_middlewares(classes, blocks, &args, "Inner.new(inner)");
     let replace_headers = spinel_replace_headers("Rails' Cookies middleware sits inside this stack, so the cookies it was not handed in the headers stay, after the returned lines.");
     let server_env = SPINEL_SERVER_ENV;
     format!(
@@ -10481,6 +10491,24 @@ module OutermostMiddleware
     return @stack if @stack
     # Not a bare `||=`: two first requests at once would each build a stack and run its constructors twice.
     STACK_LOCK.synchronize {{ @stack ||= {stacked} }}
+  end
+
+  # The bottom of the test harness's stack: the gem middleware's stack, then the block it routes the request with.
+  class Inner
+    def initialize(inner)
+      @inner = inner
+    end
+
+    def call(env)
+      GemMiddleware.around(env) {{ |gem_env| @inner.call(gem_env) }}
+    end
+  end
+
+  # The test harness's request through the stack (Rails' integration tests run it), built per
+  # request: the block at its bottom is the harness's own.
+  def self.around(env, &inner)
+    stack = {around}
+    stack.call(env)
   end
 
   def self.dispatch(req, res)
@@ -11215,6 +11243,16 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     files.splice(0..0, data);
 
     let mut files = dedupe_last_wins(files);
+    // Not before the dedupe: the lowered emit's own test/test_helper.rb supersedes the walked copy there.
+    // Not the served request alone: Rails' integration tests run the request through the whole stack.
+    if !app.app_outermost_middlewares.is_empty() {
+        const HARNESS: &str = "    answered = GemMiddleware.around(rack_env) do |env|\n";
+        let (_, helper) = files.iter_mut().find(|(p, _)| p == "test/test_helper.rb").ok_or("spinel: no test/test_helper.rb")?;
+        if !helper.contains(HARNESS) {
+            return Err("spinel: test_helper.rb's dispatch_request lost its `GemMiddleware.around(rack_env)` call".to_string());
+        }
+        *helper = helper.replacen(HARNESS, "    answered = OutermostMiddleware.around(rack_env) do |env|\n", 1);
+    }
     // De-blog the scaffold for whatever app was ingested: regenerate the
     // `app/views.rb` aggregator from the emitted view set and rewrite
     // `main.rb`'s `instantiate_controller` from the app's route table

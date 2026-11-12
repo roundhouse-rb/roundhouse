@@ -249,6 +249,62 @@ puts "outermost adapter passed"
     assert!(stdout.contains("outermost adapter passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
 }
 
+const OUTERMOST_AND_USE: &str = "    config.middleware.insert_before 0, ProbeGate\n    config.middleware.use ProbeUse\n";
+
+/// The test harness's request through `OutermostMiddleware.around`: the gate at 0 answers first, then the `use` stack, then the routes.
+const HARNESS_ASSERTIONS: &str = r#"
+routed = []
+harness = ->(path) { OutermostMiddleware.around({ "PATH_INFO" => path }) { |env| routed << env["PATH_INFO"]; [200, {}, ["routed"]] } }
+status, _headers, body = harness.("/gate")
+raise "gate: #{status} #{body.inspect}" unless status == 403 && body.to_a.empty? && routed.empty?
+status, _headers, body = harness.("/use")
+raise "use: #{status} #{body.inspect}" unless status == 418 && routed.empty?
+status, _headers, body = harness.("/articles")
+raise "routed: #{status} #{body.inspect} #{routed.inspect}" unless status == 200 && body == ["routed"] && routed == ["/articles"]
+puts "outermost harness passed"
+"#;
+
+#[test]
+fn the_test_harness_runs_its_request_through_the_middleware_inserted_at_0() {
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let (tree, errors) = with_application_lines(emit_and_run::real_blog(), OUTERMOST_AND_USE).emit(target);
+        assert!(errors.is_empty(), "{target:?}: {errors:#?}");
+        let helper = std::fs::read_to_string(tree.join("test/test_helper.rb")).expect("test_helper.rb");
+        assert!(helper.contains("    answered = OutermostMiddleware.around(rack_env) do |env|\n"), "{target:?}: {helper}");
+    }
+    let run = with_application_lines(emit_and_run::real_blog(), OUTERMOST_AND_USE)
+        .run_ruby(&format!("require \"rack\"\nRack::Builder.parse_file(\"config.ru\")\n{HARNESS_ASSERTIONS}"));
+    run.assert_passes();
+    assert!(run.stdout.contains("outermost harness passed"), "{}", run.stdout);
+}
+
+// Not through a Spinel build: the toolchain lane builds no tree with app middleware, so the emitted stacks run on CRuby.
+#[test]
+fn the_spinel_test_harness_runs_its_request_through_the_middleware_inserted_at_0() {
+    let (tree, errors) = with_application_lines(emit_and_run::real_blog(), OUTERMOST_AND_USE).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let adapter = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    let script = format!(
+        r#"{adapter}
+{PROBE_GATE}
+{PROBE_USE}
+module Tep
+  def self.str_hash = {{}}
+end
+module ActionDispatch
+  module Routing
+    class RouteSet
+      def self.finalize_app! = nil
+    end
+  end
+end
+{HARNESS_ASSERTIONS}"#
+    );
+    let out = std::process::Command::new("ruby").args(["-e", &script]).output().expect("spawn ruby");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("outermost harness passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
 const GATE_GEM: &str = "vendor/bundle/ruby/3.4.0/gems/gate_gem-0.1.0/lib";
 
 /// Every `.rb` file under `dir`, read.

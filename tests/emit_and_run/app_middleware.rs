@@ -249,6 +249,65 @@ puts "outermost adapter passed"
     assert!(stdout.contains("outermost adapter passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
 }
 
+const PROBE_COPY: &str = r#"class ProbeCopy
+  def initialize(app)
+    @app = app
+  end
+
+  def call(env)
+    status, headers, body = @app.call(env)
+    return [status, headers.merge("x-copied" => "yes"), body] if env["PATH_INFO"] == "/copy"
+
+    [status, headers, body]
+  end
+end
+"#;
+
+// Not served over HTTP, as the adapter test above: the emitted adapter runs on CRuby over a stand-in server.
+#[test]
+fn the_middleware_inserted_at_0_gets_the_session_cookie_and_a_copy_of_the_headers_keeps_it() {
+    let (tree, errors) = with_application_lines(emit_and_run::real_blog(), "    config.middleware.insert_before 0, ProbeCopy\n")
+        .write("lib/probe_copy.rb", PROBE_COPY)
+        .emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let adapter = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    let script = format!(
+        r#"{adapter}
+{PROBE_COPY}
+module Tep
+  def self.str_hash = {{}}
+end
+Res = Struct.new(:status, :headers, :body, :file_path, :streaming, :set_cookies, :header_fields)
+Req = Struct.new(:verb, :path, :raw_query, :remote_host, :http_version, :req_headers, :raw_body, :listener_transport)
+COOKIE = "_session=abc; path=/; HttpOnly; SameSite=Lax"
+module Main
+  # The session middleware's commit: the cookie is on the server's response, not in its headers.
+  def self.dispatch_app(req, res)
+    res.status = 200
+    res.headers["x-request-id"] = "id"
+    res.body = +"page"
+    res.set_cookies << COOKIE
+  end
+end
+def run(path)
+  res = Res.new(0, {{}}, +"", +"", false, [], [])
+  OutermostMiddleware.dispatch(Req.new("GET", path, "", "127.0.0.1", "HTTP/1.1", {{}}, "", "tcp"), res)
+  res
+end
+# A copy of the headers keeps the cookie, as a copy of Rails' headers does.
+res = run("/copy")
+raise "copy: #{{res.to_h}}" unless res.set_cookies == [COOKIE] && res.headers == {{ "x-request-id" => "id", "x-copied" => "yes" }} && res.body == "page"
+# The same Hash handed back: the cookie once, and not left among the headers.
+res = run("/articles")
+raise "same: #{{res.to_h}}" unless res.set_cookies == [COOKIE] && res.headers == {{ "x-request-id" => "id" }} && res.body == "page"
+puts "outermost cookies passed"
+"#
+    );
+    let out = std::process::Command::new("ruby").args(["-e", &script]).output().expect("spawn ruby");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("outermost cookies passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
 const OUTERMOST_AND_USE: &str = "    config.middleware.insert_before 0, ProbeGate\n    config.middleware.use ProbeUse\n";
 
 /// The test harness's request through `OutermostMiddleware.around`: the gate at 0 answers first, then the `use` stack, then the routes.

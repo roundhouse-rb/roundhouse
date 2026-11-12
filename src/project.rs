@@ -10476,6 +10476,11 @@ module OutermostMiddleware
       Main.dispatch_app(@req, @res)
       @app_body = @res.body
       @body = [@app_body]
+      # Rails' Cookies middleware sits inside these, so the response they get carries the Set-Cookie lines.
+      if @res.set_cookies.length > 0
+        @res.headers["set-cookie"] = @res.set_cookies.join("\n")
+        @res.set_cookies.pop while @res.set_cookies.length > 0
+      end
       [@res.status, @res.headers, @body]
     end
 
@@ -10518,7 +10523,11 @@ module OutermostMiddleware
     response = OutermostMiddleware.stack.call(env)
     res.status = response[0].to_i
     # Not merged into the app's headers: a response of the middleware's own carries only its own.
-    OutermostMiddleware.replace_headers(res, response[1]) unless response[1].equal?(res.headers)
+    if response[1].equal?(res.headers)
+      OutermostMiddleware.take_set_cookies(res)
+    else
+      OutermostMiddleware.replace_headers(res, response[1])
+    end
     # Not rebuilt from the app's own body: it may be no String (a file the static server sends).
     return nil if exchange.app_body?(response[2])
     begin
@@ -10534,6 +10543,12 @@ module OutermostMiddleware
   end
 
 {replace_headers}
+  # The Set-Cookie lines the rest of the stack handed up in the headers, back onto the server's response.
+  def self.take_set_cookies(res)
+    lines = res.headers.delete("set-cookie")
+    lines.to_s.split("\n").each {{ |cookie| res.set_cookies << cookie }} unless lines.nil?
+  end
+
   # Not given a request id or a session: Rails' RequestId and session middleware sit inside these.
   def self.env_of(req)
     env = {{ "REQUEST_METHOD" => req.verb }}

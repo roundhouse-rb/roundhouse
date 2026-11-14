@@ -592,13 +592,14 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // A partial's locals are its interface: every `locals:` key any call
     // site passes becomes a trailing nil-default param (sorted; see
     // render_locals_keys). Names already on the signature as the record
-    // or flash/defined? extras are skipped here.
+    // or flash/defined? extras are skipped here. The record is a
+    // `safe_local` name, so `locals: { class: }` is the `class_` record.
     let mut extra_params = extra_params;
     if is_partial {
         let keys_map = &lx.locals_keys;
         if let Some(keys) = view_key.as_ref().and_then(|k| keys_map.get(k).cloned()) {
             for k in keys {
-                if k != arg_name && !extra_params.contains(&k) {
+                if crate::naming::safe_local(&k) != arg_name && !extra_params.contains(&k) {
                     extra_params.push(k);
                 }
             }
@@ -907,6 +908,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
         partial_ivars: closures.clone(),
+        partial_record_locals: lx.collection_element_locals.clone(),
         ivar_records: lx.ivar_records.clone(),
         formats: std::iter::once(view.format.as_str())
             .chain((view.format.as_str() != "html").then_some("html"))
@@ -2836,11 +2838,14 @@ pub(crate) fn ivar_record_partials(
                 &|_| false,
             ) {
                 // Bound as `named_partial_call_with_record` binds it.
-                Some(RenderPartial::Named { partial, arg, locals }) => {
+                Some(RenderPartial::Named { partial, arg, locals, object }) => {
                     let target_dir = partial.rsplit_once('/').map_or(dir, |(d, _)| d);
                     let module_camel = camelize_path(&snake_case(target_dir));
                     let record = singularize(&snake_case(last_segment(&module_camel)));
                     match locals {
+                        // The explicit object binds as the record
+                        // (`named_partial_object_call`).
+                        Some(_) if object.is_some() => false,
                         Some(entries) => !entries.iter().any(|(k, _)| {
                             matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
                                 if value.as_str() == record)
@@ -3078,7 +3083,7 @@ pub(crate) fn partial_call_contracts(
             .map(|s| s.as_str().to_string());
         if let Some(keys) = keys_map.get(&key) {
             for k in keys {
-                if k != &record && !extras.contains(k) {
+                if crate::naming::safe_local(k) != record && !extras.contains(k) {
                     extras.push(k.clone());
                 }
             }
@@ -3467,7 +3472,7 @@ pub(super) fn partial_extras_map(
             closure_raw.iter().map(|s| ivar_local(&ivar_locals, s.as_str())).collect();
         if let Some(keys) = keys_map.get(&key) {
             for k in keys {
-                if k != &arg_name && !extras.contains(k) {
+                if crate::naming::safe_local(k) != arg_name && !extras.contains(k) {
                     extras.push(k.clone());
                 }
             }
@@ -3748,11 +3753,36 @@ fn collection_element_locals_from_views(
     use crate::det::{HashMap, HashSet};
     let mut out: HashMap<ViewKey, String> = HashMap::default();
     let mut conflicted: HashSet<ViewKey> = HashSet::default();
+    let mut objects = ElementLocals::default();
     for view in views {
         let (dir, _) = split_view_name(view.name.as_str());
-        collect_collection_element_locals(&view.body, dir, stems, &mut out, &mut conflicted);
+        let mut collections = ElementLocals { out: std::mem::take(&mut out), conflicted: std::mem::take(&mut conflicted) };
+        collect_collection_element_locals(&view.body, dir, stems, &mut collections, &mut objects);
+        (out, conflicted) = (collections.out, collections.conflicted);
+    }
+    // An object render's local names the partial only where no
+    // collection render does, so a partial a collection binds keeps
+    // that binding (an object render's call passes its object as the
+    // record either way).
+    for (key, local) in objects.out {
+        if !out.contains_key(&key) && !conflicted.contains(&key) {
+            out.insert(key, local);
+        }
+    }
+    for key in objects.conflicted {
+        if !out.contains_key(&key) {
+            conflicted.insert(key);
+        }
     }
     (out, conflicted)
+}
+
+/// Call sites' element locals by partial, and the partials whose call
+/// sites disagree.
+#[derive(Default)]
+struct ElementLocals {
+    out: crate::det::HashMap<ViewKey, String>,
+    conflicted: crate::det::HashSet<ViewKey>,
 }
 
 /// The record arg a view / partial takes: an unambiguous collection
@@ -3777,8 +3807,8 @@ fn collect_collection_element_locals(
     e: &Expr,
     dir: &str,
     stems: &PartialStems,
-    out: &mut crate::det::HashMap<ViewKey, String>,
-    conflicted: &mut crate::det::HashSet<ViewKey>,
+    collections: &mut ElementLocals,
+    objects: &mut ElementLocals,
 ) {
     if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
         if let Some(crate::lower::view::RenderPartial::CollectionNamed {
@@ -3800,24 +3830,64 @@ fn collect_collection_element_locals(
                     let base = partial.rsplit('/').next().unwrap_or(partial);
                     base.trim_start_matches('_').to_string()
                 });
-            if conflicted.contains(&key) {
-                return;
-            }
-            match out.get(&key) {
-                Some(existing) if *existing != local => {
-                    out.remove(&key);
-                    conflicted.insert(key);
-                }
-                Some(_) => {}
-                None => {
-                    out.insert(key, local);
-                }
-            }
+            record_element_local(key, local, collections);
+        } else if method.as_str() == "render"
+            && recv.is_none()
+            && let Some((partial, local)) = object_render_local(args)
+        {
+            record_element_local(partial_name_to_key(partial, dir, stems), local, objects);
         }
     }
     e.node.for_each_child(&mut |c| {
-        collect_collection_element_locals(c, dir, stems, out, conflicted)
+        collect_collection_element_locals(c, dir, stems, collections, objects)
     });
+}
+
+/// `render partial: "x/y", object: record[, as: "name"]`: the partial and
+/// the local Rails hands it the object as, `as.to_sym` or the partial's
+/// own name (`PartialRenderer`'s `as || template.variable`), as a
+/// collection's element is.
+fn object_render_local(args: &[Expr]) -> Option<(&str, String)> {
+    let [arg] = args else { return None };
+    let ExprNode::Hash { entries, .. } = &*arg.node else { return None };
+    let value = |key: &str| {
+        entries.iter().find_map(|(k, v)| match &*k.node {
+            ExprNode::Lit { value: Literal::Sym { value } } if value.as_str() == key => Some(v),
+            _ => None,
+        })
+    };
+    if value("collection").is_some() {
+        return None;
+    }
+    value("object")?;
+    let ExprNode::Lit { value: Literal::Str { value: partial } } = &*value("partial")?.node else {
+        return None;
+    };
+    let local = match value("as").map(|v| &*v.node) {
+        None => partial.rsplit('/').next().unwrap_or(partial).trim_start_matches('_').to_string(),
+        Some(ExprNode::Lit { value: Literal::Sym { value } }) => value.as_str().to_string(),
+        Some(ExprNode::Lit { value: Literal::Str { value } }) => value.as_str().to_string(),
+        Some(_) => return None,
+    };
+    Some((partial.as_str(), local))
+}
+
+/// One call site's element local for a partial. Two sites that disagree
+/// leave the partial on its convention name.
+fn record_element_local(key: ViewKey, local: String, seen: &mut ElementLocals) {
+    if seen.conflicted.contains(&key) {
+        return;
+    }
+    match seen.out.get(&key) {
+        Some(existing) if *existing != local => {
+            seen.out.remove(&key);
+            seen.conflicted.insert(key);
+        }
+        Some(_) => {}
+        None => {
+            seen.out.insert(key, local);
+        }
+    }
 }
 
 /// The partial views a body renders, as `ViewKey`s — for the render graph.
@@ -4765,6 +4835,9 @@ pub(super) fn rewrite_ivars_to_locals(expr: &Expr, locals: &IvarLocals) -> Expr 
     out.decisions |= expr.decisions & crate::expr::CONST_PATH;
     // A grounded `iso8601` (`to_rfc3339`) stays one: the Ruby emit prints `iso8601` by this flag.
     out.decisions |= expr.decisions & crate::expr::GROUNDED_TIME_FORMAT;
+    // A `**opts` argument the keyword lowering made positional stays a
+    // splat on the Ruby emit (`expr::ERASED_KEYWORD_SPLAT`).
+    out.decisions |= expr.decisions & crate::expr::ERASED_KEYWORD_SPLAT;
     // Not a fresh, untyped node: the i18n lowering's `[]` names and values are typed `Array[String]`
     out.ty = expr.ty.clone();
     out
@@ -5349,6 +5422,11 @@ pub(super) struct ViewCtx {
     /// needed ivars here and passes them as call-site args (the caller's
     /// own locals — its closure ⊇ the partial's, so it always has them).
     pub(super) partial_ivars: std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Symbol>>>,
+    /// A partial's record local where its call sites name one other
+    /// than the directory's singular (`collection_element_locals`): an
+    /// explicit `locals:` hash binds the record by this name, as the
+    /// partial's definition takes it.
+    pub(super) partial_record_locals: std::rc::Rc<crate::det::HashMap<ViewKey, String>>,
     /// The partials whose record param stands for its ivar
     /// ([`ivar_record_partials`]): a render passes that ivar in the
     /// record slot. Every other partial takes it as a closure param.
@@ -6140,6 +6218,13 @@ impl ViewCtx {
     /// that only took the name.
     pub(super) fn binds_local(&self, n: &str) -> bool {
         self.is_local(n) && !self.ivar_params.iter().any(|x| x == n)
+    }
+    /// True when `e` reads such a local: a bare name with no arguments
+    /// or parentheses. `name(...)` and `name()` call the method even
+    /// where a local has the name, as in Ruby.
+    pub(super) fn reads_local(&self, e: &Expr) -> bool {
+        matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, parenthesized: false }
+            if args.is_empty() && self.binds_local(method.as_str()))
     }
     /// True when `@<n>` is assigned a partial-options value in some
     /// controller action (a bare partial-name string or a `{partial: …}`

@@ -4062,6 +4062,17 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 rewrite_view_ivar_writes(&mut m.body, &view_ivars);
             }
         }
+        // A helper that hands `self` on (`NavItem.new(self, path)`) gives
+        // the object the view, and the object reads `request` and
+        // `controller` through it, as Rails' view context answers them.
+        // Here `self` is the module, so it answers them with the
+        // dispatch's, as the view's own readers do. A module that
+        // defines either keeps its own.
+        if is_helper_module && lc.methods.iter().any(method_hands_self_on) {
+            for name in ["request", "controller"] {
+                push_view_context_reader(&mut lc.methods, name, &lc.name);
+            }
+        }
         // The other half: the reader the rewrite dispatches to. It goes
         // on the BASE controller, so every controller inherits one —
         // a helper runs under whichever controller is current, and
@@ -4081,6 +4092,75 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     // produces — and over the whole slice at once, because constant NAMES
     // have to be unique across every class that shares a Ruby namespace.
     hoist_pure_helper_constants(lcs);
+}
+
+/// Does this method use `self` as a value, in its body (answered
+/// itself, or as an argument, an assignment, an element) or as a
+/// parameter's default (`view = self`), rather than only as a call's
+/// receiver?
+fn method_hands_self_on(m: &MethodDef) -> bool {
+    std::iter::once(&m.body)
+        .chain(m.params.iter().filter_map(|p| p.default.as_ref()))
+        .any(|e| matches!(&*e.node, ExprNode::SelfRef) || hands_self_on(e))
+}
+
+/// Does a child of `e`, or of its descendants, use `self` other than as
+/// a call's receiver?
+fn hands_self_on(e: &Expr) -> bool {
+    let recv = match &*e.node {
+        ExprNode::Send { recv: Some(r), .. } => Some(r as *const Expr),
+        _ => None,
+    };
+    let mut found = false;
+    e.node.for_each_child(&mut |c| {
+        if found {
+            return;
+        }
+        found = match &*c.node {
+            ExprNode::SelfRef => recv != Some(c as *const Expr),
+            _ => hands_self_on(c),
+        };
+    });
+    found
+}
+
+/// `def self.request = ActionController::Current.request` (or
+/// `controller`) on a helper module, unless the module defines it.
+fn push_view_context_reader(methods: &mut Vec<MethodDef>, name: &str, module: &ClassId) {
+    if methods.iter().any(|m| m.name.as_str() == name) {
+        return;
+    }
+    let span = Span::synthetic();
+    let current = Expr::new(
+        span,
+        ExprNode::Const { path: vec![Symbol::from("ActionController"), Symbol::from("Current")] },
+    );
+    methods.push(MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from(name),
+        receiver: MethodReceiver::Class,
+        visibility: MethodVisibility::Public,
+        params: vec![],
+        body: Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(current),
+                method: Symbol::from(name),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        signature: None,
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(module.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
 }
 
 /// Is this the app's base controller — the one every other controller
@@ -4411,9 +4491,12 @@ fn is_framework_view_helper(name: &str) -> bool {
             // The general asset helper beside the image one — same
             // body, and campfire asks it for an mp3.
             | "asset_path"
-            // The general asset helper beside the image one — same
-            // body, and campfire asks it for an mp3.
             | "image_url"
+            // The absolute form of `asset_path`, beside `image_url`. An
+            // app helper's own `asset_url` still wins: the helper index
+            // is asked first, as `helper :all` mixes app helpers in above
+            // ActionView's.
+            | "asset_url"
             | "path_to_javascript"
             | "javascript_path"
             | "javascript_include_tag"
@@ -4761,6 +4844,54 @@ fn is_rails_url_helpers(node: &ExprNode) -> bool {
 
 fn view_helpers_path() -> Vec<Symbol> {
     vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")]
+}
+
+/// `content_for(:slot)`, `content_for(:slot, value)` or `content_for(:slot)
+/// { … }` written bare in a helper module, as the view-slot call it is in
+/// Rails (`rewrite_helper_calls`). None for any other shape.
+fn helper_content_for(
+    expr: &Expr,
+    index: &HashMap<Symbol, ClassId>,
+    own_methods: &crate::det::HashSet<Symbol>,
+) -> Option<Expr> {
+    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+        return None;
+    };
+    if method.as_str() != "content_for" || index.contains_key(method) || own_methods.contains(method) {
+        return None;
+    }
+    // A Symbol slot. Rails keys the slot by the name as given, so a String
+    // one is another slot, which the runtime's Symbol-keyed store has no
+    // place for; it stays as written.
+    let slot = args
+        .first()
+        .filter(|a| matches!(&*a.node, ExprNode::Lit { value: crate::expr::Literal::Sym { .. } }))?;
+    let span = expr.span;
+    let view_helpers = || Expr::new(span, ExprNode::Const { path: view_helpers_path() });
+    let call = |name: &str, args: Vec<Expr>, block: Option<Expr>| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(view_helpers()),
+                method: Symbol::from(name),
+                args,
+                block,
+                parenthesized: true,
+            },
+        )
+    };
+    let value = match (args.len(), block) {
+        (1, None) => return Some(call("content_for_get", vec![slot.clone()], None)),
+        // No content reads the slot, as Rails' `content_for` does when
+        // its content is nil or false.
+        (2, None) if crate::lower::view::is_falsy_lit(&args[1]) => {
+            return Some(call("content_for_get", vec![slot.clone()], None));
+        }
+        (2, None) => args[1].clone(),
+        (1, Some(block)) => call("capture", vec![], Some(block.clone())),
+        _ => return None,
+    };
+    Some(call("content_for_set", vec![slot.clone(), value], None))
 }
 
 /// Walk a method body and rewrite helper calls so they resolve against the
@@ -5137,6 +5268,20 @@ fn rewrite_helper_calls(
                 return;
             }
         }
+    }
+
+    // `content_for` in a helper module's body: Rails mixes the helper into
+    // the view, so it deposits into and reads the view's slots, as a
+    // template's own `content_for` does. `content_for(:slot)` reads
+    // (`content_for_get`), and `content_for(:slot, value)` or a block
+    // (its `capture`) deposits (`content_for_set`, nil, as Rails' setter
+    // answers). A dynamic or String slot or an options Hash stays as
+    // written, and so does an app's own `content_for`.
+    if rewrite_request
+        && let Some(call) = helper_content_for(expr, index, own_methods)
+    {
+        *expr = call;
+        return;
     }
 
     // Cases 3/4: a bare call resolving to an app or framework helper module.

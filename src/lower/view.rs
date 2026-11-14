@@ -174,6 +174,9 @@ pub enum RenderPartial<'a> {
         partial: &'a str,
         arg: Option<&'a Expr>,
         locals: Option<&'a [(Expr, Expr)]>,
+        /// An explicit `object:`, which Rails binds under the partial's
+        /// `as:` name whatever `locals:` holds.
+        object: Option<&'a Expr>,
     },
     /// `render partial: "stories/listdetail", collection: stories, as:
     /// :story` — the explicit-kwarg collection form: iterate `collection`,
@@ -349,6 +352,7 @@ pub fn classify_render_partial<'a>(
                 partial: value,
                 arg: None,
                 locals: None,
+                object: None,
             }),
             // Explicit kwarg form: `render partial: "x/y", collection: c,
             // as: :item` / `render partial: "x/y", item: rec`.
@@ -393,6 +397,7 @@ pub fn classify_render_partial<'a>(
                 partial: partial.as_str(),
                 arg,
                 locals: Some(entries),
+                object: None,
             })
         }
         _ => None,
@@ -436,6 +441,11 @@ fn classify_object_render_locals<'a>(
         }
         _ => None,
     }
+}
+
+/// A literal `nil` or `false`.
+pub fn is_falsy_lit(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { value: Literal::Nil | Literal::Bool { value: false } })
 }
 
 /// A model's `to_partial_path`: its `model_name.collection` and its
@@ -524,6 +534,7 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
     let mut dyn_partial: Option<(&Expr, &str)> = None;
     let mut collection: Option<&Expr> = None;
     let mut as_name: Option<&str> = None;
+    let mut object: Option<&Expr> = None;
     let mut first_local: Option<&Expr> = None;
     let mut locals_entries: Option<&[(Expr, Expr)]> = None;
     let mut cached = false;
@@ -546,11 +557,20 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
                 }
             }
             Some("collection") => collection = Some(v),
-            Some("as") => {
-                if let ExprNode::Lit { value: Literal::Sym { value } } = &*v.node {
-                    as_name = Some(value.as_str());
+            // The record, which is also the single named-partial arg
+            // below.
+            Some("object") => {
+                object = Some(v);
+                if first_local.is_none() {
+                    first_local = Some(v);
                 }
             }
+            // `as: :name` or `as: "name"`: Rails takes `as.to_sym`.
+            Some("as") => match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => as_name = Some(value.as_str()),
+                ExprNode::Lit { value: Literal::Str { value } } => as_name = Some(value.as_str()),
+                _ => {}
+            },
             // Which formats the partial is looked up in, not a local
             // (`render_formats_option`).
             Some("formats") => {}
@@ -609,6 +629,7 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
             partial,
             arg: first_local,
             locals: locals_entries,
+            object,
         })
     }
 }
@@ -838,6 +859,12 @@ pub fn classify_view_helper<'a>(
             Some(ViewHelperKind::ContentTag { name: &args[0], content: &args[1], opts: Some(&args[2]) })
         }
         ("content_for", 1) => {
+            let slot = extract_sym_or_str(&args[0])?;
+            Some(ViewHelperKind::ContentForGetter { slot })
+        }
+        // No content reads the slot, as Rails' `content_for` does when
+        // its content is nil or false.
+        ("content_for", 2) if is_falsy_lit(&args[1]) => {
             let slot = extract_sym_or_str(&args[0])?;
             Some(ViewHelperKind::ContentForGetter { slot })
         }
@@ -1818,7 +1845,7 @@ mod tests {
         let rp =
             classify_render_partial(None, "render", &args, None, &|_| true, &|_| false).unwrap();
         match rp {
-            RenderPartial::Named { partial, arg, locals } => {
+            RenderPartial::Named { partial, arg, locals, .. } => {
                 assert_eq!(partial, "layouts/lightbox");
                 assert!(arg.is_none() && locals.is_none());
             }

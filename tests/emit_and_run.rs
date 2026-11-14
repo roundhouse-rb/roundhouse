@@ -22251,3 +22251,19 @@ mod has_many_writer;
 mod association_scopes;
 #[path = "emit_and_run/association_relation_calls.rs"]
 mod association_relation_calls;
+#[path = "emit_and_run/helper_content_for.rs"]
+mod helper_content_for;
+#[path = "emit_and_run/view_statement_helper_call.rs"]
+mod view_statement_helper_call;
+#[path = "emit_and_run/helper_view_context.rs"]
+mod helper_view_context;
+#[path = "emit_and_run/view_keyword_splat.rs"]
+mod view_keyword_splat;
+#[path = "emit_and_run/link_to_app_helper_path.rs"]
+mod link_to_app_helper_path;
+#[path = "emit_and_run/partial_object_as.rs"]
+mod partial_object_as;
+#[path = "emit_and_run/helper_asset_url.rs"]
+mod helper_asset_url;
+#[path = "emit_and_run/safe_join_safe.rs"]
+mod safe_join_safe;

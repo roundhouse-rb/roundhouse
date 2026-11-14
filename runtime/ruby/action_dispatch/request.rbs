@@ -97,6 +97,7 @@ module ActionDispatch
     def inertia?: () -> bool
     def fullpath: () -> String
     def original_fullpath: () -> String
+    def path_info: () -> String
     def ssl?: () -> bool
     def protocol: () -> String
     def optional_port: () -> Integer?

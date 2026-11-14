@@ -98,6 +98,47 @@ module ActionView
       )
     end
 
+    # The ruby family's `asset_url` and `image_url` (see the universal
+    # bodies in view_helpers.rb): the asset's path on the request's origin,
+    # as Rails' `url_to_asset` answers it with no `asset_host`
+    # (`compute_asset_host`'s `request.base_url`, for an absolute path
+    # too). A full URL, a protocol-relative one and a `data:` or `cid:`
+    # source pass as given, and a blank one answers blank. The origin is
+    # the request's `base_url`, not the app's canonical domain that route
+    # URLs use. Outside a request Rails has no host to add,
+    # and neither does this. With `skip_pipeline:`, a relative source is
+    # under its public directory (`public_compute_asset_path`): `/icon.png`,
+    # and `/images/icon.png` for an image.
+    def self.asset_url(source, skip_pipeline: false)
+      return source if source.empty? || asset_url?(source)
+      path = if source.start_with?("/")
+        source
+      elsif skip_pipeline
+        "/" + source
+      else
+        asset_path(source)
+      end
+      request_asset_url(path)
+    end
+
+    def self.image_url(source, skip_pipeline: false)
+      return source if source.empty? || asset_url?(source)
+      path = if source.start_with?("/")
+        source
+      elsif skip_pipeline
+        "/images/" + source
+      else
+        image_path(source)
+      end
+      request_asset_url(path)
+    end
+
+    def self.request_asset_url(path)
+      request = ActionController::Current.request
+      return path if request.nil?
+      request.base_url + path
+    end
+
     def self.digested_asset_path(source)
       cut = source.length
       query = source.index("?")

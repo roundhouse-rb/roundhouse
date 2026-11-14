@@ -457,6 +457,14 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     return vec![assign_accumulator_string_new(disc), stmt];
                 }
             }
+            // `<% page_title "Orders" %>`: an app helper called for its
+            // effect (a `content_for` deposit), its value discarded, as
+            // Rails' `<% %>` does. It takes the same rewrite an output
+            // tag's helper call does. A bare read of a template local of
+            // that name is the local, not the helper.
+            if ctx.app_helper_names.contains(method.as_str()) && !ctx.reads_local(stmt) {
+                return vec![rewrite_helpers_in_expr(stmt, ctx)];
+            }
             vec![todo_io_append("unknown stmt", stmt.span)]
         }
         // `<% case action_name when "all" %>…<% when … %>…<% end %>` at
@@ -1979,6 +1987,7 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
                 },
             );
             call.ty = e.ty.clone();
+            call.decisions |= e.decisions & crate::expr::ERASED_KEYWORD_SPLAT;
             return call;
         }
     }
@@ -2150,6 +2159,9 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
     out.decisions |= e.decisions & crate::expr::CONST_PATH;
     // A grounded `iso8601` (`to_rfc3339`) stays one: the Ruby emit prints `iso8601` by this flag.
     out.decisions |= e.decisions & crate::expr::GROUNDED_TIME_FORMAT;
+    // A `**opts` argument the keyword lowering made positional stays a
+    // splat on the Ruby emit (`expr::ERASED_KEYWORD_SPLAT`).
+    out.decisions |= e.decisions & crate::expr::ERASED_KEYWORD_SPLAT;
     // Not a fresh, untyped node: a rebuilt `[]` the i18n lowering typed `Array[String]` would read as `Array[untyped]`
     out.ty = e.ty.clone();
     out
@@ -2514,6 +2526,7 @@ mod tests {
             lexxy: false,
             lexxy_editor_adapter: false,
             partial_ivars: Default::default(),
+            partial_record_locals: Default::default(),
             ivar_records: Default::default(),
             formats: vec!["html".to_string()],
             view_formats: Default::default(),

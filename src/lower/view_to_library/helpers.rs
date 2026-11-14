@@ -1126,8 +1126,11 @@ fn emit_url_arg(url: &Expr, ctx: &ViewCtx, string_ok: bool) -> Option<Expr> {
     }
     // Bare `<x>_url` absolute helpers (`button_to "Verify",
     // twofa_verify_url`) — RouteHelpers has no `_url` functions;
-    // ground to the shared absolute interp.
-    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*url.node {
+    // ground to the shared absolute interp. A bare read of a template
+    // local of that name is the local.
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*url.node
+        && !ctx.reads_local(url)
+    {
         if let Some(stem) = method.as_str().strip_suffix("_url") {
             return Some(super::absolute_url_interp(stem, args.clone()));
         }

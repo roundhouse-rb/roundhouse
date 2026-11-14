@@ -1985,6 +1985,7 @@ pub(super) fn rewrite_helpers_in_expr(e: &Expr, ctx: &ViewCtx) -> Expr {
                 },
             );
             call.ty = e.ty.clone();
+            call.decisions |= e.decisions & crate::expr::ERASED_KEYWORD_SPLAT;
             return call;
         }
     }

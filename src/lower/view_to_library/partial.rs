@@ -175,9 +175,19 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             }
             // The temps are named after the first local's value, as a
             // collection's are after the collection.
+            // An `object:` that runs code, written before the `locals:`,
+            // runs before them, as Ruby evaluates the options hash.
             let mut binds = Vec::new();
+            let object = object.map(|o| {
+                if reads_without_effect(o, ctx) || o.span.start > entries[0].0.span.start {
+                    return o.clone();
+                }
+                let name = Symbol::from(format!("__object_{}", o.span.start));
+                binds.push(bind_temp(&name, o.clone()));
+                Expr { span: o.span, ..var_ref(name) }
+            });
             let bound = bind_effectful_locals(entries, entries[0].1.span, ctx, &mut binds);
-            binds.push(accumulator_append_call(named_partial_object_call(partial, *arg, Some(&bound), *object, ctx)?, ctx));
+            binds.push(accumulator_append_call(named_partial_object_call(partial, *arg, Some(&bound), object.as_ref(), ctx)?, ctx));
             Some(seq(binds))
         }
         // `render layout: "x" do … end` needs MULTIPLE statements (the

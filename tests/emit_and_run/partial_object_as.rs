@@ -4,7 +4,7 @@
 //! the local is the partial's own name (`shared/_person` reads `person`).
 //! The partial took the object under its directory's name (`shared`) and
 //! read `someone` bare: `wrong number of arguments (given 0, expected
-//! 1..3)`, the partial's own module function. An `object:` with `locals:` beside it is still the `as:` local, and a partial rendered `as: :class` takes `locals: { class: }` under that name.
+//! 1..3)`, the partial's own module function. An `object:` with `locals:` beside it is still the `as:` local, and a partial rendered `as: :class` takes `locals: { class: }` under that name. A partial reading the caller's `@article` still reads it when an `object:` render with `locals:` names its own local `article`, which the partial doesn't read. A partial that yields, rendered with `object:` and `locals:` and no block, yields nothing.
 
 use super::emit_and_run;
 
@@ -13,12 +13,19 @@ fn app() -> emit_and_run::Overlay {
         .write("app/controllers/probes_controller.rb", r##"class ProbesController < ApplicationController
   def person
     @article = Article.first
+    @other = Article.last
   end
 end
 "##)
+        .write("app/views/articles/_teaser.html.erb", r##"<s><%= @article.title %></s>
+"##)
         .write("app/views/probes/person.html.erb", r##"<p id="r">[<%= render partial: "shared/badge", object: @article, as: "someone" %>|<%= render partial: "shared/badge", object: @article, as: :someone %>|<%= render partial: "shared/person", object: @article %>|<%= render partial: "shared/badge", locals: { someone: @article } %>|<%= render partial: "shared/card", collection: [@article], as: :article %>|<%= render partial: "shared/card", object: @article, locals: { article: @article } %>|<%= render partial: "shared/badge", object: @article, as: :someone, locals: { label: "x" } %>|<%= render partial: "shared/klass", collection: [@article], as: :class %>|<%= render partial: "shared/klass", locals: { class: @article } %>]</p>
+<p id="y"><%= render layout: "shared/box" do %>in<% end %>|<%= render partial: "shared/box", object: @article, locals: { caption: "x" } %></p>
+<p id="t"><%= render partial: "articles/teaser", object: @other, as: :article, locals: { caption: "x" } %></p>
 "##)
         .write("app/views/shared/_badge.html.erb", r##"<b><%= someone.title %></b>
+"##)
+        .write("app/views/shared/_box.html.erb", r##"<q><%= yield %></q>
 "##)
         .write("app/views/shared/_card.html.erb", r##"<i><%= article.title %></i>
 "##)
@@ -43,6 +50,9 @@ class ProbesControllerTest < ActionDispatch::IntegrationTest
     get "/probes/person"
     t = Article.first.title
     assert_includes response.body, "[<b>#{t}</b>\n|<b>#{t}</b>\n|<span>#{t}</span>\n|<b>#{t}</b>\n|<i>#{t}</i>\n|<i>#{t}</i>\n|<b>#{t}</b>\n|<u>#{t}</u>\n|<u>#{t}</u>\n]"
+    assert_includes response.body, "<p id=\"y\"><q>in</q>\n|<q></q>\n</p>"
+    assert_not_equal t, Article.last.title
+    assert_includes response.body, "<p id=\"t\"><s>#{t}</s>\n</p>"
   end
 end
 "##)
@@ -54,6 +64,7 @@ fn an_object_renders_as_names_the_partials_local() {
 }
 
 const SCRIPT: &str = r##"Db.exec("INSERT INTO articles (id, title, body, created_at, updated_at) VALUES (1, 'Title', 'Body', '2026-11-01 09:30:15', '2026-11-01 09:30:15')")
+Db.exec("INSERT INTO articles (id, title, body, created_at, updated_at) VALUES (2, 'Other', 'Body', '2026-11-01 09:30:15', '2026-11-01 09:30:15')")
 request = ActionDispatch::Request.new
 request.request_method = "GET"
 request.path = "/probes/person"
@@ -66,6 +77,8 @@ controller.params = {}
 controller.process_action(:person)
 body = controller.body
 raise body unless body.include?("[<b>Title</b>\n|<b>Title</b>\n|<span>Title</span>\n|<b>Title</b>\n|<i>Title</i>\n|<i>Title</i>\n|<b>Title</b>\n|<u>Title</u>\n|<u>Title</u>\n]")
+raise body unless body.include?("<p id=\"t\"><s>Title</s>\n</p>")
+raise body unless body.include?("<p id=\"y\"><q>in</q>\n|<q></q>\n</p>")
 puts "probe passed"
 "##;
 

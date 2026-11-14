@@ -1300,7 +1300,7 @@ fn named_partial_object_call(
     ctx: &ViewCtx,
 ) -> Option<Expr> {
     match (object, locals) {
-        (Some(object), Some(_)) => named_partial_call_with_record(partial, None, locals, Some(object.clone()), ctx),
+        (Some(object), Some(_)) => named_partial_call_bound(partial, None, locals, None, Some(object), ctx),
         _ => named_partial_call(partial, arg, locals, ctx),
     }
 }
@@ -1317,6 +1317,21 @@ pub(super) fn named_partial_call_with_record(
     arg: Option<&Expr>,
     locals: Option<&[(Expr, Expr)]>,
     record_override: Option<Expr>,
+    ctx: &ViewCtx,
+) -> Option<Expr> {
+    named_partial_call_bound(partial, arg, locals, record_override, None, ctx)
+}
+
+/// The named-partial call. A `record_override` is the captured block a
+/// layout render yields, as given. An `object` is the record a render
+/// names beside its `locals:`, which a partial carrying its yield in the
+/// record slot still doesn't take (`record_slot`).
+fn named_partial_call_bound(
+    partial: &str,
+    arg: Option<&Expr>,
+    locals: Option<&[(Expr, Expr)]>,
+    record_override: Option<Expr>,
+    object: Option<&Expr>,
     ctx: &ViewCtx,
 ) -> Option<Expr> {
 
@@ -1369,6 +1384,7 @@ pub(super) fn named_partial_call_with_record(
             let record_override_given = record_override.is_some();
             let arg_expr = match (record_override, strict_decl, locals.is_some()) {
                 (Some(record), _, _) => record,
+                (None, _, _) if let Some(object) = object => object.clone(),
                 (None, strict_decl, has_locals) => match (strict_decl, has_locals) {
                 (Some(decl), true) => lookup_local(decl[0].name.as_str())
                     .or_else(|| decl[0].default.clone())

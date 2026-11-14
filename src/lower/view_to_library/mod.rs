@@ -2838,11 +2838,14 @@ pub(crate) fn ivar_record_partials(
                 &|_| false,
             ) {
                 // Bound as `named_partial_call_with_record` binds it.
-                Some(RenderPartial::Named { partial, arg, locals, .. }) => {
+                Some(RenderPartial::Named { partial, arg, locals, object }) => {
                     let target_dir = partial.rsplit_once('/').map_or(dir, |(d, _)| d);
                     let module_camel = camelize_path(&snake_case(target_dir));
                     let record = singularize(&snake_case(last_segment(&module_camel)));
                     match locals {
+                        // The explicit object binds as the record
+                        // (`named_partial_object_call`).
+                        Some(_) if object.is_some() => false,
                         Some(entries) => !entries.iter().any(|(k, _)| {
                             matches!(&*k.node, ExprNode::Lit { value: Literal::Sym { value } }
                                 if value.as_str() == record)

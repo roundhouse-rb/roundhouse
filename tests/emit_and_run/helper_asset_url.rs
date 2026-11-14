@@ -4,6 +4,7 @@
 //! family, `asset_url` and `image_url` answer the asset's path on the
 //! request's host, as Rails does with no `asset_host`, an absolute path
 //! included; a full URL and a `data:` source pass as given.
+//! With `skip_pipeline: true` a relative source is under its public directory: `/raw.png`, and `/images/raw.png` for an image.
 
 use super::emit_and_run;
 
@@ -18,7 +19,7 @@ end
 "##)
         .write("app/helpers/probes_helper.rb", r##"module ProbesHelper
   def icon_urls
-    [asset_url("icon.png"), image_url("icon.png"), asset_url("/x.png"), asset_url("data:x"), asset_url("https://cdn.test/y.png")].join(" ")
+    [asset_url("icon.png"), image_url("icon.png"), asset_url("/x.png"), asset_url("data:x"), asset_url("https://cdn.test/y.png"), asset_url("raw.png", skip_pipeline: true), image_url("raw.png", skip_pipeline: true)].join(" ")
   end
 end
 "##)
@@ -39,7 +40,7 @@ end
 class ProbesControllerTest < ActionDispatch::IntegrationTest
   test "a helper's asset_url and image_url answer the asset's URL on the request's host" do
     get "/probes/icon"
-    assert_match %r{\[(http://www.example.com/assets/icon-[0-9a-f]+\.png) \1 http://www.example.com/x.png data:x https://cdn.test/y.png\]}, response.body
+    assert_match %r{\[(http://www.example.com/assets/icon-[0-9a-f]+\.png) \1 http://www.example.com/x.png data:x https://cdn.test/y.png http://www.example.com/raw.png http://www.example.com/images/raw.png\]}, response.body
   end
 end
 "##)
@@ -63,8 +64,9 @@ controller.params = {}
 controller.process_action(:icon)
 body = controller.body
 urls = body[/\[([^\]]*)\]/, 1].to_s.split(" ")
-raise body unless urls.length == 5 && urls[0].start_with?("http") && urls[0].include?("/assets/icon-") && urls[1] == urls[0]
+raise body unless urls.length == 7 && urls[0].start_with?("http") && urls[0].include?("/assets/icon-") && urls[1] == urls[0]
 raise body unless urls[2].start_with?("http") && urls[2].end_with?("/x.png") && urls[3] == "data:x" && urls[4] == "https://cdn.test/y.png"
+raise body unless urls[5].start_with?("http") && urls[5].end_with?("/raw.png") && !urls[5].include?("/images/") && urls[6].start_with?("http") && urls[6].end_with?("/images/raw.png")
 puts "probe passed"
 "##;
 
@@ -83,12 +85,12 @@ fn an_app_helpers_own_asset_url_wins() {
     app()
         .write(
             "app/helpers/application_helper.rb",
-            "module ApplicationHelper\n  def asset_url(source)\n    \"/own/\" + source\n  end\nend\n",
+            "module ApplicationHelper\n  def asset_url(source, skip_pipeline: false)\n    \"/own/\" + source\n  end\nend\n",
         )
         .edit(
             "test/controllers/probes_controller_test.rb",
-            r#"assert_match %r{\[(http://www.example.com/assets/icon-[0-9a-f]+\.png) \1 http://www.example.com/x.png data:x https://cdn.test/y.png\]}, response.body"#,
-            r#"assert_match %r{\[/own/icon.png http://www.example.com/assets/icon-[0-9a-f]+\.png /own//x.png /own/data:x /own/https://cdn.test/y.png\]}, response.body"#,
+            r#"assert_match %r{\[(http://www.example.com/assets/icon-[0-9a-f]+\.png) \1 http://www.example.com/x.png data:x https://cdn.test/y.png http://www.example.com/raw.png http://www.example.com/images/raw.png\]}, response.body"#,
+            r#"assert_match %r{\[/own/icon.png http://www.example.com/assets/icon-[0-9a-f]+\.png /own//x.png /own/data:x /own/https://cdn.test/y.png /own/raw.png http://www.example.com/images/raw.png\]}, response.body"#,
         )
         .run_test("test/controllers/probes_controller_test.rb")
         .assert_passes();

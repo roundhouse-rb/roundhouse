@@ -104,16 +104,30 @@ module ActionView
     # (`compute_asset_host`'s `request.base_url`, for an absolute path
     # too). A full URL, a protocol-relative one and a `data:` or `cid:`
     # source pass as given. Outside a request Rails has no host to add,
-    # and neither does this.
+    # and neither does this. With `skip_pipeline:`, a relative source is
+    # under its public directory (`public_compute_asset_path`): `/icon.png`,
+    # and `/images/icon.png` for an image.
     def self.asset_url(source, skip_pipeline: false)
       return source if asset_url?(source)
-      path = skip_pipeline || source.start_with?("/") ? source : asset_path(source)
+      path = if source.start_with?("/")
+        source
+      elsif skip_pipeline
+        "/" + source
+      else
+        asset_path(source)
+      end
       request_asset_url(path)
     end
 
     def self.image_url(source, skip_pipeline: false)
       return source if asset_url?(source)
-      path = skip_pipeline || source.start_with?("/") ? source : image_path(source)
+      path = if source.start_with?("/")
+        source
+      elsif skip_pipeline
+        "/images/" + source
+      else
+        image_path(source)
+      end
       request_asset_url(path)
     end
 

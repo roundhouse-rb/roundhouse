@@ -22249,3 +22249,5 @@ mod helper_content_for;
 mod view_statement_helper_call;
 #[path = "emit_and_run/helper_view_context.rs"]
 mod helper_view_context;
+#[path = "emit_and_run/view_keyword_splat.rs"]
+mod view_keyword_splat;

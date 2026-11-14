@@ -20,6 +20,7 @@ mod alba;
 mod built_send;
 mod conditional_permit;
 pub(crate) mod unreachable_views;
+mod locale_templates;
 mod view_paths;
 mod uncalled_helper_copies;
 mod written_names;

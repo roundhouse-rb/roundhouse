@@ -2417,6 +2417,7 @@ end
     );
     let mut walked: Vec<super::view_paths::WalkedRoot> = Vec::new();
     let mut ingested: HashMap<PathBuf, crate::dialect::View> = HashMap::default();
+    let mut lone_segments = Vec::new();
     for root in view_lookup.roots() {
         let views_dir = dir.join(root);
         if !vfs.is_dir(&views_dir) {
@@ -2431,7 +2432,8 @@ end
             continue;
         }
         let mut files = Vec::new();
-        let erb_files = read_erb_files(vfs, &views_dir)?;
+        let (erb_files, lone) = read_view_templates(vfs, &views_dir)?;
+        lone_segments.extend(lone);
         for (erb_path, engine) in erb_files {
             files.push(erb_path.clone());
             if ingested.contains_key(&erb_path) {
@@ -2886,6 +2888,16 @@ end
     // on a large app the catalog is hundreds of megabytes.
     app.i18n = std::sync::Arc::new(catalog);
     crate::i18n::stamp_models(&mut app);
+    // Now that the locales are known: `show.de.html.erb` is `show`'s text in `de`.
+    // Unset, `available_locales` is every locale I18n's load path names:
+    // the gems' files and Rails' own `en` besides the app's.
+    let implicit = configured.is_none().then(|| {
+        let mut locales = crate::i18n::Catalog::file_locales(&gem_files);
+        locales.push("en".to_string());
+        locales
+    });
+    skip_non_locale_segments(&mut app, &lone_segments, implicit.as_deref())?;
+    super::locale_templates::merge(&mut app, implicit.as_deref());
 
     // `sig/**/*.rbs` — user-authored RBS sidecars for app code the
     // Rails conventions can't fully type on their own. Recursively
@@ -9185,20 +9197,63 @@ pub(super) fn read_erb_files<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
 ) -> IngestResult<Vec<(PathBuf, ViewEngine)>> {
+    Ok(read_view_templates(vfs, dir)?.0)
+}
+
+/// [`read_erb_files`], and the templates among them taken for a lone
+/// segment that may be a locale, which [`skip_non_locale_segments`]
+/// decides once the app's locales are read.
+pub(super) fn read_view_templates<V: Vfs + ?Sized>(
+    vfs: &V,
+    dir: &Path,
+) -> IngestResult<(Vec<(PathBuf, ViewEngine)>, Vec<LoneSegment>)> {
     let mut out = Vec::new();
-    walk_erb(vfs, dir, &mut out)?;
+    let mut lone = Vec::new();
+    walk_erb(vfs, dir, &mut out, &mut lone)?;
     out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
+    lone.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok((out, lone))
+}
+
+/// A template whose one segment before its handler is no format the
+/// walker takes but may be a locale (`show.zh-Hans.erb`).
+pub(super) struct LoneSegment {
+    path: PathBuf,
+    handler: String,
+    segment: String,
+}
+
+/// The [`LoneSegment`] templates, once the app's locales are read: one
+/// whose segment no available locale names and is not shaped like one
+/// (`show.foo.erb`, or `show.zh-Hans.erb` without `zh-Hans`) is skipped
+/// as the walker skips a format it does not take, and leaves no view.
+/// `implicit`, with `available_locales` unset, is the locales the gems'
+/// files make available besides the app's.
+pub(super) fn skip_non_locale_segments(app: &mut App, lone: &[LoneSegment], implicit: Option<&[String]>) -> IngestResult<()> {
+    let mut available = app.i18n.locales();
+    available.extend(implicit.unwrap_or_default().iter().cloned());
+    let mut skipped: HashSet<String> = HashSet::default();
+    for t in lone.iter().filter(|t| !super::locale_templates::names_locale(&t.segment, &available)) {
+        record_skipped_view(&t.path, &format!("{} (non-html format)", t.handler))?;
+        skipped.insert(t.path.display().to_string());
+    }
+    if !skipped.is_empty() {
+        let skipped_file = |file| super::sources::path_of(file).is_some_and(|p| skipped.contains(&p));
+        app.views.retain(|v| !skipped_file(v.body.span.file));
+        super::prism::retain(|d| !skipped_file(d.span.file));
+    }
+    Ok(())
 }
 
 fn walk_erb<V: Vfs + ?Sized>(
     vfs: &V,
     dir: &Path,
     out: &mut Vec<(PathBuf, ViewEngine)>,
+    lone: &mut Vec<LoneSegment>,
 ) -> IngestResult<()> {
     for path in vfs.read_dir(dir)? {
         if vfs.is_dir(&path) {
-            walk_erb(vfs, &path, out)?;
+            walk_erb(vfs, &path, out, lone)?;
             continue;
         }
         let ext = path.extension().and_then(|e| e.to_str());
@@ -9277,6 +9332,13 @@ fn walk_erb<V: Vfs + ?Sized>(
                     // not a different engine concern.
                     || matches!(format, Some("rss" | "atom" | "xml" | "xls"))
                 {
+                    out.push((path, engine));
+                } else if let Some(segment) = format.filter(|f| super::locale_templates::lone_segment(f)) {
+                    // `show.de.erb`, `show.zh-Hans.erb`: a lone segment
+                    // that may be a locale, which `locale_templates` reads
+                    // as Rails does once the app's locales are read
+                    // (`skip_non_locale_segments`).
+                    lone.push(LoneSegment { path: path.clone(), handler: e.to_string(), segment: segment.to_string() });
                     out.push((path, engine));
                 } else {
                     record_skipped_view(&path, &format!("{e} (non-html format)"))?;

@@ -4,6 +4,7 @@
 //! a route (`undefined method 'special_path' for module RouteHelpers`), and
 //! a `_url` one for a route's absolute form. A route helper beside them
 //! still links to its route.
+//! In a partial whose locals share the helpers' names, a bare `special_path` is the local, and `special_path()` and `device_url(8)` still call the helpers.
 
 use super::emit_and_run;
 
@@ -24,7 +25,9 @@ end
   end
 end
 "##)
+        .write("app/views/probes/_shadow.html.erb", r##"<em><%= link_to "L", special_path %>|<%= link_to "H", special_path() %>|<%= link_to "E", device_url(8) %></em>"##)
         .write("app/views/probes/links.html.erb", r##"<p id="r">[<%= link_to "S", special_path %>|<%= link_to "D", device_url(7) %>|<%= link_to "A", articles_path %>]</p>
+<%= render "probes/shadow", special_path: "/from/local", device_url: "/unused" %>
 "##)
         .write("config/routes.rb", r##"Rails.application.routes.draw do
   root "articles#index"
@@ -42,6 +45,7 @@ class ProbesControllerTest < ActionDispatch::IntegrationTest
   test "link_to of an app helper's _path or _url links to what the helper answers" do
     get "/probes/links"
     assert_includes response.body, "[<a href=\"/special/place\">S</a>|<a href=\"https://devices.test/7\">D</a>|<a href=\"/articles\">A</a>]"
+    assert_includes response.body, "<em><a href=\"/from/local\">L</a>|<a href=\"/special/place\">H</a>|<a href=\"https://devices.test/8\">E</a></em>"
   end
 end
 "##)
@@ -64,7 +68,7 @@ controller.request_method = "GET"
 controller.params = {}
 controller.process_action(:links)
 body = controller.body
-raise body unless body.include?("[<a href=\"/special/place\">S</a>|<a href=\"https://devices.test/7\">D</a>|<a href=\"/articles\">A</a>]")
+raise body unless body.include?("[<a href=\"/special/place\">S</a>|<a href=\"https://devices.test/7\">D</a>|<a href=\"/articles\">A</a>]") && body.include?("<em><a href=\"/from/local\">L</a>|<a href=\"/special/place\">H</a>|<a href=\"https://devices.test/8\">E</a></em>")
 puts "probe passed"
 "##;
 

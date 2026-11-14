@@ -4,6 +4,7 @@
 //! shape it doesn't lower, and dropped it with a warning: the helper never
 //! ran, so neither its `content_for` deposit nor the layout's `<title>`
 //! from it appeared.
+//! A partial local of the helper's name (`put_slot: "local"`) is what a bare `<%= put_slot %>` reads, and `<% put_slot("shadowed") %>` still calls the helper.
 
 use super::emit_and_run;
 
@@ -36,9 +37,12 @@ end
   end
 end
 "##)
+        .write("app/views/probes/_shadow.html.erb", r##"<% put_slot("shadowed") %><i>[<%= put_slot %>]</i>
+"##)
         .write("app/views/probes/statement.html.erb", r##"<% put_slot "val" %>
 <% put_title "From a statement" %>
 <p id="r">[<%= read_slot %>]</p>
+<%= render "probes/shadow", put_slot: "local" %><b>[<%= read_slot %>]</b>
 "##)
         .write("config/routes.rb", r##"Rails.application.routes.draw do
   root "articles#index"
@@ -57,6 +61,8 @@ class ProbesControllerTest < ActionDispatch::IntegrationTest
     get "/probes/statement"
     assert_includes response.body, "[val]"
     assert_includes response.body, "<title>From a statement</title>"
+    assert_includes response.body, "<i>[local]</i>"
+    assert_includes response.body, "<b>[valshadowed]</b>"
   end
 end
 "##)
@@ -79,7 +85,7 @@ controller.request_method = "GET"
 controller.params = {}
 controller.process_action(:statement)
 body = controller.body
-raise body unless body.include?("[val]") && body.include?("<title>From a statement</title>")
+raise body unless body.include?("[val]") && body.include?("<title>From a statement</title>") && body.include?("<i>[local]</i>") && body.include?("<b>[valshadowed]</b>")
 puts "probe passed"
 "##;
 

@@ -6189,6 +6189,13 @@ impl ViewCtx {
     pub(super) fn binds_local(&self, n: &str) -> bool {
         self.is_local(n) && !self.ivar_params.iter().any(|x| x == n)
     }
+    /// True when `e` reads such a local: a bare name with no arguments
+    /// or parentheses. `name(...)` and `name()` call the method even
+    /// where a local has the name, as in Ruby.
+    pub(super) fn reads_local(&self, e: &Expr) -> bool {
+        matches!(&*e.node, ExprNode::Send { recv: None, method, args, block: None, parenthesized: false }
+            if args.is_empty() && self.binds_local(method.as_str()))
+    }
     /// True when `@<n>` is assigned a partial-options value in some
     /// controller action (a bare partial-name string or a `{partial: …}`
     /// hash), so a bare `render @<n>` should dispatch over the pool

@@ -4019,11 +4019,238 @@ puts "public files contract passed"
         .assert_passes();
 }
 
+/// With the page cache on, an app that writes no page (nothing it emits
+/// names `cache_page`) still finds on disk a file written under public/
+/// after the first request at its own path, as Rails' FileHandler does (an
+/// upload stored there), but does not stat the names only the page cache
+/// gives a path (`/later` as `later.html`). With the page cache off a miss
+/// looks at nothing on disk, as before. An app that writes pages still
+/// finds one on disk
+/// (`page_caching::the_static_lookup_decodes_the_path_and_finds_another_workers_page`).
+#[test]
+fn an_app_that_writes_no_page_does_not_watch_public_on_disk() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+ActionController::Base.perform_caching = true
+check.(client.get("/late.txt").status == 404, "no public file before it is written")
+File.write("public/late.txt", "late\n")
+r = client.get("/late.txt")
+check.(r.status == 200 && r.body == "late\n", "a file written at its own path after boot is served: #{r.status}")
+check.(client.get("/later").status == 404, "no page before it is written")
+File.write("public/later.html", "later\n")
+r = client.get("/later")
+check.(r.status == 404 && r.body != "later\n", "a page cache name written after boot is not looked up: #{r.status}")
+r = client.get("/later.html")
+check.(r.status == 200 && r.body == "later\n", "the same file at its own path is served: #{r.status}")
+r = client.get("/later")
+check.(r.status == 200 && r.body == "later\n", "once found at its own path, the page answers its page name in this process: #{r.status}")
+Dir.mkdir("public/inner")
+File.write("public/inner/index.html", "inner\n")
+r = client.get("/inner")
+check.(r.status == 404 && r.body != "inner\n", "a page cache index written after boot is not looked up: #{r.status}")
+r = client.get("/inner/index.html")
+check.(r.status == 200 && r.body == "inner\n", "the index at its own path is served: #{r.status}")
+ActionController::Base.perform_caching = false
+ActionController::PublicFiles.reset_watch!
+File.write("public/off.txt", "off\n")
+r = client.get("/off.txt")
+check.(r.status == 404 && r.body != "off\n", "with the page cache off a file written after boot is not looked up: #{r.status}")
+puts "no page writes contract passed"
+"##)
+        .assert_passes();
+}
+
+/// boot.rb's line is decided from the Ruby each tree emits, once the app's
+/// own is in it: an app class that names `cache_page`, through the macro or
+/// through `send`, leaves the Ruby tree and the Spinel tree without it,
+/// and the app as generated has it in both, also when files that are not
+/// Ruby (a public file, a script) name it.
+#[test]
+fn an_app_class_that_names_cache_page_keeps_public_watched_in_both_trees() {
+    use roundhouse::project::BuildTarget;
+    const LINE: &str = "ActionController::PublicFiles.no_page_writes!";
+    let boot = |filter: Option<&str>, target: BuildTarget| {
+        let app = emit_and_run::real_blog();
+        let app = match filter {
+            None => app.write("public/cache_page.txt", "cache_page\n").write("app/javascript/cache_page.js", "// cache_page\n"),
+            Some(filter) => app
+                .edit("config/routes.rb", "  root \"articles#index\"\n", "  root \"articles#index\"\n  get \"/sites/:id\" => \"sites#show\"\n")
+                .write(
+                    "app/controllers/sites_controller.rb",
+                    &format!("class SitesController < ApplicationController\n  {filter}\n\n  def show\n    render html: \"<p>site</p>\".html_safe\n  end\nend\n"),
+                ),
+        };
+        let (emitted, errors) = app.emit(target);
+        assert!(errors.is_empty(), "{filter:?}: {errors:?}");
+        let boot = std::fs::read_to_string(emitted.join("boot.rb")).unwrap();
+        assert!(boot.contains("require_relative \"runtime/public_files\""), "the tree serves public/:\n{boot}");
+        boot
+    };
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let plain = boot(None, target);
+        assert!(plain.contains(LINE), "{target:?}: an app that names no cache_page writes no page:\n{plain}");
+        for filter in ["caches_page :show", "after_action { send(:cache_page) }"] {
+            let writer = boot(Some(filter), target);
+            assert!(!writer.contains(LINE), "{target:?}: `{filter}` names cache_page, so the disk stays watched:\n{writer}");
+        }
+    }
+}
+
+/// A gem compiled with the app has its files' own programs emitted, and
+/// they run at boot: a `cache_page` sent from a statement of one, or from
+/// the condition of a file-level `if` that holds a declaration, keeps the
+/// disk watched, as one sent from the app's classes does. The same gem
+/// without that send leaves the app with no page writer, and boot.rb says
+/// so. The statement is a conditional one: a plain call on a class the
+/// tree carries also joins the boot program (`gem_load_program`), which
+/// is written with the app's classes.
+#[test]
+fn a_gem_file_statement_that_sends_cache_page_keeps_public_watched() {
+    const LOCK: &str = "PATH\n  remote: vendor/gems/tessera-1.0.0\n  specs:\n    tessera (1.0.0)\n\nGEM\n  remote: https://rubygems.org/\n  specs:\n\nDEPENDENCIES\n  tessera!\n";
+    const LINE: &str = "ActionController::PublicFiles.no_page_writes!";
+    const MODULE: &str = "module Tessera\n  def self.pages(&block)\n    @pages = block\n    true\n  end\n\n  def self.pages?\n    !@pages.nil?\n  end\nend\n\n";
+    let emitted = |tail: &str, written: &str| {
+        let gem = format!("{MODULE}{tail}\n");
+        let run = emit_and_run::empty_app()
+            .write("roundhouse.yml", "")
+            .write("Gemfile.lock", LOCK)
+            .write("config/application.rb", "require \"tessera\"\n")
+            .write("vendor/gems/tessera-1.0.0/lib/tessera.rb", &gem)
+            .run_ruby("puts Tessera.pages?\n");
+        run.assert_passes();
+        assert_eq!(run.stdout.trim(), "true", "the gem file's statement ran at boot\n{}", run.stderr);
+        let program = run.emitted.join("app/models/roundhouse_files/vendor/gems/tessera-1.0.0/lib/tessera.rb");
+        let program = std::fs::read_to_string(&program).unwrap_or_else(|e| panic!("{}: {e}", program.display()));
+        assert!(program.contains(written), "the file's program writes `{written}`:\n{program}");
+        // The line is only ever written after this require: without it no variant says anything.
+        let boot = std::fs::read_to_string(run.emitted.join("boot.rb")).unwrap();
+        assert!(boot.contains("require_relative \"runtime/public_files\""), "the tree serves public/:\n{boot}");
+        boot
+    };
+    let quiet = emitted("Tessera.pages { |controller| controller.to_s } unless Tessera.pages?", "to_s");
+    assert!(quiet.contains(LINE), "a gem that sends no cache_page leaves the app with no page writer:\n{quiet}");
+    let statement = emitted("Tessera.pages { |controller| controller.cache_page } unless Tessera.pages?", "cache_page");
+    assert!(!statement.contains(LINE), "a gem file's statement sends cache_page, so the disk stays watched:\n{statement}");
+    let condition = emitted(
+        "if Tessera.pages { |controller| controller.cache_page }\n  module Tessera\n    module Paged\n    end\n  end\nend",
+        "cache_page",
+    );
+    assert!(!condition.contains(LINE), "the condition of a gem file's `if` sends cache_page, so the disk stays watched:\n{condition}");
+}
+
+/// The app's Ruby that each chain writes under `runtime/` counts, in both
+/// trees: a `cache_page` sent from the block the app hands its middleware
+/// (`runtime/gem_middleware.rb`), from an SQL function an initializer
+/// registers (`runtime/sql_functions.rb`) or from a rake file's
+/// DatabaseTasks hook (`runtime/active_record/app_rake_tasks.rb`) leaves
+/// boot.rb without `no_page_writes!`, so the file is written before the
+/// tree is read.
+#[test]
+fn the_apps_ruby_under_runtime_keeps_public_watched_in_both_trees() {
+    use roundhouse::project::BuildTarget;
+    const LINE: &str = "ActionController::PublicFiles.no_page_writes!";
+    const AUTOLOAD: &str = "    config.autoload_lib(ignore: %w[assets tasks])\n";
+    const PROBE: &str = "class ProbeUse\n  def initialize(app, &block)\n    @app = app\n  end\n\n  def call(env)\n    @app.call(env)\n  end\nend\n";
+    const FUNCTION: &str = "require \"active_record/connection_adapters/sqlite3_adapter\"\n\nActiveSupport.on_load(:active_record) do\n  ActiveRecord::ConnectionAdapters::SQLite3Adapter.class_eval do\n    alias_method :orig_initialize, :initialize\n\n    def initialize(connection, logger = nil, pool = nil)\n      orig_initialize(connection, logger, pool)\n\n      raw_connection.create_function(\"paged\", 0) do |fn|\n        fn.result = cache_page\n      end\n    end\n  end\nend\n";
+    const TASKS: &str = "module PagedDatabaseTasks\n  def migrate(...)\n    super.tap { warm_pages }\n  end\n\n  def warm_pages\n    cache_page\n  end\nend\n\nActiveRecord::Tasks::DatabaseTasks.singleton_class.prepend(PagedDatabaseTasks)\n\nnamespace :pages do\n  task warm: :environment do\n    ActiveRecord::Tasks::DatabaseTasks.warm_pages\n  end\nend\n";
+    let middleware = || {
+        emit_and_run::real_blog()
+            .write("lib/probe_use.rb", PROBE)
+            .edit("config/application.rb", AUTOLOAD, &format!("{AUTOLOAD}    config.middleware.use ProbeUse do |probe|\n      probe.cache_page\n    end\n"))
+    };
+    let function = || emit_and_run::real_blog().write("config/initializers/sqlite_functions.rb", FUNCTION);
+    let tasks = || emit_and_run::real_blog().write("lib/tasks/paged.rake", TASKS);
+    let cases: [(&str, &dyn Fn() -> emit_and_run::Overlay); 3] = [
+        ("runtime/gem_middleware.rb", &middleware),
+        ("runtime/sql_functions.rb", &function),
+        ("runtime/active_record/app_rake_tasks.rb", &tasks),
+    ];
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        for (file, app) in &cases {
+            let (emitted, _errors) = app().emit(target);
+            let carried = std::fs::read_to_string(emitted.join(file)).unwrap_or_else(|e| panic!("{target:?} {file}: {e}"));
+            assert!(carried.contains("cache_page"), "{target:?}: the app's send is in {file}:\n{carried}");
+            let boot = std::fs::read_to_string(emitted.join("boot.rb")).unwrap();
+            assert!(boot.contains("require_relative \"runtime/public_files\""), "{target:?}: the tree serves public/:\n{boot}");
+            assert!(!boot.contains(LINE), "{target:?}: {file} sends cache_page, so the disk stays watched:\n{boot}");
+        }
+    }
+}
+
 #[test]
 fn class_configuration_shares_a_name_with_an_instance_method() {
     let run = class_configuration::same_name_overlay().run_ruby(class_configuration::SAME_NAME_ASSERTIONS);
     run.assert_passes();
     assert!(run.stdout.contains("class and instance configuration names passed"));
+}
+
+/// Under the Rack stack the session is committed above the gems'
+/// middleware (`Main.commit_session`), so the dispatch below it has
+/// nothing to encode: a request encodes its session when it is restored
+/// and when it is committed, twice, and sets the cookie it set before: on
+/// a first visit that mints a CSRF token, and not when the browser sends
+/// the session back unchanged. The CGI entry, with no commit above it,
+/// still encodes after the action and sets the cookie itself.
+#[test]
+fn a_request_through_the_rack_stack_encodes_its_session_twice() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+encoded = 0
+ActionDispatch::Session.prepend(Module.new { define_method(:to_cookie) { encoded += 1; super() } })
+name = Rails.application.session_cookie_key
+session_cookie = lambda do |response|
+  Array(response.headers["set-cookie"]).flat_map { |line| line.split("\n") }.find { |line| line.start_with?("#{name}=") }
+end
+
+# A first visit to a page with a form: the session gains a CSRF token and is set.
+first = client.get("/articles/new")
+check.(first.status == 200, "GET /articles/new answers #{first.status}")
+set = session_cookie.(first)
+check.(!set.nil? && set.include?("HttpOnly"), "a first visit sets the session cookie: #{first.headers["set-cookie"].inspect}")
+check.(encoded == 2, "a first visit encodes the session #{encoded} times, want 2 (restored, committed)")
+
+# The browser sends it back: nothing changes, nothing is set.
+encoded = 0
+again = client.get("/articles/new", "HTTP_COOKIE" => set.split(";").first)
+check.(again.status == 200, "the second GET answers #{again.status}")
+check.(session_cookie.(again).nil?, "an unchanged session is not set again: #{again.headers["set-cookie"].inspect}")
+check.(encoded == 2, "an unchanged session is encoded #{encoded} times, want 2")
+
+# A response that does not touch the session, with no cookie: none is set.
+encoded = 0
+missing = client.get("/no-such-page")
+check.(missing.status == 404 && session_cookie.(missing).nil?, "a 404 sets no session: #{missing.status} #{missing.headers["set-cookie"].inspect}")
+check.(encoded == 2, "a 404 encodes the session #{encoded} times, want 2")
+
+# The CGI entry has no commit above it: there the dispatch still encodes
+# the session after the action and sets the cookie itself.
+encoded = 0
+out = StringIO.new
+Main.run({ "REQUEST_METHOD" => "GET", "PATH_INFO" => "/articles/new", "QUERY_STRING" => "" }, StringIO.new(""), out)
+check.(out.string.start_with?("Status: 200"), "the CGI entry answers #{out.string[0, 60].inspect}")
+check.(out.string.include?("Set-Cookie: #{name}="), "the CGI entry sets the session cookie: #{out.string[0, 400].inspect}")
+check.(encoded == 2, "the CGI entry encodes the session #{encoded} times, want 2 (restored, after the action)")
+puts "session encodings contract passed"
+"##)
+        .assert_passes();
 }
 
 #[test]
@@ -4036,6 +4263,55 @@ fn finite_concern_class_configuration_runs_without_replaying_rails() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// The dispatcher reads the extension of the path's last segment for the
+/// request a route constraint is asked with. A path with no dot has none
+/// and is not split to look for one; a path with a dot is read as before,
+/// whichever segment the dot is in.
+#[test]
+fn the_dispatcher_splits_a_path_for_its_extension_only_when_it_has_a_dot() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+extensions = []
+ActionDispatch::MimeNegotiation.singleton_class.prepend(Module.new {
+  define_method(:format_name) { |extension, *rest| extensions << extension; super(extension, *rest) }
+})
+splits = []
+String.prepend(Module.new {
+  define_method(:split) { |*args, &blk|
+    splits << self.dup if caller_locations(1, 1).first.path.end_with?("/main.rb")
+    super(*args, &blk)
+  }
+})
+# The extension as the dispatcher has always read it: the last segment's text after its last dot.
+reference = lambda do |path|
+  segment = path.split("/").last.to_s
+  segment.include?(".") ? segment.split(".").last.to_s : ""
+end
+["/no-such-page", "/no/such/page", "/no-such-page/", "/no-such-page.json", "/no.such/page", "/no.such/page.xml", "/no/such.page.rss",
+ "/no-such-page.", "/.hidden", "/no..such", "/no-such-page.JSON"].each do |path|
+  extensions.clear
+  splits.clear
+  response = client.get(path)
+  check.(response.status == 404, "#{path} answers #{response.status}")
+  check.(extensions.first == reference.(path), "#{path} is read with the extension #{extensions.first.inspect}, was #{reference.(path).inspect}")
+  next if path.include?(".")
+  check.(splits.none? { |text| text == path }, "#{path} has no dot and was split by the dispatcher")
+end
+check.(client.get("/no-such-page.json").body.include?("\"status\":404"), "a .json 404 is still answered as JSON")
+puts "path extension contract passed"
+"##)
+        .assert_passes();
 }
 
 /// `Dry::Struct` classes construct, coerce and refuse as dry-struct does,
@@ -4052,6 +4328,59 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct contract passed"));
     assert!(run.stdout.contains("dry-struct stamp contract passed"));
     assert!(run.stdout.contains("dry-struct clock contract passed"));
+}
+
+/// A cookie the response sets carries `Secure` when the request came over
+/// https (`HTTPS`, or the first `X-Forwarded-Proto`), and that is all the
+/// Rack response reads the scheme for: a response that sets no cookie does
+/// not ask the env for it.
+#[test]
+fn the_rack_response_reads_the_scheme_only_to_flag_a_cookie() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+asked = Hash.new(0)
+spy = Class.new(Hash) {
+  define_method(:[]) { |key| asked[key] += 1 if key == "HTTPS"; super(key) }
+  define_method(:fetch) { |key, *rest, &blk| asked[key] += 1 if key == "HTTP_X_FORWARDED_PROTO"; super(key, *rest, &blk) }
+}
+env_of = ->(pairs) { spy.new.merge!({ "REQUEST_METHOD" => "GET" }).merge!(pairs) }
+answer = ->(cookies, secure = {}, samesite = {}) { [200, "body", "text/html; charset=utf-8", nil, cookies, { "X-Test" => "1" }, secure, samesite, {}, {}] }
+
+# No cookie to set: the answer is the same response, and the scheme is not read.
+status, headers, body = Main.rack_response(env_of.({ "HTTP_X_FORWARDED_PROTO" => "https" }), answer.({}))
+check.(status == 200 && body == ["body"] && headers["x-test"] == "1" && headers["content-type"] == "text/html; charset=utf-8", "the response is #{[status, headers, body].inspect}")
+check.(!headers.key?("set-cookie"), "no cookie is set: #{headers.inspect}")
+check.(asked.empty?, "a response that sets no cookie asked the env for #{asked.keys.inspect}")
+
+# A cookie to set: Secure exactly when the request is https, as before.
+line = ->(pairs, *flags) { Main.rack_response(env_of.(pairs), answer.({ "k" => "v" }, *flags))[1]["set-cookie"] }
+plain = ["k=v; Path=/; HttpOnly; SameSite=Lax"]
+secure = ["k=v; Path=/; HttpOnly; SameSite=Lax; Secure"]
+{ {} => plain, { "HTTPS" => "on" } => secure, { "HTTPS" => "off" } => plain, { "HTTPS" => "ON" } => plain,
+  { "HTTP_X_FORWARDED_PROTO" => "https" } => secure, { "HTTP_X_FORWARDED_PROTO" => "HTTPS, http" } => secure,
+  { "HTTP_X_FORWARDED_PROTO" => " https ,http" } => secure, { "HTTP_X_FORWARDED_PROTO" => "http, https" } => plain,
+  { "HTTP_X_FORWARDED_PROTO" => "" } => plain, { "HTTP_X_FORWARDED_PROTO" => "http" } => plain,
+  { "HTTPS" => "on", "HTTP_X_FORWARDED_PROTO" => "http" } => secure }.each do |pairs, want|
+  asked.clear
+  check.(line.(pairs) == want, "#{pairs.inspect} sets #{line.(pairs).inspect}, want #{want.inspect}")
+  check.(asked["HTTPS"] > 0, "#{pairs.inspect}: a response that sets a cookie reads the scheme")
+end
+# The flags that do not depend on the scheme still hold without it.
+check.(line.({}, { "k" => true }) == secure, "a cookie the app flagged secure: #{line.({}, { "k" => true }).inspect}")
+check.(line.({}, {}, { "k" => "None" }) == ["k=v; Path=/; HttpOnly; SameSite=None; Secure"], "SameSite=None is Secure: #{line.({}, {}, { "k" => "None" }).inspect}")
+cleared = Main.rack_response(env_of.({ "HTTPS" => "on" }), answer.({ "gone" => nil }))[1]["set-cookie"]
+check.(cleared == ["gone=; Path=/; Max-Age=0"], "a cleared cookie: #{cleared.inspect}")
+puts "cookie scheme contract passed"
+"##)
+        .assert_passes();
 }
 
 /// Oj under `Oj.mimic_JSON` + `Oj.optimize_rails` (the initializer a Rails

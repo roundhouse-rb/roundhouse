@@ -256,11 +256,19 @@ module ActionDispatch
 
     # See the shared twin: HTTPS=on, or a TLS-terminating proxy's
     # X-Forwarded-Proto, which Rack honors unconfigured.
+    # A request with no proxy header and a plain scheme, the common one,
+    # is answered from the env's own Strings.
     def ssl?
       return true if @env["HTTPS"] == "on"
-      forwarded = @env["HTTP_X_FORWARDED_PROTO"].to_s.split(",").first.to_s.strip.downcase
-      return forwarded == "https" unless forwarded.empty?
-      @env["rack.url_scheme"].to_s.downcase == "https"
+      forwarded = @env["HTTP_X_FORWARDED_PROTO"].to_s
+      unless forwarded.empty?
+        forwarded = forwarded.split(",").first.to_s.strip.downcase
+        return forwarded == "https" unless forwarded.empty?
+      end
+      scheme = @env["rack.url_scheme"].to_s
+      return true if scheme == "https"
+      return false if scheme == "http"
+      scheme.downcase == "https"
     end
 
     # Memoized, as Rails' `ActionDispatch::Request#protocol` is: the env

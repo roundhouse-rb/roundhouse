@@ -60,8 +60,23 @@ module ActiveSupport
   # `active_support_date_parsing.rb` (date-gated package). Do not
   # redefine them here — CRuby boot re-injects that file after overlay.
 
+  # A hydrated timestamp is parsed again each time its record is built, and
+  # a record rebuilt from a cache snapshot on every request reads the same
+  # TEXT every time. The UTC instant of a storage-form string is kept per
+  # thread (a Hash per thread variable, cleared past DB_TIMES_CAP strings);
+  # the presentation in the app's zone (`present`) runs on every call, and
+  # it answers a new Time, so no caller ever holds the kept one.
+  DB_TIMES_CAP = 4096
+
   def self.parse_db_time(str)
     return nil if str.nil? || str.empty?
+    times = Thread.current.thread_variable_get(:rh_db_times)
+    if times.nil?
+      times = {}
+      Thread.current.thread_variable_set(:rh_db_times, times)
+    end
+    kept = times[str]
+    return ActiveSupport.present(kept) unless kept.nil?
     # Fast path for the sqlite3 adapter's own storage form — bare
     # "YYYY-MM-DD HH:MM:SS[.ffffff]", no zone marker, implicitly UTC —
     # which is what every hydrated column carries. `Time.parse`'s
@@ -72,7 +87,10 @@ module ActiveSupport
     # zone-carrying string (API-supplied, or a pre-`db_now` build's "Z").
     if (m = /\A(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d):(\d\d)(?:\.(\d+))?\z/.match(str))
       usec = m[7] ? "#{m[7]}000000"[0, 6].to_i : 0
-      return ActiveSupport.present(Time.utc(m[1].to_i, m[2].to_i, m[3].to_i, m[4].to_i, m[5].to_i, m[6].to_i, usec))
+      utc = Time.utc(m[1].to_i, m[2].to_i, m[3].to_i, m[4].to_i, m[5].to_i, m[6].to_i, usec).freeze
+      times.clear if times.size >= DB_TIMES_CAP
+      times[str] = utc
+      return ActiveSupport.present(utc)
     end
     t = str =~ /(Z|[+-]\d\d:?\d\d)\z/ ? Time.parse(str) : Time.parse("#{str} UTC")
     # Present in the app's zone, exactly as ActiveRecord returns

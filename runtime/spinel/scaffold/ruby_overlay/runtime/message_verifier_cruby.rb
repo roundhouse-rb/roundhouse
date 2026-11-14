@@ -15,6 +15,19 @@
 module ActionController
   module MessageVerifier
     VERIFIED_CACHE_CAP = 1024
+    # What the shared `json_string` writes in place of each byte it does
+    # not copy, asked of the walk itself once: it reads one byte at a
+    # time, so a byte's escape is the same wherever the byte stands.
+    JSON_STRING_ESCAPES = (0..255).each_with_object({}) { |byte, escapes|
+      one = byte.chr.b
+      written = json_string(one).b
+      escapes[one.freeze] = written[1, written.bytesize - 2].freeze unless written == "\"".b + one + "\""
+    }.freeze
+    # One pattern for the ASCII-only messages, matched as they are, and one
+    # for binary copies of the others: CRuby recompiles a regexp in place
+    # when the encoding it is matched in changes (header_validation_cruby.rb).
+    JSON_STRING_REWRITTEN = Regexp.new("[" + JSON_STRING_ESCAPES.keys.select(&:ascii_only?).map { |one| format("\\x%02x", one.ord) }.join + "]").freeze
+    JSON_STRING_REWRITTEN_BYTES = Regexp.new("[" + JSON_STRING_ESCAPES.keys.map { |one| format("\\x%02x", one.ord) }.join + "]", Regexp::NOENCODING).freeze
 
     class << self
       alias_method :verified_json_uncached, :verified_json
@@ -71,6 +84,25 @@ module ActionController
         cache.clear if cache.size >= VERIFIED_CACHE_CAP
         cache[key] = signed.dup.freeze
         signed
+      end
+
+      # The message's bytes between two quotes, the bytes the shared walk
+      # rewrites replaced in one pass (JSON_STRING_ESCAPES, read off the
+      # walk itself). The walk appends every byte on its own, an
+      # Integer#chr and a `<<` each: 2.3 us for a 61-byte session.
+      alias_method :json_string_walk, :json_string
+
+      def json_string(value)
+        bytes = value.to_s
+        if bytes.ascii_only?
+          bytes = bytes.gsub(JSON_STRING_REWRITTEN, JSON_STRING_ESCAPES) if bytes.match?(JSON_STRING_REWRITTEN)
+        else
+          bytes = bytes.b
+          bytes = bytes.gsub(JSON_STRING_REWRITTEN_BYTES, JSON_STRING_ESCAPES) if bytes.match?(JSON_STRING_REWRITTEN_BYTES)
+        end
+        out = "\"".b
+        out << bytes << "\""
+        out.force_encoding(Encoding::UTF_8)
       end
 
       # Signed ids (an avatar token, a blob key) are verified the same way

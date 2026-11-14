@@ -134,11 +134,13 @@ module Base64
   # because an omitted optional parameter is its own hazard on the
   # strict targets. Trailing "=" are what padding means in base64, and
   # nothing else in the alphabet produces one, so stripping them is the
-  # whole difference.
+  # whole difference. The padding is tested by byte (61 is "="): the
+  # output is ASCII, and `out[n - 1]` built a String per test, for every
+  # masked CSRF token a page renders.
   def self.urlsafe_encode64_nopad(s)
     out = urlsafe_encode64(s)
     n = out.length
-    while n > 0 && out[n - 1] == "="
+    while n > 0 && out.getbyte(n - 1) == 61
       n = n - 1
     end
     out[0, n].to_s

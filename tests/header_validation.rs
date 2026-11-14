@@ -1,6 +1,8 @@
 //! The portable predicates and CRuby/JRuby optimization share one HTTP policy.
 #[path = "support/emit_and_run.rs"]
 mod emit_and_run;
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 
 #[test]
 fn fast_header_predicates_match_the_portable_policy() {
@@ -36,6 +38,84 @@ puts "ALL OK"
     assert!(String::from_utf8_lossy(&output.stdout).contains("ALL OK"));
 }
 
+/// The CRuby overlay's header lookup (`casecmp` instead of a downcased copy)
+/// and CSP build (`<<` on one buffer instead of `out = out + piece`) answer
+/// what the shared runtime answers, on every input the shared code takes:
+/// value, encoding, frozen-ness, a fresh String, and the same exception.
+#[test]
+fn fast_header_store_and_csp_build_match_the_shared_runtime() {
+    let script = r##"
+require_relative "runtime/ruby/action_controller/base"
+require_relative "runtime/ruby/action_dispatch/content_security_policy"
+shared_index = ActionController::HeaderStore.instance_method(:index_of)
+shared_build = ActionDispatch::ContentSecurityPolicy.instance_method(:build)
+shared_join = ActionDispatch::ContentSecurityPolicy.instance_method(:join_sources)
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/response_headers_cruby"
+raise "lookup not replaced" unless ActionController::HeaderStore.instance_method(:index_of).owner == ActionController::HeaderStoreLookup
+
+store = ActionController::HeaderStore.new
+["Content-Type", "X-Frame-Options", "set-cookie", "ETAG", "Café", "\u212A-Kelvin", "\u0130nfo", "X-\xFF".b, :sym].each do |k|
+  store.store_value(k, "v")
+end
+probes = ["content-type", "CONTENT-TYPE", "Content-Type", "x-frame-options", "Set-Cookie", "etag", "ETag", "café",
+          "CAFÉ", "Café", "k-kelvin", "K-KELVIN", "\u212A-Kelvin", "i\u0307nfo", "info", "x-\xFF".b, "X-\xFF".b,
+          "X-\xFF".force_encoding("UTF-8"), "content-type".encode("UTF-16LE"), "content-type".b, "", "missing",
+          :sym, :"content-type", "sym"]
+# Same letters at another length, and a stored Symbol, past the bytesize filter.
+probes += ["content-typ", "content-typee", "set-cookiE", "x-frame-option", "etag ", "symbol"]
+# An invalid UTF-8 name raises in the shared `downcase`; the fast path must
+# raise the same, not answer.
+outcome = ->(&blk) { begin; blk.call; rescue => e; e.class; end }
+probes.each do |key|
+  want = outcome.call { shared_index.bind_call(store, key) }
+  got = outcome.call { store.index_of(key) }
+  raise "index_of(#{key.inspect}): shared #{want}, fast #{got}" unless want == got
+end
+raise "the invalid name did not raise" unless outcome.call { store.index_of("X-\xFF".force_encoding("UTF-8")) } == ArgumentError
+
+latin = "caf\xE9".force_encoding("ISO-8859-1")
+lists = [nil, [], ["'self'"], ["'self'", nil, "https:"], [nil], [nil, nil], [:self, "x"], ["a", 1, 2.5], ["a b", "c"],
+         [latin], [latin, "x"], ["x", latin], [nil, latin]]
+# A source whose to_s is not a String: `+` raises, and so must the overlay
+# (`<<` would append the codepoint).
+odd = Class.new { def to_s = 65 }.new
+lists << [odd] << ["x", odd]
+same = lambda do |what, want, got|
+  ok = if want.is_a?(String)
+         got.is_a?(String) && want == got && want.encoding == got.encoding && want.frozen? == got.frozen?
+       else
+         want == got
+       end
+  raise "#{what}: shared #{want.inspect}, fast #{got.inspect}" unless ok
+end
+lists.each do |list|
+  policy = ActionDispatch::ContentSecurityPolicy.new
+  same.call("join_sources(#{list.inspect})", outcome.call { shared_join.bind_call(policy, list) },
+            outcome.call { policy.join_sources(list) })
+end
+raise "odd source accepted" unless outcome.call { ActionDispatch::ContentSecurityPolicy.new.join_sources([odd]) } == TypeError
+[[], [["script-src", ["'self'"]]], [["script-src", ["'self'", "https://x"]], ["object-src", ["'none'"]], ["base-uri", []]],
+ [["a", nil], ["b", [nil]], ["c", ["x"]]], [["d", [odd]]]].each do |directives|
+  policy = ActionDispatch::ContentSecurityPolicy.new
+  directives.each { |name, sources| policy.set_directive(name, sources) }
+  want = outcome.call { shared_build.bind_call(policy) }
+  got = outcome.call { policy.build }
+  same.call("build(#{directives.inspect})", want, got)
+  next unless want.is_a?(String)
+  raise "dup lost the fast build" unless policy.dup.build == want
+  raise "build handed back the same String twice" if !want.empty? && policy.build.equal?(policy.build)
+end
+puts "ALL OK"
+"##;
+    let Some(output) = prerequisite::output_of(
+        std::process::Command::new("ruby").args(["-e", script]).current_dir(env!("CARGO_MANIFEST_DIR")),
+    ) else {
+        return;
+    };
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ALL OK"));
+}
+
 #[test]
 fn emitted_ruby_boot_loads_the_fast_header_predicates() {
     emit_and_run::empty_app()
@@ -47,6 +127,10 @@ fn emitted_ruby_boot_loads_the_fast_header_predicates() {
 [:header_key_ok?, :header_value_ok?].each do |name|
   file, = ActionController.method(name).source_location
   raise "portable fallback loaded for #{name}: #{file}" unless file.end_with?("/runtime/header_validation_cruby.rb")
+end
+[ActionController::HeaderStore.instance_method(:index_of), ActionDispatch::ContentSecurityPolicy.instance_method(:build)].each do |m|
+  file, = m.source_location
+  raise "shared #{m.name} loaded: #{file}" unless file.end_with?("/runtime/response_headers_cruby.rb")
 end
 raise "invalid key accepted" if ActionController.header_key_ok?("Bad:Key")
 raise "tab rejected" unless ActionController.header_value_ok?("a\tb")

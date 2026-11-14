@@ -82,7 +82,7 @@ module ThrusterCache
 
   def self.call(app, env)
     method = env["REQUEST_METHOD"]
-    header = ->(name) { env["HTTP_#{name.upcase.tr("-", "_")}"] }
+    header = ->(name) { env[rack_header_key(name)] }
     query = env["QUERY_STRING"].to_s
     path = query.empty? ? env["PATH_INFO"].to_s : "#{env["PATH_INFO"]}?#{query}"
     key = lookup_key(method, path, env["HTTP_HOST"].to_s, header)
@@ -105,6 +105,26 @@ module ThrusterCache
     return [status, response_headers, body] if text.nil?
     record(key, header, status, stored, text, now + lifetime)
     [status, response_headers, [text]]
+  end
+
+  # The Rack env key of a request header (`upgrade` -> `HTTP_UPGRADE`),
+  # kept per name: every request asks for the same few (upgrade,
+  # connection, range, the Vary'd ones), and building each key cost an
+  # upcase, a tr and an interpolation per read. A frozen Hash that a miss
+  # replaces whole (a lost race only recomputes), up to RACK_KEYS_CAP
+  # names; only plain UTF-8 String names are kept.
+  RACK_KEYS_CAP = 256
+
+  def self.rack_header_key(name)
+    return "HTTP_#{name.upcase.tr("-", "_")}" unless name.instance_of?(String) && name.encoding == Encoding::UTF_8
+    keys = @rack_keys
+    unless keys.nil?
+      key = keys[name]
+      return key unless key.nil?
+    end
+    key = "HTTP_#{name.upcase.tr("-", "_")}".freeze
+    @rack_keys = (keys.nil? ? {} : keys).merge(name.dup.freeze => key).freeze if keys.nil? || keys.size < RACK_KEYS_CAP
+    key
   end
 
   # The store key for a request Thruster would look up, or nil when it
@@ -152,9 +172,19 @@ module ThrusterCache
     seconds > 0 ? seconds : nil
   end
 
+  # A header by its lowercase name, or by its capitalized one (`Cache-Control`)
+  # when the app wrote it so. Every response the cache sees is asked for
+  # `vary`, which most do not have, so the capitalized spelling of the
+  # names asked on every response is written once, not per response.
   def self.header(headers, name)
-    headers[name] || headers[name.split("-").map(&:capitalize).join("-")]
+    headers[name] || headers[CAPITALIZED[name] || capitalized(name)]
   end
+
+  def self.capitalized(name)
+    name.split("-").map(&:capitalize).join("-")
+  end
+
+  CAPITALIZED = ["vary", "cache-control"].to_h { |name| [name, capitalized(name).freeze] }.freeze
 
   # The whole body, or nil when it is known too large to store: an Array
   # (still servable as it is) or a file it never opened. An iterated body

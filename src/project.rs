@@ -1965,6 +1965,47 @@ fn inject_array_column_require(files: &mut [(String, String)], app: &App) -> Res
     Ok(())
 }
 
+/// The files under `runtime/` whose Ruby is the app's own, each written
+/// by its chain before `inject_no_page_writes` reads the tree: the blocks
+/// the app's gems hand their middleware, the bodies of the SQL functions
+/// its initializers register, its rake tasks.
+const APP_RUBY_UNDER_RUNTIME: [&str; 3] =
+    ["runtime/gem_middleware.rb", "runtime/sql_functions.rb", "runtime/active_record/app_rake_tasks.rb"];
+
+/// `boot.rb` tells `PublicFiles` that no page is written while the app
+/// runs (`no_page_writes!`) when no Ruby file of the app names
+/// `cache_page`, the page cache's one writer
+/// (`caches_page` expands to it). A request that is not a public file
+/// then stats nothing, even in production with the page cache on. The
+/// emitted text is what is read, so the app's Ruby counts wherever it was
+/// lowered from: an app class, a compiled gem file's own program (a
+/// statement, the condition of an `if`), a `send(:cache_page)`; an app
+/// method that happens to be named `cache_page` keeps the disk watched
+/// too. Each chain calls this once the app's own Ruby is in the tree
+/// (its classes, its views, the gem files' programs) and the files
+/// under `runtime/` that carry the app's Ruby are written
+/// (`APP_RUBY_UNDER_RUNTIME`): they are read too. Not read: the settings
+/// a gem package gets in boot.rb afterwards. The ruby overlay's boot
+/// replaces Spinel's, so both trees call this.
+fn inject_no_page_writes(files: &mut [(String, String)]) {
+    let app_owned = |path: &str| !path.starts_with("runtime/") || APP_RUBY_UNDER_RUNTIME.contains(&path);
+    if files.iter().any(|(p, c)| p.ends_with(".rb") && app_owned(p) && c.contains("cache_page")) {
+        return;
+    }
+    // A tree whose boot does not load public_files serves no public/ from it:
+    // nothing to tell. Without the line the disk stays watched, as before.
+    let anchor = "require_relative \"runtime/public_files\"\n";
+    let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else {
+        return;
+    };
+    if boot.contains("ActionController::PublicFiles.no_page_writes!") {
+        return;
+    }
+    if let Some(at) = boot.find(anchor) {
+        boot.insert_str(at + anchor.len(), "ActionController::PublicFiles.no_page_writes!\n");
+    }
+}
+
 fn inject_cruby_date_calendar_boot_requires(
     files: &mut Vec<(String, String)>,
 ) -> Result<(), String> {
@@ -5707,6 +5748,8 @@ fn ruby_family_runtime_files(
     if flavor == RubyFlavor::CRuby {
         apply_digest_gem(&mut files);
     }
+    // Reads the tree's Ruby as well, the gem files' programs included.
+    inject_no_page_writes(&mut files);
     drop_solid_queue_standin(app, &mut files);
     // The overlay's entries (main.rb, config.ru, sidekiq.rb) replaced the spinel tree's.
     apply_app_initializers(&mut files, app, RequireTarget::RubyFamily)?;
@@ -11376,6 +11419,8 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
     apply_pay_demand(&mut files, app)?;
     // Not a program's anchor: this tree writes no gem file programs.
     rewrite_carried_requires(&mut files, app, |_| None);
+    // Reads the tree's Ruby, so after the app's files are in it.
+    inject_no_page_writes(&mut files);
     drop_solid_queue_standin(app, &mut files);
     apply_app_initializers(&mut files, app, RequireTarget::Spinel)?;
     Ok((files, test_stems))
@@ -15192,6 +15237,47 @@ mod tests {
         let carried: Vec<&str> = out.iter().map(|(path, _)| path.as_str()).collect();
         let _ = fs::remove_dir_all(&root);
         assert_eq!(carried, ["config/alias.yml", "config/real.yml"]);
+    }
+
+    /// boot.rb is told the app writes no page only when no Ruby of the app
+    /// names `cache_page`: its own files, and the three files under
+    /// `runtime/` that carry its Ruby (the blocks its gems hand their
+    /// middleware, its SQL functions, its rake tasks). The runtime's own
+    /// files name it (they define it) and do not count, nor does a gem
+    /// package under `runtime/gems/`.
+    #[test]
+    fn no_page_writes_reads_the_apps_ruby_under_runtime_too() {
+        const LINE: &str = "ActionController::PublicFiles.no_page_writes!";
+        const BOOT: &str = "require_relative \"runtime/public_files\"\nrequire_relative \"main\"\n";
+        let boot_after = |extra: &[(&str, &str)]| {
+            let mut files: Vec<(String, String)> = vec![
+                ("boot.rb".to_string(), BOOT.to_string()),
+                ("runtime/action_controller/caching.rb".to_string(), "def cache_page(content = nil)\nend\n".to_string()),
+                ("runtime/gem_middleware.rb".to_string(), "module GemMiddleware\n  def self.wrap(app)\n    app\n  end\nend\n".to_string()),
+            ];
+            for (path, content) in extra {
+                files.retain(|(p, _)| p != path);
+                files.push((path.to_string(), content.to_string()));
+            }
+            super::inject_no_page_writes(&mut files);
+            files.into_iter().find(|(p, _)| p == "boot.rb").unwrap().1
+        };
+        let told = boot_after(&[]);
+        assert_eq!(told, format!("require_relative \"runtime/public_files\"\n{LINE}\nrequire_relative \"main\"\n"), "the runtime's own cache_page is no writer");
+        let stack = "module GemMiddleware\n  def self.wrap(app)\n    Pager.new(app) { |controller| controller.cache_page }\n  end\nend\n";
+        assert_eq!(boot_after(&[("runtime/gem_middleware.rb", stack)]), BOOT, "a gem's middleware block sends cache_page, so the disk stays watched");
+        assert_eq!(boot_after(&[("app/controllers/sites_controller.rb", "caches_page :show\ncache_page\n")]), BOOT, "an app class sends cache_page");
+        let task = "task(:warm) { ApplicationController.cache_page(\"x\", \"/x\") }\n";
+        assert_eq!(boot_after(&[("runtime/active_record/app_rake_tasks.rb", task)]), BOOT, "a rake task of the app sends cache_page");
+        assert_eq!(boot_after(&[("runtime/sql_functions.rb", "db.create_function(\"f\") { cache_page }\n")]), BOOT, "an SQL function of the app sends cache_page");
+        let not_the_apps = [
+            ("public/cache_page.txt", "cache_page\n"),
+            ("runtime/other.rb", "cache_page\n"),
+            ("runtime/gems/pager/lib/pager.rb", "cache_page\n"),
+            ("runtime/gem_middleware_extra.rb", "cache_page\n"),
+            ("runtime/gem_middleware.rb.txt", "cache_page\n"),
+        ];
+        assert!(boot_after(&not_the_apps).contains(LINE), "files that are not the app's Ruby name it");
     }
 
     #[test]

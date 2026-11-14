@@ -25,43 +25,109 @@ require "openssl"
 require "securerandom"
 
 module MessageDigest
-  # HMAC-SHA1(key, msg) as 40-char lowercase hex.
+  # HMAC-SHA1(key, msg) as 40-char lowercase hex (BINARY, as
+  # `OpenSSL::HMAC#hexdigest` answers it).
   def self.hmac_sha1_hex(key, msg)
-    keyed_hmac("SHA1", key, msg).hexdigest
+    keyed_hmac_raw("SHA1", key, msg).unpack1("H*").force_encoding(Encoding::BINARY)
   end
 
-  # HMAC-SHA256(key, msg) as 64-char lowercase hex.
+  # HMAC-SHA256(key, msg) as 64-char lowercase hex (BINARY).
   def self.hmac_sha256_hex(key, msg)
-    keyed_hmac("SHA256", key, msg).hexdigest
+    keyed_hmac_raw("SHA256", key, msg).unpack1("H*").force_encoding(Encoding::BINARY)
   end
 
   # Raw HMAC-SHA256 bytes (CSRF global token, not the hex cookies use).
   def self.hmac_sha256(key, msg)
-    keyed_hmac("SHA256", key, msg).digest
+    keyed_hmac_raw("SHA256", key, msg)
   end
 
-  # An HMAC over `msg`, from a per-thread instance already keyed with
-  # `key`. The keys are the app's derived secrets (a handful per
-  # process), and `OpenSSL::HMAC.hexdigest(digest, key, msg)` set up the
-  # digest and the key schedule on every call: verifying the session
-  # cookie on every request made HMAC#initialize 4-6% of campfire's small
-  # routes. `reset` returns the instance to its keyed state. Per thread
-  # because an HMAC context is mutable; capped because keys could in
-  # principle vary without bound.
-  KEYED_HMAC_CAP = 64
+  # HMAC(key, msg) = H((K ^ opad) || H((K ^ ipad) || msg)), RFC 2104, with
+  # the two keyed states kept per thread: the digest after absorbing
+  # K ^ ipad and the digest after absorbing K ^ opad depend on the key
+  # only. Each call copies the two states and finishes them. Per call
+  # (SHA1 and SHA256, 64-byte key, 168-byte message, one core of a
+  # laptop, CRuby 4.0.9 with YJIT, OpenSSL 3.5): a new `OpenSSL::HMAC`
+  # 3.1 us; a kept one reset 1.56 us, nearly all of it `HMAC#reset`
+  # re-creating the signing context through OpenSSL 3's provider (93.7%
+  # of this method on the blog's profile); a kept one copied 1.3 us; the
+  # two kept digest states copied and finished 0.64 us.
+  #
+  # The SHA1 keys are the cookie jar's derived secrets, a handful per
+  # process, and SHA256 has its own few (the signed-id secret, the query
+  # cache's constant key). SHA256 also sees keys used once: each
+  # session's CSRF secret (a token minted elsewhere is checked against
+  # it) and Active Storage's per-size key. So a key's states are built
+  # the second time the thread signs with it: the first time only the
+  # key's `hash` is noted and `OpenSSL::HMAC` answers, as it did before,
+  # and a key used once costs what it cost, keeps no copy of itself and
+  # evicts no kept state. Each digest has its own two tables, each
+  # capped, the oldest entry leaving first. A thread variable (not
+  # `Thread.current[]`, which is per fiber: under Falcon a fiber serves
+  # one keep-alive connection, so the states would be rebuilt for every
+  # connection). Nothing may update a kept state:
+  # it would not heal, and every HMAC for that key on that thread would be
+  # wrong (refused, never forgeable) until its entry leaves the table; the
+  # helpers below are private, and only this file reads the tables. Only a
+  # plain String key is kept (a subclass is stored by reference, and a
+  # later change to it could find the old key's states); any other key,
+  # any digest without a 64-byte block, and an openssl whose digest does
+  # not finish a copied state (`finish` is private on CRuby's, public on
+  # JRuby's: `__send__` reaches both) go through `OpenSSL::HMAC`.
+  HMAC_BLOCK_BYTES = { "SHA1" => 64, "SHA256" => 64 }.freeze
+  HMAC_PADS_CAP = 64
+  # Asked of a digest, not of the method's name: `Digest::Instance` gives
+  # every digest class a private `finish` that only raises. A copy of an
+  # updated state must finish to SHA256("abc"), the standard's own test
+  # vector, and leave the original whole.
+  HMAC_BY_HAND = begin
+    probe = OpenSSL::Digest.new("SHA256")
+    probe.update("abc")
+    want = ["ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"].pack("H*")
+    probe.dup.__send__(:finish) == want && probe.__send__(:finish) == want
+  rescue StandardError, NotImplementedError
+    false
+  end
 
-  def self.keyed_hmac(digest, key, msg)
-    cache = (Thread.current[:rh_keyed_hmac] ||= {})
-    ck = digest + "\0" + key
-    h = cache[ck]
-    if h.nil?
-      cache.clear if cache.size >= KEYED_HMAC_CAP
-      h = cache[ck] = OpenSSL::HMAC.new(key, digest)
-    else
-      h.reset
+  def self.keyed_hmac_raw(digest, key, msg)
+    return OpenSSL::HMAC.digest(digest, key, msg) unless HMAC_BY_HAND && key.instance_of?(String)
+    pads = hmac_pads(digest, key)
+    return OpenSSL::HMAC.digest(digest, key, msg) if pads.nil?
+    inner = pads[0].dup
+    inner.update(msg)
+    outer = pads[1].dup
+    outer.update(inner.__send__(:finish))
+    outer.__send__(:finish)
+  end
+
+  # [K ^ ipad absorbed, K ^ opad absorbed] for `digest` and `key`, kept
+  # per thread from the second call with that key; nil the first time,
+  # and for a digest without a known block size.
+  def self.hmac_pads(digest, key)
+    block = HMAC_BLOCK_BYTES[digest]
+    return nil if block.nil?
+    thread = Thread.current
+    cache = thread.thread_variable_get(:rh_hmac_pads) || thread.thread_variable_set(:rh_hmac_pads, {})
+    by_key = cache[digest] ||= {}
+    pads = by_key[key]
+    return pads unless pads.nil?
+    seen = thread.thread_variable_get(:rh_hmac_once) || thread.thread_variable_set(:rh_hmac_once, {})
+    once = seen[digest] ||= {}
+    mark = key.hash
+    if once.delete(mark).nil?
+      once.shift if once.size >= HMAC_PADS_CAP
+      once[mark] = true
+      return nil
     end
-    h.update(msg)
+    by_key.shift if by_key.size >= HMAC_PADS_CAP
+    k = key.bytesize > block ? OpenSSL::Digest.digest(digest, key) : key.b
+    k = k.ljust(block, "\0".b)
+    inner = OpenSSL::Digest.new(digest)
+    inner.update(k.bytes.map { |b| b ^ 0x36 }.pack("C*"))
+    outer = OpenSSL::Digest.new(digest)
+    outer.update(k.bytes.map { |b| b ^ 0x5c }.pack("C*"))
+    by_key[key] = [inner, outer].freeze
   end
+  private_class_method :keyed_hmac_raw, :hmac_pads
 
   def self.secure_random_bytes(n)
     SecureRandom.random_bytes(n)

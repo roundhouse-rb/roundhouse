@@ -3,6 +3,9 @@
 use std::path::Path;
 use std::process::Command;
 
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
+
 const RAW_DICTIONARY_RESPONSE: &str = r#"
 require "zlib"
 if ENV["REJECT_RAW_DICTIONARY"] == "1"
@@ -119,6 +122,68 @@ puts "ALL OK"
         "gzip cache failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
     );
     assert!(out.status.success(), "driver exited {:?}", out.status.code());
+}
+
+/// `accepts_gzip?` answers as before taking the coding with `shift`
+/// (the table was recorded from the `coding, *params = …` form), and,
+/// where YJIT runs, it no longer leaves the compiled code on every call.
+#[test]
+fn accepts_gzip_answers_are_pinned_and_stay_in_yjit() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r#"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/gzip_cache"
+
+table = [
+  [nil, false], ["", false], [" ", false],
+  [",", false], [";", false], ["identity", false],
+  ["gzip", true], ["GZIP", true], ["x-gzip", true],
+  ["gzip, deflate, br", true], ["deflate, gzip", true], ["br;q=1.0, gzip;q=0.8, *;q=0.1", true],
+  ["gzip;q=0", false], ["gzip;q=0.0", false], ["gzip; q=0", false],
+  ["gzip ;q=0", false], ["gzip;q=0.001", true], ["gzip;Q=0", false],
+  ["gzip;q=", false], ["gzip;q", false], ["gzip;q=abc", false],
+  ["gzip;q=1;q=0", false], ["gzip;q=0;q=1", true], ["gzip;level=9", true],
+  ["gzip;q=0, gzip", true], ["gzip;q=0, identity", false], [" gzip ", true],
+  [";gzip", false], ["*", false], ["gzipx", false],
+  ["x-gzip;q=0.5", true],
+]
+table.each do |accept, want|
+  got = GzipCache.accepts_gzip?(accept)
+  raise "accepts_gzip?(#{accept.inspect}) = #{got.inspect}, want #{want}" unless got == want
+end
+
+if defined?(RubyVM::YJIT) && RubyVM::YJIT.respond_to?(:enable) && RubyVM::YJIT.enable(stats: :quiet) && RubyVM::YJIT.stats_enabled?
+  # The last two go through the full parse, where the splat was.
+  headers = ["identity", "gzip, deflate, br", "deflate, gzip;q=0.5", "br;q=1.0, x-gzip;q=0.8, *;q=0.1"]
+  2000.times { headers.each { |h| GzipCache.accepts_gzip?(h) } }
+  # The counter of the instruction the splat compiled to: the
+  # process-wide count also moves when an interrupt (a GC step, a signal)
+  # lands inside compiled code. `fetch`: a counter that is not there
+  # must not read as zero.
+  before = RubyVM::YJIT.runtime_stats.fetch(:exit_expandarray)
+  500.times { headers.each { |h| GzipCache.accepts_gzip?(h) } }
+  exits = RubyVM::YJIT.runtime_stats.fetch(:exit_expandarray) - before
+  raise "YJIT expandarray exits in 2000 calls: #{exits}" unless exits == 0
+  puts "YJIT checked"
+end
+puts "ALL OK"
+"#;
+    // YJIT is switched on by the script, with its counters: one already on
+    // from the environment would leave them off.
+    let Some(out) = prerequisite::output_of(
+        Command::new("ruby").arg("-e").arg(script).env_remove("RUBY_YJIT_ENABLE").env_remove("RUBYOPT").current_dir(root),
+    ) else {
+        return;
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stdout.contains("ALL OK"),
+        "accepts_gzip? failed\n=== stdout ===\n{stdout}\n=== stderr ===\n{stderr}"
+    );
+    assert!(out.status.success(), "driver exited {:?}", out.status.code());
+    if !stdout.contains("YJIT checked") {
+        prerequisite::missing("a CRuby with YJIT and its counters (RubyVM::YJIT.enable(stats:)): the side-exit half did not run");
+    }
 }
 
 #[test]

@@ -36,11 +36,14 @@ module ActiveRecord
     end
 
     class Integer
+      # An Integer returns first, as in `ActiveSupport.cast_integer`: it is
+      # never nil, `true` or `false`, and comparing an Integer with `true`
+      # or `false` is a YJIT side exit on every call.
       def cast(value)
+        return value if value.is_a?(::Integer)
         return nil if value.nil?
         return 1 if value == true
         return 0 if value == false
-        return value if value.is_a?(::Integer)
         # `::String`: this module also defines `Type::String`, and a bare
         # `String` constant resolves to that class.
         if value.is_a?(::String)

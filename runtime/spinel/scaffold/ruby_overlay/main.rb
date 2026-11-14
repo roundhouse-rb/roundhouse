@@ -156,10 +156,14 @@ module Main
     # composes them here so Router.match stays a flat-table walk.
     # What a request constraint asks before its route is chosen (`RouteTable.match_asking`).
     asked = ActionDispatch::Request.new(env.to_h, request[:params])
-    last_segment = request_path.split("/").last.to_s
+    # The extension of the path's last segment, "" when it has none: a path with no dot is not split to look for one.
+    extension = ""
+    if request_path.include?(".")
+      last_segment = request_path.split("/").last.to_s
+      extension = last_segment.split(".").last.to_s if last_segment.include?(".")
+    end
     asked.format = ActionDispatch::MimeNegotiation.format_name(
-      last_segment.include?(".") ? last_segment.split(".").last.to_s : "",
-      env["HTTP_ACCEPT"].to_s, env["HTTP_X_REQUESTED_WITH"].to_s, env["CONTENT_TYPE"].to_s
+      extension, env["HTTP_ACCEPT"].to_s, env["HTTP_X_REQUESTED_WITH"].to_s, env["CONTENT_TYPE"].to_s
     )
     matched = if endpoint.nil?
       RouteTable.match_asking(request[:method], request_path, route_table, asked)
@@ -400,13 +404,15 @@ module Main
     # logout with no token re-added) clears the cookie.
     # `request.session_options[:skip] = true` leaves it alone — see
     # the spinel main.
-    session_out = controller.session.to_cookie
-    if !host_session.nil?
-      env["roundhouse.session.out"] = controller.session.to_hash if session_out != session_in && !controller.request.session_skip?
-    # Not here under `run_rack`: Rails commits above the gems' middleware (`Main.commit_session`).
-    elsif session_out != session_in && !controller.request.session_skip? && !env["roundhouse.session.above"]
-      out_cookies[session_cookie] =
-        session_out.empty? ? nil : ActionDispatch::Session.signed_cookie(session_out, session_cookie)
+    # Not here under `run_rack`, and not encoded for it: Rails commits above the gems' middleware (`Main.commit_session`), which encodes the session it finds there.
+    if !host_session.nil? || !env["roundhouse.session.above"]
+      session_out = controller.session.to_cookie
+      if !host_session.nil?
+        env["roundhouse.session.out"] = controller.session.to_hash if session_out != session_in && !controller.request.session_skip?
+      elsif session_out != session_in && !controller.request.session_skip?
+        out_cookies[session_cookie] =
+          session_out.empty? ? nil : ActionDispatch::Session.signed_cookie(session_out, session_cookie)
+      end
     end
     is_redirect = controller.status >= 300 && controller.status < 400 && !controller.head_response?
     # Compose `Cache-Control` from whatever `response.cache_control`
@@ -573,9 +579,11 @@ module Main
     headers["location"] = location unless location.nil?
     # A nil value is a header the app unset (`X-Rev` outside a deploy
     # with GIT_REVISION) — Rack 3 refuses a nil, so it is not written.
-    extra_headers.each { |k, v| headers[k.to_s.downcase] = v unless v.nil? }
+    extra_headers.each { |k, v| headers[ActionController.rack_header_name(k)] = v unless v.nil? }
     cookies = []
-    https = env["HTTPS"].to_s == "on" || env.fetch("HTTP_X_FORWARDED_PROTO", "").to_s.split(",").first.to_s.strip.downcase == "https"
+    # Read only for a response that sets a cookie: here the scheme decides a cookie's Secure flag and nothing else.
+    https = !set_cookies.empty? &&
+      (env["HTTPS"].to_s == "on" || env.fetch("HTTP_X_FORWARDED_PROTO", "").to_s.split(",").first.to_s.strip.downcase == "https")
     set_cookies.each do |name, val|
       cookies << if val.nil?
         "#{name}=; Path=/; Max-Age=0"

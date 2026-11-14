@@ -226,6 +226,7 @@ fn tiny_blog_round_trips() {
         unknown_association_targets: Vec::new(),
         helper_modules: Default::default(),
         job_plans: Vec::new(),
+        native_plans: Vec::new(),
         queue_adapter: None,
         sidekiq_redis: Default::default(),
         sidekiq_worker: Default::default(),

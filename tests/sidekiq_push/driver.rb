@@ -181,5 +181,93 @@ end
 check("an empty configure_client url: raises, REDIS_URL is no fallback", raised, "no ArgumentError")
 check("no configure_client password", SidekiqPush.password == "", SidekiqPush.password)
 
+# Native Sidekiq jobs (classes that include Sidekiq::Job): the envelope's
+# key order for each call form, and a bulk push's batches.
+# tests/emit_and_run/sidekiq_native_push.rs holds the bytes to Sidekiq's
+# own; these lines hold the spinel binary to the same runtime.
+SidekiqPush.start_recording
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 0.0, 0, "[1,{\"a\":\"b\"}]")
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", ",\"dead\":false", 300.0, 1, "[2]")
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 0.0, 1, "[3]")
+lines = SidekiqPush.recorded
+check("native: sadd", lines.length == 5 && lines[0] == "sadd queues pull", lines.length.to_s)
+check("native: args before class through the Setter",
+  lines[1].to_s.start_with?("lpush queue:pull {\"retry\":5,\"queue\":\"pull\",\"args\":[1,{\"a\":\"b\"}],\"class\":\"OkWorker\",\"jid\":\""), lines[1].to_s)
+check("native: class before args for a class-side perform_in",
+  lines[2].to_s.start_with?("zadd schedule ") && lines[2].to_s.include?(" {\"retry\":5,\"queue\":\"pull\",\"dead\":false,\"class\":\"OkWorker\",\"args\":[2],\"jid\":\"") && !lines[2].to_s.include?("enqueued_at"), lines[2].to_s)
+check("native: class before args for a class-side perform_in(0)",
+  lines[4].to_s.start_with?("lpush queue:pull {\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[3],\"jid\":\"") && lines[4].to_s.include?("\"enqueued_at\":"), lines[4].to_s)
+
+SidekiqPush.start_recording
+SidekiqPush.bulk_begin(2)
+[1, 2, 3].each do |i|
+  SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 0.0, 2, "[" + i.to_s + "]")
+end
+SidekiqPush.bulk_end
+SidekiqPush.bulk_abort
+lines = SidekiqPush.recorded
+check("bulk: one sadd and one lpush per batch", lines.length == 4 && lines[0] == "sadd queues pull" && lines[2] == "sadd queues pull", lines.length.to_s)
+check("bulk: a full batch of two", lines[1].to_s.split("\"jid\":").length == 3, lines[1].to_s)
+check("bulk: the rest at bulk_end", lines[3].to_s.split("\"jid\":").length == 2 && lines[3].to_s.include?("\"class\":\"OkWorker\",\"args\":[3]"), lines[3].to_s)
+check("bulk: batch closed", SidekiqPush.bulks.length == 0, SidekiqPush.bulks.length.to_s)
+SidekiqPush.start_recording
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 0.0, 0, "[4]")
+check("after bulk_end: pushed at once", SidekiqPush.recorded.length == 2, SidekiqPush.recorded.length.to_s)
+
+# Only the bulk's own jobs are held: another push the block makes, to
+# another queue or scheduled, goes out at once as it would anywhere.
+SidekiqPush.start_recording
+SidekiqPush.bulk_begin(2)
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 0.0, 2, "[5]")
+SidekiqPush.enqueue_native("OkWorker", "5", "other", "", 0.0, 0, "[6]")
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 300.0, 1, "[7]")
+lines = SidekiqPush.recorded
+check("bulk: a Setter push in the block goes out at once", lines.length == 3 && lines[0] == "sadd queues other" && lines[1].to_s.start_with?("lpush queue:other ") && lines[1].to_s.include?("\"args\":[6]"), lines.join(" | "))
+check("bulk: a perform_in in the block is scheduled", lines[2].to_s.start_with?("zadd schedule ") && lines[2].to_s.include?("\"args\":[7]"), lines[2].to_s)
+check("bulk: only the bulk job is held", SidekiqPush.bulks[0].jobs.length == 1, SidekiqPush.bulks[0].jobs.length.to_s)
+SidekiqPush.bulk_end
+SidekiqPush.bulk_abort
+lines = SidekiqPush.recorded
+check("bulk: its job pushed at bulk_end", lines.length == 5 && lines[4].to_s.start_with?("lpush queue:pull ") && lines[4].to_s.include?("\"args\":[5]"), lines.join(" | "))
+
+# A block that raises: the slice it raised in is dropped, and the batch
+# is closed.
+SidekiqPush.start_recording
+SidekiqPush.bulk_begin(2)
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 0.0, 2, "[8]")
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 0.0, 2, "[9]")
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 0.0, 2, "[10]")
+SidekiqPush.bulk_abort
+lines = SidekiqPush.recorded
+check("bulk_abort: the full slice was pushed, the open one dropped", lines.length == 2 && !lines[1].to_s.include?("\"args\":[10]"), lines.join(" | "))
+check("bulk_abort: batch closed", SidekiqPush.bulks.length == 0, SidekiqPush.bulks.length.to_s)
+
+# A bulk push nested in another's block has its own batch: it neither
+# pushes the outer one's held jobs nor closes it.
+SidekiqPush.start_recording
+SidekiqPush.bulk_begin(2)
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 0.0, 2, "[11]")
+SidekiqPush.bulk_begin(5)
+SidekiqPush.enqueue_native("OkWorker", "5", "inner", "", 0.0, 2, "[12]")
+SidekiqPush.bulk_end
+SidekiqPush.bulk_abort
+lines = SidekiqPush.recorded
+check("nested bulk: the inner batch pushed alone", lines.length == 2 && lines[1].to_s.start_with?("lpush queue:inner ") && lines[1].to_s.split("\"jid\":").length == 2, lines.join(" | "))
+check("nested bulk: the outer job still held", SidekiqPush.bulks.length == 1 && SidekiqPush.bulks[0].jobs.length == 1, SidekiqPush.bulks.length.to_s)
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 0.0, 2, "[13]")
+SidekiqPush.enqueue_native("OkWorker", "5", "pull", "", 0.0, 2, "[14]")
+SidekiqPush.bulk_abort
+lines = SidekiqPush.recorded
+check("nested bulk: the outer batch at its own limit", lines.length == 4 && lines[3].to_s.include?("\"args\":[11]") && lines[3].to_s.include?("\"args\":[13]"), lines.join(" | "))
+check("nested bulk: the outer raise drops its open slice", !lines.join(" ").include?("\"args\":[14]") && SidekiqPush.bulks.length == 0, lines.join(" | "))
+
+# A native argument of mixed JSON kinds, as JSON.generate writes each.
+mixed = { "s" => "a\"b", "i" => 2, "f" => 1.5, "t" => true, "u" => false, "n" => nil }
+check("native_value: a String-keyed Hash of mixed scalars",
+  "{" + mixed.map { |k, v| ActiveJob::Arguments.str(k) + ":" + SidekiqPush.native_value(v) }.join(",") + "}" ==
+    "{\"s\":\"a\\\"b\",\"i\":2,\"f\":1.5,\"t\":true,\"u\":false,\"n\":null}", "mixed")
+check("native_value: a String", SidekiqPush.native_value("x") == "\"x\"", SidekiqPush.native_value("x"))
+check("native_value: true", SidekiqPush.native_value(true) == "true", SidekiqPush.native_value(true))
+
 SidekiqPush.stop_recording
 puts "done"

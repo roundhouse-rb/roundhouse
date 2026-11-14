@@ -106,6 +106,8 @@ pub(super) fn emit_library_class_decls(app: &App) -> Vec<EmittedFile> {
     // `perform_later`, and `to_gid_uri` beside `to_gid_param`.
     // Ruby-family only, like the GlobalID runtime it writes through.
     crate::lower::job_payload::apply_ruby(&mut lcs, app);
+    // Native Sidekiq workers' pushes, the same way, under `:sidekiq`.
+    crate::lower::sidekiq_native::apply_ruby(&mut lcs, app);
     apply_library_partial_render_lowering(&mut lcs, app);
     // The Attachment's readers on a content-type attachable (campfire's
     // `OpengraphEmbed`): Rails hands the partial the Attachment, which

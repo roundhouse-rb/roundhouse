@@ -1,0 +1,336 @@
+{
+  "versions": {
+    "sidekiq": "8.1.7",
+    "redis_server": "7.0.15"
+  },
+  "retry_score_checks": [
+    "RetryInWorker retry_count 0: score = failed + 15 + rand(10)",
+    "RetryInWorker retry_count 1: score = failed + 26 + rand(20)",
+    "RetryInNilWorker retry_count 0: score = failed + 15 + rand(10)",
+    "ExhaustedWorker retry_count 0: score = failed + 15 + rand(10)"
+  ],
+  "scenarios": [
+    {
+      "name": "args",
+      "ran": [
+        "args [1,\"n\",{},[],null,24]",
+        "args [2,\"n\",{\"k\":\"v\",\"n\":[1,2]},[1,2],true,24]"
+      ],
+      "writes": [],
+      "retry_left": 0,
+      "dead_now": 0
+    },
+    {
+      "name": "retry_in",
+      "ran": [
+        "retry_in 1 jid=bb8662b9aadfdc70421321f3",
+        "retry_in 1 jid=bb8662b9aadfdc70421321f3",
+        "retry_in 1 jid=bb8662b9aadfdc70421321f3"
+      ],
+      "writes": [
+        {
+          "set": "retry",
+          "keys": [
+            "retry",
+            "queue",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at",
+            "error_message",
+            "error_class",
+            "failed_at",
+            "retry_count"
+          ],
+          "record": {
+            "retry": 2,
+            "queue": "default",
+            "args": [
+              1
+            ],
+            "class": "RetryInWorker",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>",
+            "error_message": "retry_in 1",
+            "error_class": "StickyError",
+            "failed_at": "<ms>",
+            "retry_count": 0
+          }
+        },
+        {
+          "set": "retry",
+          "keys": [
+            "retry",
+            "queue",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at",
+            "error_message",
+            "error_class",
+            "failed_at",
+            "retry_count",
+            "retried_at"
+          ],
+          "record": {
+            "retry": 2,
+            "queue": "default",
+            "args": [
+              1
+            ],
+            "class": "RetryInWorker",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>",
+            "error_message": "retry_in 1",
+            "error_class": "StickyError",
+            "failed_at": "<ms>",
+            "retry_count": 1,
+            "retried_at": "<ms>"
+          }
+        },
+        {
+          "set": "dead",
+          "keys": [
+            "retry",
+            "queue",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at",
+            "error_message",
+            "error_class",
+            "failed_at",
+            "retry_count",
+            "retried_at"
+          ],
+          "record": {
+            "retry": 2,
+            "queue": "default",
+            "args": [
+              1
+            ],
+            "class": "RetryInWorker",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>",
+            "error_message": "retry_in 1",
+            "error_class": "StickyError",
+            "failed_at": "<ms>",
+            "retry_count": 2,
+            "retried_at": "<ms>"
+          }
+        }
+      ],
+      "retry_left": 0,
+      "dead_now": 1
+    },
+    {
+      "name": "retry_in_kill",
+      "ran": [
+        "retry_in_kill_block 0 StickyError [1]"
+      ],
+      "writes": [
+        {
+          "set": "dead",
+          "keys": [
+            "retry",
+            "queue",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at",
+            "error_message",
+            "error_class",
+            "failed_at",
+            "retry_count"
+          ],
+          "record": {
+            "retry": 5,
+            "queue": "default",
+            "args": [
+              1
+            ],
+            "class": "RetryInKillWorker",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>",
+            "error_message": "kill 1",
+            "error_class": "StickyError",
+            "failed_at": "<ms>",
+            "retry_count": 0
+          }
+        }
+      ],
+      "retry_left": 0,
+      "dead_now": 1
+    },
+    {
+      "name": "retry_in_discard",
+      "ran": [],
+      "writes": [],
+      "retry_left": 0,
+      "dead_now": 0
+    },
+    {
+      "name": "retry_in_nil",
+      "ran": [],
+      "writes": [
+        {
+          "set": "retry",
+          "keys": [
+            "retry",
+            "queue",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at",
+            "error_message",
+            "error_class",
+            "failed_at",
+            "retry_count"
+          ],
+          "record": {
+            "retry": 1,
+            "queue": "default",
+            "args": [
+              1
+            ],
+            "class": "RetryInNilWorker",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>",
+            "error_message": "nil 1",
+            "error_class": "StickyError",
+            "failed_at": "<ms>",
+            "retry_count": 0
+          }
+        },
+        {
+          "set": "dead",
+          "keys": [
+            "retry",
+            "queue",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at",
+            "error_message",
+            "error_class",
+            "failed_at",
+            "retry_count",
+            "retried_at"
+          ],
+          "record": {
+            "retry": 1,
+            "queue": "default",
+            "args": [
+              1
+            ],
+            "class": "RetryInNilWorker",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>",
+            "error_message": "nil 1",
+            "error_class": "StickyError",
+            "failed_at": "<ms>",
+            "retry_count": 1,
+            "retried_at": "<ms>"
+          }
+        }
+      ],
+      "retry_left": 0,
+      "dead_now": 1
+    },
+    {
+      "name": "exhausted",
+      "ran": [
+        "exhausted 42 StickyError: exhausted 42 retry_count=1 keys=retry,queue,args,class,jid,created_at,enqueued_at,error_message,error_class,failed_at,retry_count,retried_at"
+      ],
+      "writes": [
+        {
+          "set": "retry",
+          "keys": [
+            "retry",
+            "queue",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at",
+            "error_message",
+            "error_class",
+            "failed_at",
+            "retry_count"
+          ],
+          "record": {
+            "retry": 1,
+            "queue": "default",
+            "args": [
+              42
+            ],
+            "class": "ExhaustedWorker",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>",
+            "error_message": "exhausted 42",
+            "error_class": "StickyError",
+            "failed_at": "<ms>",
+            "retry_count": 0
+          }
+        },
+        {
+          "set": "dead",
+          "keys": [
+            "retry",
+            "queue",
+            "args",
+            "class",
+            "jid",
+            "created_at",
+            "enqueued_at",
+            "error_message",
+            "error_class",
+            "failed_at",
+            "retry_count",
+            "retried_at"
+          ],
+          "record": {
+            "retry": 1,
+            "queue": "default",
+            "args": [
+              42
+            ],
+            "class": "ExhaustedWorker",
+            "jid": "<jid>",
+            "created_at": "<ms>",
+            "enqueued_at": "<ms>",
+            "error_message": "exhausted 42",
+            "error_class": "StickyError",
+            "failed_at": "<ms>",
+            "retry_count": 1,
+            "retried_at": "<ms>"
+          }
+        }
+      ],
+      "retry_left": 0,
+      "dead_now": 1
+    },
+    {
+      "name": "exhausted_not_dead",
+      "ran": [
+        "exhausted_not_dead 43"
+      ],
+      "writes": [],
+      "retry_left": 0,
+      "dead_now": 0
+    }
+  ]
+}

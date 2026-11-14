@@ -383,6 +383,13 @@ pub struct App {
     /// `project::apply_job_registry`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub job_plans: Vec<crate::lower::job_payload::JobPlan>,
+    /// Under `queue_adapter :sidekiq`, how each native Sidekiq worker's
+    /// arguments are written to its envelope, and the envelope's head
+    /// from its `sidekiq_options`, or why it can't be pushed. Worked out
+    /// by [`crate::lower::sidekiq_native::plan_workers`]; read by the
+    /// Ruby emitter's enqueue rewrite and by `project::apply_job_registry`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_plans: Vec<crate::lower::sidekiq_native::NativePlan>,
     /// The ActiveJob queue adapter the app configures, as a name
     /// (`config.active_job.queue_adapter = :sidekiq` gives `"sidekiq"`).
     /// Read at ingest from `config/application.rb`, then
@@ -1374,6 +1381,7 @@ impl App {
             global_id_locate_models: BTreeSet::new(),
             global_id_locate_signed_models: BTreeSet::new(),
             job_plans: Vec::new(),
+            native_plans: Vec::new(),
             queue_adapter: None,
             sidekiq_redis: SidekiqRedisConfig::default(),
             sidekiq_worker: SidekiqWorkerDefaults::default(),

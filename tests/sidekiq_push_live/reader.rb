@@ -21,8 +21,20 @@ now = Time.now.to_f
 recent = ->(t) { t.is_a?(Time) && (now - t.to_f).abs < 120 }
 
 names = Sidekiq::Queue.all.map(&:name).sort
-check("queues", names == %w[default low], names.inspect)
+check("queues", names == %w[default low native], names.inspect)
 
+# The native jobs: no ActiveJob wrapper, their own class and plain JSON args.
+native = Sidekiq::Queue.new("native").to_a
+check("native queue size", native.size == 4, native.size.to_s)
+native.each do |job|
+  check("native #{job.args.inspect}: class", job.klass == "NativeWorker" && job.display_class == "NativeWorker", job.klass)
+  check("native #{job.args.inspect}: jid", job.jid.match?(/\A\h{24}\z/), job.jid.inspect)
+  check("native #{job.args.inspect}: enqueued_at", recent.(job.enqueued_at), job.enqueued_at.inspect)
+end
+native_args = native.map(&:args).sort_by(&:first)
+check("native args", native_args == [[1, { "a" => "b" }], [3], [4], [5]], native_args.inspect)
+first = native.find { |j| j.args.first == 1 }
+check("native options", first && first["retry"] == 5 && first["dead"] == false, first&.item.inspect)
 default = Sidekiq::Queue.new("default").to_a
 low = Sidekiq::Queue.new("low").to_a
 check("default queue size", default.size == 2, default.size.to_s)
@@ -45,8 +57,12 @@ end
 seen = (default + low).map { |job| job.display_args.first }.sort
 check("immediate and after-commit jobs", seen == expected.keys.sort, seen.inspect)
 
-scheduled = Sidekiq::ScheduledSet.new.to_a
-check("scheduled set size", scheduled.size == 1, scheduled.size.to_s)
+all_scheduled = Sidekiq::ScheduledSet.new.to_a
+check("scheduled set size", all_scheduled.size == 2, all_scheduled.size.to_s)
+native_scheduled = all_scheduled.select { |j| j.klass == "NativeWorker" }
+check("native scheduled", native_scheduled.size == 1 && native_scheduled[0].args == [2] && native_scheduled[0].queue == "native" &&
+  (native_scheduled[0].at.to_f - (now + 300)).abs < 120, native_scheduled.map(&:item).inspect)
+scheduled = all_scheduled.reject { |j| j.klass == "NativeWorker" }
 if (job = scheduled.first)
   check("scheduled: display_class", job.display_class == "InspectCarJob", job.display_class.inspect)
   check("scheduled: queue", job.queue == "default", job.queue.inspect)

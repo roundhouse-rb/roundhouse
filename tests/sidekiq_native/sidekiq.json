@@ -1,0 +1,2021 @@
+{
+  "versions": {
+    "sidekiq": "8.1.7",
+    "sidekiq_bulk": "0.2.0",
+    "redis_client": "0.31.0",
+    "redis_server": "7.0.15"
+  },
+  "scenarios": [
+    {
+      "name": "async_plain",
+      "call": "PlainWorker.perform_async(1)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "default"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:default"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": true,
+                    "queue": "default",
+                    "args": [
+                      1
+                    ],
+                    "class": "PlainWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":true,\"queue\":\"default\",\"args\":[1],\"class\":\"PlainWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "async_options",
+      "call": "OkWorker.perform_async(1, {\"a\" => \"b\"})",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "pull"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:pull"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "args": [
+                      1,
+                      {
+                        "a": "b"
+                      }
+                    ],
+                    "class": "OkWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"args\":[1,{\"a\":\"b\"}],\"class\":\"OkWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "async_all_types",
+      "call": "PlainWorker.perform_async(1, \"x\", {\"a\"=>\"b\"}, [2, 3], nil, 1.5, true, false, \"é\\\"\\\\\\n\")",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "default"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:default"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": true,
+                    "queue": "default",
+                    "args": [
+                      1,
+                      "x",
+                      {
+                        "a": "b"
+                      },
+                      [
+                        2,
+                        3
+                      ],
+                      null,
+                      1.5,
+                      true,
+                      false,
+                      "é\"\\\n"
+                    ],
+                    "class": "PlainWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":true,\"queue\":\"default\",\"args\":[1,\"x\",{\"a\":\"b\"},[2,3],null,1.5,true,false,\"é\\\"\\\\\\n\"],\"class\":\"PlainWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "async_no_args",
+      "call": "PlainWorker.perform_async",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "default"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:default"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": true,
+                    "queue": "default",
+                    "args": [],
+                    "class": "PlainWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":true,\"queue\":\"default\",\"args\":[],\"class\":\"PlainWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "async_all_options",
+      "call": "OptionsWorker.perform_async(7)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "push"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:push"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "dead",
+                    "backtrace",
+                    "retry_queue",
+                    "retry_for",
+                    "lock",
+                    "lock_ttl",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 8,
+                    "queue": "push",
+                    "dead": false,
+                    "backtrace": true,
+                    "retry_queue": "low",
+                    "retry_for": 3600,
+                    "lock": "until_executed",
+                    "lock_ttl": 86400,
+                    "args": [
+                      7
+                    ],
+                    "class": "OptionsWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":8,\"queue\":\"push\",\"dead\":false,\"backtrace\":true,\"retry_queue\":\"low\",\"retry_for\":3600,\"lock\":\"until_executed\",\"lock_ttl\":86400,\"args\":[7],\"class\":\"OptionsWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "async_inherited",
+      "call": "ChildWorker.perform_async(8)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "child"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:child"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "dead",
+                    "backtrace",
+                    "retry_queue",
+                    "retry_for",
+                    "lock",
+                    "lock_ttl",
+                    "tags",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 8,
+                    "queue": "child",
+                    "dead": false,
+                    "backtrace": 5,
+                    "retry_queue": "low",
+                    "retry_for": 3600,
+                    "lock": "until_executed",
+                    "lock_ttl": 86400,
+                    "tags": [
+                      "x"
+                    ],
+                    "args": [
+                      8
+                    ],
+                    "class": "ChildWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":8,\"queue\":\"child\",\"dead\":false,\"backtrace\":5,\"retry_queue\":\"low\",\"retry_for\":3600,\"lock\":\"until_executed\",\"lock_ttl\":86400,\"tags\":[\"x\"],\"args\":[8],\"class\":\"ChildWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "async_retry_false",
+      "call": "NoRetryWorker.perform_async(9)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "default"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:default"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": false,
+                    "queue": "default",
+                    "args": [
+                      9
+                    ],
+                    "class": "NoRetryWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":false,\"queue\":\"default\",\"args\":[9],\"class\":\"NoRetryWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "in_interval",
+      "call": "OkWorker.perform_in(300, 2)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 300,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      2
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[2],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "in_float",
+      "call": "PlainWorker.perform_in(1.5, 2)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 2,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": true,
+                    "queue": "default",
+                    "class": "PlainWorker",
+                    "args": [
+                      2
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":true,\"queue\":\"default\",\"class\":\"PlainWorker\",\"args\":[2],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "in_epoch",
+      "call": "OkWorker.perform_in(2000000000, 2)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 206455066,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      2
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[2],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "at_epoch",
+      "call": "OkWorker.perform_at(2000000000, 3)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 206455066,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      3
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[3],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "at_time",
+      "call": "OkWorker.perform_at(Time.at(2000000000), 3)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 206455066,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      3
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[3],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "in_zero",
+      "call": "OkWorker.perform_in(0, 4)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "pull"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:pull"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      4
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[4],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "at_past",
+      "call": "OkWorker.perform_at(Time.now - 60, 4)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "pull"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:pull"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      4
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[4],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "in_all_options",
+      "call": "OptionsWorker.perform_in(60, 5)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 60,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "dead",
+                    "backtrace",
+                    "retry_queue",
+                    "retry_for",
+                    "lock",
+                    "lock_ttl",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": 8,
+                    "queue": "push",
+                    "dead": false,
+                    "backtrace": true,
+                    "retry_queue": "low",
+                    "retry_for": 3600,
+                    "lock": "until_executed",
+                    "lock_ttl": 86400,
+                    "class": "OptionsWorker",
+                    "args": [
+                      5
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":8,\"queue\":\"push\",\"dead\":false,\"backtrace\":true,\"retry_queue\":\"low\",\"retry_for\":3600,\"lock\":\"until_executed\",\"lock_ttl\":86400,\"class\":\"OptionsWorker\",\"args\":[5],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set_queue_async",
+      "call": "OkWorker.set(queue: \"other\").perform_async(1)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "other"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:other"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "other",
+                    "args": [
+                      1
+                    ],
+                    "class": "OkWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"other\",\"args\":[1],\"class\":\"OkWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set_queue_sym_async",
+      "call": "PlainWorker.set(queue: :other).perform_async(1)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "other"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:other"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": true,
+                    "queue": "other",
+                    "args": [
+                      1
+                    ],
+                    "class": "PlainWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":true,\"queue\":\"other\",\"args\":[1],\"class\":\"PlainWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set_queue_in",
+      "call": "OkWorker.set(queue: \"other\").perform_in(60, 1)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 60,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "other",
+                    "args": [
+                      1
+                    ],
+                    "class": "OkWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"other\",\"args\":[1],\"class\":\"OkWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set_queue_at",
+      "call": "OkWorker.set(queue: \"other\").perform_at(2000000000, 1)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 206455066,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "other",
+                    "args": [
+                      1
+                    ],
+                    "class": "OkWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"other\",\"args\":[1],\"class\":\"OkWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set_wait_async",
+      "call": "OkWorker.set(wait: 60).perform_async(1)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 60,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "args": [
+                      1
+                    ],
+                    "class": "OkWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"args\":[1],\"class\":\"OkWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set_queue_wait_async",
+      "call": "OkWorker.set(queue: \"other\", wait: 60).perform_async(1)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 60,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "other",
+                    "args": [
+                      1
+                    ],
+                    "class": "OkWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"other\",\"args\":[1],\"class\":\"OkWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set_wait_until_async",
+      "call": "OkWorker.set(wait_until: 2000000000).perform_async(1)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 206455066,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "args": [
+                      1
+                    ],
+                    "class": "OkWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"args\":[1],\"class\":\"OkWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set_retry_async",
+      "call": "OkWorker.set(retry: false).perform_async(1)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "pull"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:pull"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": false,
+                    "queue": "pull",
+                    "args": [
+                      1
+                    ],
+                    "class": "OkWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":false,\"queue\":\"pull\",\"args\":[1],\"class\":\"OkWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set_queue_all_options",
+      "call": "OptionsWorker.set(queue: \"other\").perform_async(1)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "other"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:other"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "dead",
+                    "backtrace",
+                    "retry_queue",
+                    "retry_for",
+                    "lock",
+                    "lock_ttl",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 8,
+                    "queue": "other",
+                    "dead": false,
+                    "backtrace": true,
+                    "retry_queue": "low",
+                    "retry_for": 3600,
+                    "lock": "until_executed",
+                    "lock_ttl": 86400,
+                    "args": [
+                      1
+                    ],
+                    "class": "OptionsWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":8,\"queue\":\"other\",\"dead\":false,\"backtrace\":true,\"retry_queue\":\"low\",\"retry_for\":3600,\"lock\":\"until_executed\",\"lock_ttl\":86400,\"args\":[1],\"class\":\"OptionsWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "set_chained",
+      "call": "OkWorker.set(queue: \"a\").set(queue: \"b\", wait: 60).perform_async(1)",
+      "returned": "<jid>",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "zadd",
+                "schedule",
+                "<at as Float#to_s>"
+              ],
+              "at_minus_call_time_s": 60,
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "args",
+                    "class",
+                    "jid",
+                    "created_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "b",
+                    "args": [
+                      1
+                    ],
+                    "class": "OkWorker",
+                    "jid": "<jid>",
+                    "created_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"b\",\"args\":[1],\"class\":\"OkWorker\",\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "perform_bulk",
+      "call": "OkWorker.perform_bulk([[1], [2], [3]])",
+      "returned": "Array of 3 jids",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "pull"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:pull"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      1
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[1],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                },
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      2
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[2],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                },
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      3
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[3],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ],
+              "one_created_at_per_batch": true,
+              "one_enqueued_at_per_batch": true,
+              "jids_distinct": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "perform_bulk_batches",
+      "call": "OkWorker.perform_bulk([[1], [2], [3], [4], [5]], batch_size: 2)",
+      "returned": "Array of 5 jids",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "pull"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:pull"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      1
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[1],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                },
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      2
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[2],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ],
+              "one_created_at_per_batch": true,
+              "one_enqueued_at_per_batch": true,
+              "jids_distinct": true
+            }
+          ]
+        },
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "pull"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:pull"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      3
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[3],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                },
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      4
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[4],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ],
+              "one_created_at_per_batch": true,
+              "one_enqueued_at_per_batch": true,
+              "jids_distinct": true
+            }
+          ]
+        },
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "pull"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:pull"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      5
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[5],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "perform_bulk_set",
+      "call": "OkWorker.set(queue: \"other\").perform_bulk([[1], [2]])",
+      "returned": "Array of 2 jids",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "other"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:other"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "other",
+                    "class": "OkWorker",
+                    "args": [
+                      1
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"other\",\"class\":\"OkWorker\",\"args\":[1],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                },
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "other",
+                    "class": "OkWorker",
+                    "args": [
+                      2
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"other\",\"class\":\"OkWorker\",\"args\":[2],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ],
+              "one_created_at_per_batch": true,
+              "one_enqueued_at_per_batch": true,
+              "jids_distinct": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "push_bulk_block",
+      "call": "OkWorker.push_bulk([1, 2, 3, 4, 5], limit: 2) { |i| [i, \"n#{i}\"] }",
+      "returned": "Array of 5 jids",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "pull"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:pull"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      1,
+                      "n1"
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[1,\"n1\"],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                },
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      2,
+                      "n2"
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[2,\"n2\"],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ],
+              "one_created_at_per_batch": true,
+              "one_enqueued_at_per_batch": true,
+              "jids_distinct": true
+            }
+          ]
+        },
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "pull"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:pull"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      3,
+                      "n3"
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[3,\"n3\"],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                },
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      4,
+                      "n4"
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[4,\"n4\"],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ],
+              "one_created_at_per_batch": true,
+              "one_enqueued_at_per_batch": true,
+              "jids_distinct": true
+            }
+          ]
+        },
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "pull"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:pull"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 5,
+                    "queue": "pull",
+                    "class": "OkWorker",
+                    "args": [
+                      5,
+                      "n5"
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":5,\"queue\":\"pull\",\"class\":\"OkWorker\",\"args\":[5,\"n5\"],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "push_bulk_no_block",
+      "call": "PlainWorker.push_bulk([1, 2, 3])",
+      "returned": "Array of 3 jids",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "default"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:default"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": true,
+                    "queue": "default",
+                    "class": "PlainWorker",
+                    "args": [
+                      1
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":true,\"queue\":\"default\",\"class\":\"PlainWorker\",\"args\":[1],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                },
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": true,
+                    "queue": "default",
+                    "class": "PlainWorker",
+                    "args": [
+                      2
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":true,\"queue\":\"default\",\"class\":\"PlainWorker\",\"args\":[2],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                },
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": true,
+                    "queue": "default",
+                    "class": "PlainWorker",
+                    "args": [
+                      3
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":true,\"queue\":\"default\",\"class\":\"PlainWorker\",\"args\":[3],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ],
+              "one_created_at_per_batch": true,
+              "one_enqueued_at_per_batch": true,
+              "jids_distinct": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "push_bulk_all_options",
+      "call": "OptionsWorker.push_bulk([1, 2])",
+      "returned": "Array of 2 jids",
+      "round_trips": [
+        {
+          "kind": "pipelined",
+          "commands": [
+            {
+              "argv": [
+                "sadd",
+                "queues",
+                "push"
+              ]
+            },
+            {
+              "argv": [
+                "lpush",
+                "queue:push"
+              ],
+              "envelopes": [
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "dead",
+                    "backtrace",
+                    "retry_queue",
+                    "retry_for",
+                    "lock",
+                    "lock_ttl",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 8,
+                    "queue": "push",
+                    "dead": false,
+                    "backtrace": true,
+                    "retry_queue": "low",
+                    "retry_for": 3600,
+                    "lock": "until_executed",
+                    "lock_ttl": 86400,
+                    "class": "OptionsWorker",
+                    "args": [
+                      1
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":8,\"queue\":\"push\",\"dead\":false,\"backtrace\":true,\"retry_queue\":\"low\",\"retry_for\":3600,\"lock\":\"until_executed\",\"lock_ttl\":86400,\"class\":\"OptionsWorker\",\"args\":[1],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                },
+                {
+                  "keys": [
+                    "retry",
+                    "queue",
+                    "dead",
+                    "backtrace",
+                    "retry_queue",
+                    "retry_for",
+                    "lock",
+                    "lock_ttl",
+                    "class",
+                    "args",
+                    "jid",
+                    "created_at",
+                    "enqueued_at"
+                  ],
+                  "masked": {
+                    "retry": 8,
+                    "queue": "push",
+                    "dead": false,
+                    "backtrace": true,
+                    "retry_queue": "low",
+                    "retry_for": 3600,
+                    "lock": "until_executed",
+                    "lock_ttl": 86400,
+                    "class": "OptionsWorker",
+                    "args": [
+                      2
+                    ],
+                    "jid": "<jid>",
+                    "created_at": "<ms>",
+                    "enqueued_at": "<ms>"
+                  },
+                  "pinned": "{\"retry\":8,\"queue\":\"push\",\"dead\":false,\"backtrace\":true,\"retry_queue\":\"low\",\"retry_for\":3600,\"lock\":\"until_executed\",\"lock_ttl\":86400,\"class\":\"OptionsWorker\",\"args\":[2],\"jid\":\"0123456789abcdef01234567\",\"created_at\":1792632730123,\"enqueued_at\":1792632730124}"
+                }
+              ],
+              "one_created_at_per_batch": true,
+              "one_enqueued_at_per_batch": true,
+              "jids_distinct": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "reject_symbol",
+      "call": "PlainWorker.perform_async(:sym)",
+      "raised": "ArgumentError: Job arguments to PlainWorker must be native JSON types, but :sym is a Symbol.\nSee https://github.com/sidekiq/sidekiq/wiki/Best-Practices\nTo disable this error, add `Sidekiq.strict_args!(false)` to your initializer.\n",
+      "round_trips": []
+    },
+    {
+      "name": "reject_symbol_keys",
+      "call": "PlainWorker.perform_async({a: 1})",
+      "raised": "ArgumentError: Job arguments to PlainWorker must be native JSON types, but :a is a Symbol.\nSee https://github.com/sidekiq/sidekiq/wiki/Best-Practices\nTo disable this error, add `Sidekiq.strict_args!(false)` to your initializer.\n",
+      "round_trips": []
+    },
+    {
+      "name": "reject_time",
+      "call": "PlainWorker.perform_async(Time.at(0))",
+      "raised": "ArgumentError: Job arguments to PlainWorker must be native JSON types, but 1970-01-01 00:00:00 +0000 is a Time.\nSee https://github.com/sidekiq/sidekiq/wiki/Best-Practices\nTo disable this error, add `Sidekiq.strict_args!(false)` to your initializer.\n",
+      "round_trips": []
+    },
+    {
+      "name": "reject_kwargs_style",
+      "call": "PlainWorker.perform_async(1, key: 2)",
+      "raised": "ArgumentError: Job arguments to PlainWorker must be native JSON types, but :key is a Symbol.\nSee https://github.com/sidekiq/sidekiq/wiki/Best-Practices\nTo disable this error, add `Sidekiq.strict_args!(false)` to your initializer.\n",
+      "round_trips": []
+    }
+  ]
+}

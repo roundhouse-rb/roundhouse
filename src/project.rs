@@ -7580,13 +7580,14 @@ fn apply_database_pragmas(files: &mut [(String, String)], app: &App) {
 /// `apply_global_id_locate`; an app with no payload jobs keeps a
 /// registry whose `perform` answers false.
 /// Whether a tree pushes jobs to Redis: the app is on `queue_adapter
-/// :sidekiq` and has at least one payload job (`lower::job_payload`). An
-/// app on `:sidekiq` whose jobs all keep their Proc, or that has no
-/// ActiveJob jobs at all (Mastodon's are native Sidekiq workers), gets
-/// no Redis client and no dependency.
+/// :sidekiq` and has at least one payload job (`lower::job_payload`) or
+/// native Sidekiq worker it can push (`lower::sidekiq_native`). An app
+/// on `:sidekiq` whose jobs all keep their Proc, or that has no jobs at
+/// all, gets no Redis client and no dependency.
 pub(crate) fn needs_redis(app: &App) -> bool {
     app.queue_adapter.as_deref() == Some("sidekiq")
         && (app.job_plans.iter().any(|p| p.is_payload())
+            || app.native_plans.iter().any(|p| p.is_payload())
             || !crate::lower::broadcast_job::models(app).is_empty())
 }
 
@@ -7744,8 +7745,13 @@ fn apply_job_registry(files: &mut [(String, String)], app: &App) {
         worker_defaults_source(&app.sidekiq_worker),
     );
     let redis = format!("{redis}{}", cable_redis_source(app));
+    let native = if needs_redis(app) {
+        crate::lower::sidekiq_native::registry_source(&app.native_plans)
+    } else {
+        String::new()
+    };
     let generated = format!(
-        "{HEAD}{}\n{flag}{redis}{TAIL}",
+        "{HEAD}{native}{}\n{flag}{redis}{TAIL}",
         crate::lower::job_payload::registry_source_with_broadcasts(
             &app.job_plans,
             needs_redis(app),

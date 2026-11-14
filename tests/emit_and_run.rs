@@ -552,6 +552,8 @@ mod job_keywords;
 mod sidekiq_adapter;
 #[path = "emit_and_run/sidekiq_retry_on.rs"]
 mod sidekiq_retry_on;
+#[path = "emit_and_run/sidekiq_native_push.rs"]
+mod sidekiq_native_push;
 #[path = "emit_and_run/silent_lowerings.rs"]
 mod silent_lowerings;
 #[path = "emit_and_run/validates_options.rs"]

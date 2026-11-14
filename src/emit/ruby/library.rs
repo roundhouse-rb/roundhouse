@@ -4763,6 +4763,49 @@ fn view_helpers_path() -> Vec<Symbol> {
     vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")]
 }
 
+/// `content_for(:slot)`, `content_for(:slot, value)` or `content_for(:slot)
+/// { … }` written bare in a helper module, as the view-slot call it is in
+/// Rails (`rewrite_helper_calls`). None for any other shape.
+fn helper_content_for(
+    expr: &Expr,
+    index: &HashMap<Symbol, ClassId>,
+    own_methods: &crate::det::HashSet<Symbol>,
+) -> Option<Expr> {
+    let ExprNode::Send { recv: None, method, args, block, .. } = &*expr.node else {
+        return None;
+    };
+    if method.as_str() != "content_for" || index.contains_key(method) || own_methods.contains(method) {
+        return None;
+    }
+    // A Symbol slot. Rails keys the slot by the name as given, so a String
+    // one is another slot, which the runtime's Symbol-keyed store has no
+    // place for; it stays as written.
+    let slot = args
+        .first()
+        .filter(|a| matches!(&*a.node, ExprNode::Lit { value: crate::expr::Literal::Sym { .. } }))?;
+    let span = expr.span;
+    let view_helpers = || Expr::new(span, ExprNode::Const { path: view_helpers_path() });
+    let call = |name: &str, args: Vec<Expr>, block: Option<Expr>| {
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(view_helpers()),
+                method: Symbol::from(name),
+                args,
+                block,
+                parenthesized: true,
+            },
+        )
+    };
+    let value = match (args.len(), block) {
+        (1, None) => return Some(call("content_for_get", vec![slot.clone()], None)),
+        (2, None) => args[1].clone(),
+        (1, Some(block)) => call("capture", vec![], Some(block.clone())),
+        _ => return None,
+    };
+    Some(call("content_for_set", vec![slot.clone(), value], None))
+}
+
 /// Walk a method body and rewrite helper calls so they resolve against the
 /// module-function surfaces. Four cases (children first, so nested calls
 /// and the `.helpers` receiver are rewritten before their parent):
@@ -5137,6 +5180,20 @@ fn rewrite_helper_calls(
                 return;
             }
         }
+    }
+
+    // `content_for` in a helper module's body: Rails mixes the helper into
+    // the view, so it deposits into and reads the view's slots, as a
+    // template's own `content_for` does. `content_for(:slot)` reads
+    // (`content_for_get`), and `content_for(:slot, value)` or a block
+    // (its `capture`) deposits (`content_for_set`, nil, as Rails' setter
+    // answers). A dynamic or String slot or an options Hash stays as
+    // written, and so does an app's own `content_for`.
+    if rewrite_request
+        && let Some(call) = helper_content_for(expr, index, own_methods)
+    {
+        *expr = call;
+        return;
     }
 
     // Cases 3/4: a bare call resolving to an app or framework helper module.

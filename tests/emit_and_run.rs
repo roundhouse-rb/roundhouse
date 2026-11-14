@@ -22243,3 +22243,5 @@ mod has_many_writer;
 mod association_scopes;
 #[path = "emit_and_run/association_relation_calls.rs"]
 mod association_relation_calls;
+#[path = "emit_and_run/helper_content_for.rs"]
+mod helper_content_for;

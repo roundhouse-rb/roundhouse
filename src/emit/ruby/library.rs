@@ -4062,6 +4062,17 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 rewrite_view_ivar_writes(&mut m.body, &view_ivars);
             }
         }
+        // A helper that hands `self` on (`NavItem.new(self, path)`) gives
+        // the object the view, and the object reads `request` and
+        // `controller` through it, as Rails' view context answers them.
+        // Here `self` is the module, so it answers them with the
+        // dispatch's, as the view's own readers do. A module that
+        // defines either keeps its own.
+        if is_helper_module && lc.methods.iter().any(|m| hands_self_on(&m.body)) {
+            for name in ["request", "controller"] {
+                push_view_context_reader(&mut lc.methods, name, &lc.name);
+            }
+        }
         // The other half: the reader the rewrite dispatches to. It goes
         // on the BASE controller, so every controller inherits one —
         // a helper runs under whichever controller is current, and
@@ -4081,6 +4092,65 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     // produces — and over the whole slice at once, because constant NAMES
     // have to be unique across every class that shares a Ruby namespace.
     hoist_pure_helper_constants(lcs);
+}
+
+/// Does this body use `self` as a value (an argument, an assignment, an
+/// element), rather than only as a call's receiver?
+fn hands_self_on(e: &Expr) -> bool {
+    let recv = match &*e.node {
+        ExprNode::Send { recv: Some(r), .. } => Some(r as *const Expr),
+        _ => None,
+    };
+    let mut found = false;
+    e.node.for_each_child(&mut |c| {
+        if found {
+            return;
+        }
+        found = match &*c.node {
+            ExprNode::SelfRef => recv != Some(c as *const Expr),
+            _ => hands_self_on(c),
+        };
+    });
+    found
+}
+
+/// `def self.request = ActionController::Current.request` (or
+/// `controller`) on a helper module, unless the module defines it.
+fn push_view_context_reader(methods: &mut Vec<MethodDef>, name: &str, module: &ClassId) {
+    if methods.iter().any(|m| m.name.as_str() == name) {
+        return;
+    }
+    let span = Span::synthetic();
+    let current = Expr::new(
+        span,
+        ExprNode::Const { path: vec![Symbol::from("ActionController"), Symbol::from("Current")] },
+    );
+    methods.push(MethodDef {
+        unsupported_formals: None,
+        has_anonymous_block: false,
+        name_span: Span::synthetic(),
+        name: Symbol::from(name),
+        receiver: MethodReceiver::Class,
+        visibility: MethodVisibility::Public,
+        params: vec![],
+        body: Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(current),
+                method: Symbol::from(name),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        ),
+        signature: None,
+        effects: crate::effect::EffectSet::default(),
+        enclosing_class: Some(module.0.clone()),
+        kind: AccessorKind::Method,
+        is_async: false,
+        mutates_self: false,
+        block_param: None,
+    });
 }
 
 /// Is this the app's base controller — the one every other controller

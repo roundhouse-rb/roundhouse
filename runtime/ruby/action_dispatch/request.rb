@@ -349,6 +349,12 @@ module ActionDispatch
       end
     end
 
+    # Rack's PATH_INFO, the path below the mount point, which `path`
+    # holds here (Rails' `path` is `script_name + path_info`).
+    def path_info
+      @path
+    end
+
     # No middleware rewrites paths here, so original_* == current.
     def original_fullpath
       fullpath

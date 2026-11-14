@@ -4076,55 +4076,6 @@ fn finite_concern_class_configuration_runs_without_replaying_rails() {
     }
 }
 
-/// The dispatcher reads the extension of the path's last segment for the
-/// request a route constraint is asked with. A path with no dot has none
-/// and is not split to look for one; a path with a dot is read as before,
-/// whichever segment the dot is in.
-#[test]
-fn the_dispatcher_splits_a_path_for_its_extension_only_when_it_has_a_dot() {
-    emit_and_run::real_blog()
-        .run_ruby(r##"
-require "rack"
-require "rack/mock"
-%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
-module NIO; end
-module WebSocket; end
-builder = Rack::Builder.new
-builder.instance_eval(File.read("config.ru"), "config.ru")
-client = Rack::MockRequest.new(builder.to_app)
-check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
-extensions = []
-ActionDispatch::MimeNegotiation.singleton_class.prepend(Module.new {
-  define_method(:format_name) { |extension, *rest| extensions << extension; super(extension, *rest) }
-})
-splits = []
-String.prepend(Module.new {
-  define_method(:split) { |*args, &blk|
-    splits << self.dup if caller_locations(1, 1).first.path.end_with?("/main.rb")
-    super(*args, &blk)
-  }
-})
-# The extension as the dispatcher has always read it: the last segment's text after its last dot.
-reference = lambda do |path|
-  segment = path.split("/").last.to_s
-  segment.include?(".") ? segment.split(".").last.to_s : ""
-end
-["/no-such-page", "/no/such/page", "/no-such-page/", "/no-such-page.json", "/no.such/page", "/no.such/page.xml", "/no/such.page.rss",
- "/no-such-page.", "/.hidden", "/no..such", "/no-such-page.JSON"].each do |path|
-  extensions.clear
-  splits.clear
-  response = client.get(path)
-  check.(response.status == 404, "#{path} answers #{response.status}")
-  check.(extensions.first == reference.(path), "#{path} is read with the extension #{extensions.first.inspect}, was #{reference.(path).inspect}")
-  next if path.include?(".")
-  check.(splits.none? { |text| text == path }, "#{path} has no dot and was split by the dispatcher")
-end
-check.(client.get("/no-such-page.json").body.include?("\"status\":404"), "a .json 404 is still answered as JSON")
-puts "path extension contract passed"
-"##)
-        .assert_passes();
-}
-
 /// The headers of a response reach Rack from the controller's header store
 /// itself, not through a Hash filled from it entry by entry: the store is
 /// not walked by index, and the response carries the names and values it

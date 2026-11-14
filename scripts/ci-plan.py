@@ -276,9 +276,11 @@ PG_DB_INPUTS = {
 # Inputs of the emitted-app gate in tests/spinel_pg_db.rs, which compiles
 # a test of an app on PostgreSQL: the dialect choice and DDL, the tree's
 # assembly (project::apply_postgresql_tree, spin_shape's `pg` dependency),
-# the scaffold files that assembly rewrites, and the harness that emits it.
+# the inserts its keyless tables take (adapter_emit), the scaffold files
+# that assembly rewrites, and the harness that emits it.
 PG_APP_INPUTS = {
     "src/project.rs",
+    "src/lower/model_to_library/adapter_emit/mod.rs",
     "src/emit/shared/schema_sql.rs",
     "src/ingest/database_yml.rs",
     "runtime/spinel/scaffold/main.rb",

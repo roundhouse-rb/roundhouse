@@ -125,6 +125,42 @@ fn an_insert_into_a_keyless_table_reads_no_key_on_postgresql() {
     assert!(insert(&read(&emitted, "app/models/star.rb")).contains("last_insert_rowid"));
 }
 
+/// The same keyless tables with a stored generated column or a database
+/// default: the insert reads those back with RETURNING, as Rails reads
+/// them, and on PostgreSQL returns no `rowid` (which it has no column
+/// for) in the key's place. SQLite keeps its `CAST(rowid AS TEXT)`.
+#[test]
+fn a_keyless_insert_returns_its_generated_and_default_columns_without_rowid_on_postgresql() {
+    let app = |database_yml: &str| {
+        emit_and_run::real_blog()
+            .write("config/database.yml", database_yml)
+            .edit(
+                "db/schema.rb",
+                "  create_table \"comments\"",
+                "  create_table \"badges\", id: false, force: :cascade do |t|\n    t.string \"first_name\", null: false\n    t.virtual \"label\", type: :string, as: \"first_name || '!'\", stored: true\n  end\n\n  create_table \"visits\", id: false, force: :cascade do |t|\n    t.string \"name\"\n    t.datetime \"recorded_at\", default: -> { \"CURRENT_TIMESTAMP\" }, null: false\n  end\n\n  create_table \"comments\"",
+            )
+            .write("app/models/badge.rb", "class Badge < ApplicationRecord\nend\n")
+            .write("app/models/visit.rb", "class Visit < ApplicationRecord\nend\n")
+    };
+    let insert = |model: &str| {
+        let start = model.find("def _adapter_insert").expect("_adapter_insert");
+        let end = model[start..].find("\n  end\n").map(|at| start + at).expect("end of _adapter_insert");
+        model[start..end].to_string()
+    };
+    for target in [BuildTarget::Spinel, BuildTarget::Ruby] {
+        let (emitted, errors) = app(POSTGRESQL_DATABASE_YML).emit(target);
+        assert!(errors.is_empty(), "{target:?}: {errors:#?}");
+        let badge = insert(&read(&emitted, "app/models/badge.rb"));
+        assert!(badge.contains("RETURNING 0, label") && !badge.contains("rowid"), "{target:?}:\n{badge}");
+        let visit = insert(&read(&emitted, "app/models/visit.rb"));
+        assert!(visit.contains("RETURNING 0, recorded_at") && !visit.contains("rowid"), "{target:?}:\n{visit}");
+    }
+    let (emitted, errors) = app("test:\n  adapter: sqlite3\n  database: \":memory:\"\n").emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(insert(&read(&emitted, "app/models/badge.rb")).contains("RETURNING CAST(rowid AS TEXT), label"));
+    assert!(insert(&read(&emitted, "app/models/visit.rb")).contains("RETURNING CAST(rowid AS TEXT), recorded_at"));
+}
+
 #[test]
 fn a_sqlite_primary_keeps_the_sqlite_spinel_tree() {
     let (emitted, errors) = emit_and_run::real_blog().emit(BuildTarget::Spinel);

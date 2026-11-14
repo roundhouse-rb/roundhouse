@@ -205,22 +205,30 @@ impl SqliteVisitor {
     /// Execute an insert that returns selected columns from that same
     /// statement. Generated-column persistence uses this to hydrate the
     /// database-owned values without a second, post-commit SELECT.
+    /// `returning_key` is None for a table with no key to return (a keyless
+    /// table on PostgreSQL, which has no rowid): the first column is then
+    /// the integer 0, so the columns after it keep their places.
     pub(crate) fn visit_insert_returning(
         &self,
         ins: &Insert,
         schema: &Schema,
-        returning_key: &Symbol,
+        returning_key: Option<&Symbol>,
         key_is_integer: bool,
         returning_columns: &[Symbol],
     ) -> Expr {
-        let key_ident = crate::naming::sql_ident(returning_key.as_str());
         // Spinel snapshots SQLite integer cells through sqlite3_column_int
         // (32-bit). Return integer keys as text so the shared result capture
         // does not truncate them before the adapter parses them back.
-        let key_projection = if key_is_integer {
-            format!("CAST({key_ident} AS TEXT)")
-        } else {
-            key_ident
+        let key_projection = match returning_key {
+            None => "0".to_string(),
+            Some(key) => {
+                let key_ident = crate::naming::sql_ident(key.as_str());
+                if key_is_integer {
+                    format!("CAST({key_ident} AS TEXT)")
+                } else {
+                    key_ident
+                }
+            }
         };
         let mut projection = vec![key_projection];
         projection.extend(

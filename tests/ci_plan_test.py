@@ -965,6 +965,7 @@ class Routing(unittest.TestCase):
         # PostgreSQL, so what assembles that tree selects it.
         for path in [
             "src/project.rs",
+            "src/lower/model_to_library/adapter_emit/mod.rs",
             "src/emit/shared/schema_sql.rs",
             "src/ingest/database_yml.rs",
             "runtime/spinel/scaffold/main.rb",

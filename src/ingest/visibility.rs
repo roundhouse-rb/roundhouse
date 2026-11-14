@@ -396,7 +396,11 @@ impl Visibility {
         for body in bodies {
             // Not `resolve`: forem's `private :has_role?` names a method rolify defines, which
             // refuses the class body there but leaves the default at every later line known.
-            if let Ok(visibility) = Self::resolve_carrying_inherited(Some(&body), file, None) {
+            // Nor a body whose load-time conditional definitions only a library class admits (view_component's
+            // `Base`): the defaults at its other lines are known all the same.
+            if let Ok(visibility) = Self::resolve_carrying_inherited(Some(&body), file, None)
+                .or_else(|_| Self::resolve_carrying_inherited_with(Some(&body), file, None, None, true))
+            {
                 defaults.extend(visibility.defaults);
             }
             for statement in flatten_statements(body) {

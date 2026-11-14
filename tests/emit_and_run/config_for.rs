@@ -116,11 +116,11 @@ fn an_options_object_the_app_builds_reads_and_writes_keys() {
     overlay()
         .run_ruby("raise Built.value.inspect unless Built.value == 3\nputs \"built options passed\"\n")
         .assert_passes();
-    // Spinel leaves the YAML file, and with it the class, out of its boot.
+    // Spinel leaves the YAML file out of its boot, but ships its own OrderedOptions (runtime/ordered_options_spinel.rb).
     let (_, errors) = overlay().emit(roundhouse::project::BuildTarget::Spinel);
     assert!(
-        errors.iter().any(|e| e.contains("ActiveSupport::OrderedOptions is not available")),
-        "spinel must refuse the class:\n{}",
+        !errors.iter().any(|e| e.contains("ActiveSupport::OrderedOptions is not available")),
+        "spinel ships the class:\n{}",
         errors.join("\n")
     );
 }

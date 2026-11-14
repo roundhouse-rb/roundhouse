@@ -258,6 +258,8 @@ const MIXINS_WITHOUT_CONSTRUCTOR_HOOK: &[(&str, bool)] = &[
     ("ActionView::Helpers::SanitizeHelper", false),
     ("ActionView::Helpers::JavaScriptHelper", false),
     ("Rails.application.routes.url_helpers", true),
+    // The same module as ingest records its include (`library_class`: the program's generated route helpers).
+    ("RouteHelpers", true),
     ("ActiveModel::Model", true),
     ("ActiveModel::Validations", false),
     ("ActiveModel::Attributes", true),

@@ -732,12 +732,22 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         ("parse", Ty::Untyped),
     ], &[]);
     // `config_for`'s Hash: Rails' own class, in the ruby family's overlay
-    // (`ruby_overlay/runtime/active_support_ordered_options.rb`).
+    // (`ruby_overlay/runtime/active_support_ordered_options.rb`), and Spinel's Hash-holding one
+    // (`runtime/spinel/ordered_options_spinel.rb`). A name no method answers is a key, read through `method_missing`.
     let ordered_options = Ty::Class { id: ClassId(Symbol::from("ActiveSupport::OrderedOptions")), args: vec![].into() };
-    register_stdlib_class(classes, "ActiveSupport::OrderedOptions", &[
-        ("new", ordered_options.clone()),
-    ], &[
-        ("update", ordered_options),
+    // Not a `new` of its own: one returning this class would type a subclass's `new` as this class too.
+    register_stdlib_class(classes, "ActiveSupport::OrderedOptions", &[], &[
+        ("update", ordered_options.clone()),
+        ("merge!", ordered_options),
+        ("[]", Ty::Untyped),
+        ("[]=", Ty::Untyped),
+        ("keys", Ty::Array { elem: std::sync::Arc::new(Ty::Untyped) }),
+        ("key?", Ty::Bool),
+        ("fetch", Ty::Untyped),
+        ("to_h", Ty::Hash { key: std::sync::Arc::new(Ty::Untyped), value: std::sync::Arc::new(Ty::Untyped) }),
+        ("empty?", Ty::Bool),
+        ("dig", Ty::Untyped),
+        ("method_missing", Ty::Untyped),
     ]);
     {
         let continuable = classes.entry(ClassId(Symbol::from("ActiveJob::Continuable"))).or_default();

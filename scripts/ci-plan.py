@@ -240,6 +240,8 @@ SPINEL_TOOLCHAIN_SECONDS = {
     "real_blog_spinel_tests_pass": 265,
     "identical_cli_emission_reuses_native_build_but_changed_ruby_rebuilds": 187,
     "finite_concern_class_configuration_runs_natively": 133,
+    # The whole blog with view_component's sources built natively (about 700 s on a CI runner, 2026-11-14).
+    "view_component::a_component_renders_its_template_natively": 700,
 }
 SPINEL_TOOLCHAIN_DEFAULT_SECONDS = 80
 SPINEL_TOOLCHAIN_SHARDS = 5
@@ -1148,7 +1150,7 @@ def spinel_framework_shards(tests, count=SPINEL_FRAMEWORK_SHARDS, timings=None):
 
 
 def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS, timings=None, units=None):
-    """This shard's tests: longest first onto the shard that would end first, by name order within it.
+    """This shard's tests: longest first onto the shard that would end first, and longest first within it.
 
     A unit (tests one shared Spinel build would take, from spinel_bundle_plan) goes to one
     shard whole: split across shards, each part pays the build again. A shard ends once its
@@ -1186,7 +1188,9 @@ def spinel_toolchain_shard(tests, shard, count=SPINEL_TOOLCHAIN_SHARDS, timings=
         longest[i] = max(longest[i], cost(item))
         if i == shard:
             mine.extend(item)
-    return sorted(mine)
+    # Not by name order: the threads start the tests in this order, and a long test listed last starts after the
+    # short ones and passes the shard's deadline (view_component's native build, about ten minutes).
+    return sorted(mine, key=lambda t: (-spinel_toolchain_seconds(t, timings), t))
 
 
 def record_timing(kind, name, seconds, ok, timed_out=False, cpu=None):

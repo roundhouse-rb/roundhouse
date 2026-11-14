@@ -590,9 +590,11 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
             let mut cap_stmts = vec![assign_accumulator_string_new(&cap)];
             cap_stmts.extend(walk_body(body, &cap_ctx));
             // Not a plain String: Rails' `capture` answers the block's markup safe, and the slot escapes one that is not.
+            // `raw`, not `.html_safe`, which the emit unwraps where it reads the mark statically.
+            let helpers = Expr::new(Span::synthetic(), ExprNode::Const { path: vec![Symbol::from("ActionView"), Symbol::from("ViewHelpers")] });
             cap_stmts.push(Expr::new(
                 Span::synthetic(),
-                ExprNode::Send { recv: Some(accumulator_result_ref(&cap)), method: Symbol::from("html_safe"), args: Vec::new(), block: None, parenthesized: false },
+                ExprNode::Send { recv: Some(helpers), method: Symbol::from("raw"), args: vec![accumulator_result_ref(&cap)], block: None, parenthesized: true },
             ));
             let new_block = Expr::new(
                 block.span,

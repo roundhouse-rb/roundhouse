@@ -85,5 +85,17 @@ module ActionView
     def view_flow
       nil
     end
+
+    # A view built on its own (`ActionView::Base.new`, as a component's `render_in` is handed one) has no controller.
+    def controller
+      nil
+    end
+
+    # ERB::Util's `html_escape`, which Rails' view includes (view_component's `maybe_escape_html` calls it bare).
+    # Not ERB::Util's check of a safe String first, which no typed String answers here: view_component's one caller
+    # (`maybe_escape_html`) hands it only text that is not html_safe.
+    def html_escape(text)
+      ActionView::ViewHelpers.html_escape(text.to_s)
+    end
   end
 end

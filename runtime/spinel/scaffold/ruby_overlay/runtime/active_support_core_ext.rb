@@ -728,3 +728,13 @@ class Module
     end
   end
 end
+
+# ActiveSupport's Class#descendants (Rails 8.1 `core_ext/class/subclasses.rb`): view_component's eager compile walks
+# `ViewComponent::Base.descendants` when the app eager loads.
+class Class
+  unless method_defined?(:descendants)
+    def descendants
+      subclasses.concat(subclasses.flat_map(&:descendants))
+    end
+  end
+end

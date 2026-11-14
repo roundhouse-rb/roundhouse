@@ -1,0 +1,18 @@
+class SafeString < String
+  def html_safe?: () -> bool
+  def html_safe: () -> SafeString
+  def to_s: () -> SafeString
+  def +: (untyped other) -> SafeString
+  def <<: (untyped other) -> SafeString
+  def concat: (untyped other) -> SafeString
+  def safe_concat: (untyped other) -> SafeString
+  def replace: (untyped other) -> SafeString
+  def insert: (Integer index, untyped other) -> SafeString
+  def prepend: (untyped other) -> SafeString
+  def []=: (untyped index, untyped other) -> untyped
+end
+
+class String
+  def html_safe: () -> SafeString
+  def html_safe?: () -> bool
+end

@@ -22197,6 +22197,14 @@ mod load_time_constants;
 mod doorkeeper;
 #[path = "emit_and_run/render_object.rs"]
 mod render_object;
+#[path = "support/ordered_options_app.rs"]
+mod ordered_options_app;
+#[path = "emit_and_run/ordered_options.rs"]
+mod ordered_options;
+#[path = "support/class_ext_app.rs"]
+mod class_ext_app;
+#[path = "emit_and_run/class_ext.rs"]
+mod class_ext;
 #[path = "support/view_component_gem.rs"]
 mod view_component_gem;
 #[path = "emit_and_run/view_component.rs"]

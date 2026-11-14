@@ -1,0 +1,6 @@
+class Class
+  def descendants: () -> Array[Class]
+  def module_parent_name: () -> String?
+  def module_parent: () -> Module
+  def module_parents: () -> Array[Module]
+end

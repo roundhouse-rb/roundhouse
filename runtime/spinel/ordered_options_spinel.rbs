@@ -1,0 +1,20 @@
+module ActiveSupport
+  class OrderedOptions
+    @values: Hash[untyped, untyped]
+    @default: untyped
+    @default_proc: Proc?
+
+    def initialize: (?untyped default) ?{ (OrderedOptions, Symbol) -> untyped } -> void
+    def []: (String | Symbol key) -> untyped
+    def dig: (String | Symbol key, *untyped rest) -> untyped
+    def []=: (String | Symbol key, untyped value) -> untyped
+    def merge!: (Hash[untyped, untyped] | OrderedOptions other) -> OrderedOptions
+    def keys: () -> Array[untyped]
+    def key?: (untyped key) -> bool
+    def fetch: (untyped key, *untyped default) ?{ (untyped) -> untyped } -> untyped
+    def to_h: () -> Hash[untyped, untyped]
+    def empty?: () -> bool
+    def method_missing: (Symbol name, *untyped args) -> untyped
+    def respond_to_missing?: (Symbol _name, bool _include_private) -> bool
+  end
+end

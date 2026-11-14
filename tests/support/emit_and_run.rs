@@ -577,6 +577,19 @@ pub struct Run {
     exited_zero: bool,
     pub stdout: String,
     pub stderr: String,
+    /// The last process's exit status, for a failure that printed nothing (a signal).
+    pub status: String,
+}
+
+fn command_of_status(status: &std::process::ExitStatus) -> &'static str {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if status.signal().is_some() {
+            return "killed by a signal";
+        }
+    }
+    if status.success() { "exited 0" } else { "exited non-zero" }
 }
 
 impl Run {
@@ -589,6 +602,7 @@ impl Run {
             exited_zero: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            status: format!("{} ({})", output.status, command_of_status(&output.status)),
         }
     }
 

@@ -1926,6 +1926,9 @@ jobs:
           # addressable and its public_suffix, built natively (tests/spinel_toolchain/addressable.rs).
           gem install --no-document --ignore-dependencies public_suffix -v 7.0.5
           gem install --no-document --ignore-dependencies addressable -v 2.9.0
+          # view_component and method_source, built natively (tests/spinel_toolchain/view_component.rs).
+          gem install --no-document --ignore-dependencies view_component -v 3.23.2
+          gem install --no-document --ignore-dependencies method_source -v 1.1.0
       # One process per test, as many as libtest's threads, so each test's seconds are its own.
       - name: run spinel_toolchain ignored suite (${{ matrix.shard }})
         env:

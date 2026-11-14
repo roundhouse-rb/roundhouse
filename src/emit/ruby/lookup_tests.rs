@@ -12,6 +12,7 @@ thread_local! {
     pub(super) static NAME_CLASS_VISITS: Cell<usize> = const { Cell::new(0) };
     pub(super) static CONSTANT_PATH_BUILDS: Cell<usize> = const { Cell::new(0) };
     pub(super) static BARE_MODULE_BUILDS: Cell<usize> = const { Cell::new(0) };
+    pub(super) static ROUTE_HELPER_BUILDS: Cell<usize> = const { Cell::new(0) };
 }
 
 fn uncached<T>(f: impl FnOnce() -> T) -> T {
@@ -34,6 +35,7 @@ fn reset() {
     NAME_CLASS_VISITS.set(0);
     BARE_MODULE_BUILDS.set(0);
     CONSTANT_PATH_BUILDS.set(0);
+    ROUTE_HELPER_BUILDS.set(0);
     demand::BUILDS.set(0);
     demand::MODEL_VISITS.set(0);
 }
@@ -275,12 +277,64 @@ fn whole_ruby_and_jruby_projects_are_scan_equivalent_and_pass_scoped() {
         assert_eq!(counts.0, counts.1);
         assert!(counts.0 >= 3 && counts.0 <= 5, "assembly, model/controller/view emit and library scopes: {counts:?}");
         assert!(counts.2 > 0 && counts.2 < 8, "per-pass demand builds, not per-model: {counts:?}");
+        // The route helpers: one build per installed index that asks, not one per lowered tree.
+        let route_builds = ROUTE_HELPER_BUILDS.get();
+        assert!(route_builds >= 1 && route_builds <= counts.1, "route helper builds {route_builds}, name indexes {}", counts.1);
+        reset();
         let scanned = uncached(|| crate::project::target_files(&app, &fixture, target).unwrap());
         assert_eq!(indexed, scanned);
+        assert!(ROUTE_HELPER_BUILDS.get() > route_builds, "the uncached emit builds the route helpers more often");
         assert!(NameIndex::current(&app).is_none());
         assert!(ConstantReaderIndex::current(&app).is_none());
-        println!("{target:?}: {} files byte-identical, reader/name/demand builds={counts:?}", indexed.len());
+        println!("{target:?}: {} files byte-identical, reader/name/demand builds={counts:?}, route helper builds={route_builds}", indexed.len());
     }
+}
+
+/// tiny-blog-uuid's string keys make `post_path` take a String id, so the
+/// route helpers' types change emitted bytes (`.id.to_s`): the cached types
+/// must be the ones a fresh build gives.
+#[test]
+fn route_helper_types_reach_the_emit_of_string_keyed_routes() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/tiny-blog-uuid");
+    let mut app = crate::ingest::ingest_app(&fixture).unwrap();
+    crate::session::analyze_and_lower(&mut app);
+    let ruby = crate::project::BuildTarget::Ruby;
+    reset();
+    let indexed = crate::project::target_files(&app, &fixture, ruby).unwrap();
+    let (route_builds, name_indexes) = (ROUTE_HELPER_BUILDS.get(), NAME_BUILDS.get());
+    assert!(route_builds >= 1 && route_builds <= name_indexes, "route helper builds {route_builds}, name indexes {name_indexes}");
+    let posts = indexed.iter().find(|(p, _)| p == "app/controllers/posts_controller.rb").expect("posts controller");
+    assert!(posts.1.contains("post_path(@post.id.to_s)"), "the String id type reaches the redirect: {}", posts.1);
+    assert_eq!(indexed, uncached(|| crate::project::target_files(&app, &fixture, ruby).unwrap()));
+}
+
+#[test]
+fn route_helpers_are_built_once_per_index_and_only_for_its_app() {
+    // A `direct` helper has no signature: it is a name `apply_helper_lowering` rewrites, without types.
+    let routes = |resource: &str| tree(&[("config/routes.rb", format!("Rails.application.routes.draw do\n resources :{resource}\n direct :homepage do\n  \"https://example.com\"\n end\nend\n").as_str())]);
+    let (articles, posts) = (routes("articles"), routes("posts"));
+    let read = |h: &RouteHelpers| (h.names.clone(), h.types.clone());
+    let scanned = |app: &App| uncached(|| read(&route_helpers_of(app)));
+    let (names, types) = scanned(&articles);
+    assert!(names.iter().any(|n| n.as_str() == "articles_path"));
+    assert!(names.iter().any(|n| n.as_str() == "homepage_path") && !types.0.contains_key("homepage_path"), "{names:?}");
+    assert_ne!(scanned(&articles), scanned(&posts), "the two apps must have different helpers");
+    reset();
+    {
+        let _guard = install_lookup_indexes(&articles);
+        let first = route_helpers_of(&articles);
+        assert!(std::rc::Rc::ptr_eq(&first, &route_helpers_of(&articles)), "asked twice, built once");
+        assert_eq!(read(&first), scanned(&articles));
+        assert_eq!(ROUTE_HELPER_BUILDS.get(), 1 + 1);
+        // Another app is not answered from this app's index.
+        assert_eq!(read(&route_helpers_of(&posts)), scanned(&posts));
+    }
+    // A new index for the same app builds again: the value lives with its index.
+    let _guard = install_lookup_indexes(&articles);
+    reset();
+    let again = read(&route_helpers_of(&articles));
+    assert_eq!(ROUTE_HELPER_BUILDS.get(), 1, "a new index builds again");
+    assert_eq!(again, scanned(&articles));
 }
 
 #[test]
@@ -349,6 +403,7 @@ fn installed_indexes_keep_the_app_and_models_slice_immutably_borrowed() {
         #[derive(Default)] struct App {
             models: Vec<Model>, controllers: Vec<Controller>, library_classes: Vec<LibraryClass>,
         }
+        struct RouteHelpers;
         fn walk_const_paths(_: &(), _: &mut BTreeSet<Vec<String>>) {}
         fn model_body_names(_: &[Model]) -> HashSet<Symbol> { HashSet::default() }
         fn declared_spellings(_: &App) -> HashMap<String, rbs::Spellings> { HashMap::default() }

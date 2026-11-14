@@ -1581,7 +1581,8 @@ impl Analyzer {
     /// the refined registry. Iterates to a fixed point (capped; see
     /// `FIXPOINT_CAP`) using a structural registry snapshot to detect convergence.
     pub fn analyze(&mut self, app: &mut App) {
-        crate::lower::i18n_translate::with_plan_cache(|| self.analyze_cached(app))
+        let catalog = std::sync::Arc::clone(&self.i18n);
+        crate::lower::i18n_translate::with_catalog_plans(&catalog, || self.analyze_cached(app))
     }
 
     fn analyze_cached(&mut self, app: &mut App) {

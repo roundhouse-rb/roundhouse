@@ -3584,11 +3584,8 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     // generated `RouteHelpers` module. (The view walker rewrites route
     // helpers in the URL positions it classifies; bare calls nested in
     // unclassified expressions fall through to this pass.)
-    let route_helpers: crate::det::HashSet<Symbol> =
-        crate::lower::lower_routes_to_library_functions(app)
-            .into_iter()
-            .map(|f| f.name)
-            .collect();
+    let helpers_of_routes = route_helpers_of(app);
+    let route_helpers = &helpers_of_routes.names;
     // App classes that `include Rails.application.routes.url_helpers`
     // (ingest records the marker as an include of RouteHelpers —
     // lobsters' Routes). Explicit `X.<helper>` call sites anywhere in
@@ -5870,7 +5867,8 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
     // two different questions and campfire answers them differently for
     // the same helper, so the projection has to read what the signature
     // actually says.
-    let (helper_param_tys, helper_keyword_tys) = route_helper_param_types(app);
+    let route_helpers = route_helpers_of(app);
+    let (helper_param_tys, helper_keyword_tys) = &route_helpers.types;
     let integer_columns = integer_columns(app);
     let mut sig = RecordSignals {
         all_models: &all_models,
@@ -5880,8 +5878,8 @@ pub(crate) fn apply_route_param_lowering(lcs: &mut [LibraryClass], app: &App) {
         collection_targets: &collection_targets,
         class_method_targets: &class_method_targets,
         direct_helpers: &direct_helpers,
-        helper_param_tys: &helper_param_tys,
-        helper_keyword_tys: &helper_keyword_tys,
+        helper_param_tys,
+        helper_keyword_tys,
         integer_columns: &integer_columns,
         controller_names: app
             .controllers
@@ -6237,6 +6235,8 @@ fn owned_singular_associations(app: &App) -> crate::det::HashSet<(String, String
 /// Each route helper's declared query keywords: `<helper>_path` -> key
 /// name -> declared type.
 type HelperKeywordTys = crate::det::HashMap<String, crate::det::HashMap<String, crate::ty::Ty>>;
+/// Each route helper's positional parameter types, and its keyword ones.
+type RouteHelperTypes = (crate::det::HashMap<String, Vec<crate::ty::Ty>>, HelperKeywordTys);
 
 /// Everything `arg_record_model` reads, in one place — the signal set
 /// grew past what a positional argument list explains.
@@ -6258,12 +6258,35 @@ type HelperKeywordTys = crate::det::HashMap<String, crate::det::HashMap<String, 
 /// Called BEFORE this pass mutates anything — the builder surveys the
 /// IR to size each helper, which is the ordering constraint
 /// `route_helper_receiver` already documents.
-fn route_helper_param_types(
-    app: &App,
-) -> (crate::det::HashMap<String, Vec<crate::ty::Ty>>, HelperKeywordTys) {
+///
+/// Built once per installed lookup index, with the helper names
+/// `apply_helper_lowering` reads: the helpers are a function of the
+/// borrowed `app` alone, and the emit runs both passes on every tree it
+/// lowers (controllers twice, models, views, library classes).
+fn route_helpers_of(app: &App) -> std::rc::Rc<RouteHelpers> {
+    match NameIndex::current(app) {
+        Some(index) => index.route_helpers.get_or_init(|| std::rc::Rc::new(build_route_helpers(app))).clone(),
+        None => std::rc::Rc::new(build_route_helpers(app)),
+    }
+}
+
+/// The app's route helpers as the emit's passes read them, from one run of
+/// the builder the emit ships.
+struct RouteHelpers {
+    /// Every generated helper's name.
+    names: crate::det::HashSet<Symbol>,
+    /// The `RouteHelpers` helpers' parameter types.
+    types: RouteHelperTypes,
+}
+
+fn build_route_helpers(app: &App) -> RouteHelpers {
+    #[cfg(test)]
+    lookup_tests::ROUTE_HELPER_BUILDS.with(|n| n.set(n.get() + 1));
+    let functions = crate::lower::routes_to_library::lower_routes_to_library_functions(app);
+    let names = functions.iter().map(|f| f.name.clone()).collect();
     let mut out = crate::det::HashMap::default();
     let mut keywords: HelperKeywordTys = crate::det::HashMap::default();
-    for f in crate::lower::routes_to_library::lower_routes_to_library_functions(app) {
+    for f in &functions {
         if f.module_path.last().map(|s| s.as_str()) != Some("RouteHelpers") {
             continue;
         }
@@ -6284,7 +6307,7 @@ fn route_helper_param_types(
                 .collect(),
         );
     }
-    (out, keywords)
+    RouteHelpers { names, types: (out, keywords) }
 }
 
 pub(crate) struct RecordSignals<'a> {
@@ -9846,6 +9869,8 @@ struct NameIndex {
     /// How each declared signature spelled its class names
     /// (`app.rbs_spellings`), by `Owner#method`, for `rbs::type_name`.
     written: HashMap<String, crate::rbs::Spellings>,
+    /// `route_helpers_of` this app, built at the first ask.
+    route_helpers: std::cell::OnceCell<std::rc::Rc<RouteHelpers>>,
     source_ptr: usize,
     source_len: usize,
 }
@@ -9887,6 +9912,7 @@ impl NameIndex {
             controllers: app.controllers.iter().map(|c| c.name.0.as_str().to_string()).collect(),
             library_classes,
             first_modules_bare: std::cell::OnceCell::new(),
+            route_helpers: std::cell::OnceCell::new(),
             constant_paths: std::cell::OnceCell::new(),
             file_constant_owners: std::cell::OnceCell::new(),
             written: declared_spellings(app),

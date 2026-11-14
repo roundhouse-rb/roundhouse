@@ -75,6 +75,55 @@ fn a_postgresql_primary_lowers_its_sql_for_postgresql_on_spinel() {
     assert!(!article.contains("Db.bind_"), "a read binds a `?` value:\n{article}");
 }
 
+/// The common deployed shape, a literal adapter beside a computed `url:`
+/// (#2011), selects the same tree.
+#[test]
+fn a_literal_adapter_beside_a_computed_url_selects_the_spinel_pg_tree() {
+    let (emitted, errors) = emit_and_run::real_blog()
+        .write(
+            "config/database.yml",
+            "default: &default\n  adapter: postgresql\n  url: <%= ENV[\"DATABASE_URL\"] %>\n\ntest:\n  <<: *default\n\nproduction:\n  <<: *default\n",
+        )
+        .emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(read(&emitted, "runtime/db.rb").contains("Primitive Db surface over PostgreSQL"));
+    assert!(read(&emitted, "spin.toml").contains("roundhouse-rb/spinel-pg"));
+}
+
+/// A table with no primary key (`id: false`, a join table) has no
+/// sequence for PostgreSQL to read an inserted key from, and Rails reads
+/// none: the record's id stays nil. The insert writes the row and reads
+/// no key, on both targets that run PostgreSQL. SQLite keeps its rowid read.
+#[test]
+fn an_insert_into_a_keyless_table_reads_no_key_on_postgresql() {
+    let keyless = |database_yml: &str| {
+        emit_and_run::real_blog()
+            .write("config/database.yml", database_yml)
+            .edit(
+                "db/schema.rb",
+                "  create_table \"comments\"",
+                "  create_table \"stars\", id: false, force: :cascade do |t|\n    t.bigint \"article_id\", null: false\n  end\n\n  create_table \"comments\"",
+            )
+            .write("app/models/star.rb", "class Star < ApplicationRecord\nend\n")
+    };
+    let insert = |model: &str| {
+        let start = model.find("def _adapter_insert").expect("_adapter_insert");
+        let end = model[start..].find("\n  end\n").map(|at| start + at).expect("end of _adapter_insert");
+        model[start..end].to_string()
+    };
+    for target in [BuildTarget::Spinel, BuildTarget::Ruby] {
+        let (emitted, errors) = keyless(POSTGRESQL_DATABASE_YML).emit(target);
+        assert!(errors.is_empty(), "{target:?}: {errors:#?}");
+        let body = insert(&read(&emitted, "app/models/star.rb"));
+        assert!(body.contains("INSERT INTO stars") && !body.contains("last_insert_rowid"), "{target:?}:\n{body}");
+        // A keyed table still reads its key back.
+        assert!(insert(&read(&emitted, "app/models/article.rb")).contains("last_insert_rowid"), "{target:?}");
+    }
+    let (emitted, errors) = keyless("test:\n  adapter: sqlite3\n  database: \":memory:\"\n").emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(insert(&read(&emitted, "app/models/star.rb")).contains("last_insert_rowid"));
+}
+
 #[test]
 fn a_sqlite_primary_keeps_the_sqlite_spinel_tree() {
     let (emitted, errors) = emit_and_run::real_blog().emit(BuildTarget::Spinel);

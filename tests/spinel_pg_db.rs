@@ -45,17 +45,20 @@ fn spinel_pg_shims_pass_the_contract_and_postgres_cases() {
 const POSTGRESQL_DATABASE_YML: &str = "default: &default\n  adapter: postgresql\n  encoding: unicode\n\ndevelopment:\n  <<: *default\n  database: blog_development\n\ntest:\n  <<: *default\n  database: blog_test\n";
 
 /// The blog on PostgreSQL, with a boolean column a lowered `where`
-/// compares with a literal, and two tests of its own: that literal is
-/// PostgreSQL's `TRUE` (SQLite's `1` is an error against a boolean), and
-/// the test runs in the schema its helper made for this process.
+/// compares with a literal, a table with no primary key, and three tests
+/// of its own: that literal is PostgreSQL's `TRUE` (SQLite's `1` is an
+/// error against a boolean), a row goes into the keyless table (which has
+/// no sequence to read a key from), and the test runs in the schema its
+/// helper made for this process.
 fn postgresql_blog() -> emit_and_run::Overlay {
     emit_and_run::real_blog()
         .write("config/database.yml", POSTGRESQL_DATABASE_YML)
         .edit(
             "db/schema.rb",
             "    t.text \"body\"\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"comments\"",
-            "    t.text \"body\"\n    t.boolean \"published\", default: false, null: false\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"comments\"",
+            "    t.text \"body\"\n    t.boolean \"published\", default: false, null: false\n    t.datetime \"created_at\", null: false\n    t.datetime \"updated_at\", null: false\n  end\n\n  create_table \"stars\", id: false, force: :cascade do |t|\n    t.bigint \"article_id\", null: false\n  end\n\n  create_table \"comments\"",
         )
+        .write("app/models/star.rb", "class Star < ApplicationRecord\nend\n")
         .edit(
             "app/models/article.rb",
             "class Article < ApplicationRecord\n",
@@ -64,7 +67,7 @@ fn postgresql_blog() -> emit_and_run::Overlay {
         .edit(
             "test/models/article_test.rb",
             "class ArticleTest < ActiveSupport::TestCase\n",
-            "class ArticleTest < ActiveSupport::TestCase\n  test \"counts published articles\" do\n    assert_equal 0, Article.published_count\n    articles(:one).update!(published: true)\n    assert_equal 1, Article.published_count\n  end\n\n  test \"runs in a schema of its own\" do\n    schema = Article.connection.select_all(\"SELECT current_schema() AS name\").to_a.first[\"name\"]\n    assert schema.start_with?(\"rh_test_\"), schema\n  end\n\n",
+            "class ArticleTest < ActiveSupport::TestCase\n  test \"counts published articles\" do\n    assert_equal 0, Article.published_count\n    articles(:one).update!(published: true)\n    assert_equal 1, Article.published_count\n  end\n\n  test \"stars an article in a table with no key\" do\n    Star.create!(article_id: articles(:one).id)\n    assert_equal 1, Star.where(article_id: articles(:one).id).count\n  end\n\n  test \"runs in a schema of its own\" do\n    schema = Article.connection.select_all(\"SELECT current_schema() AS name\").to_a.first[\"name\"]\n    assert schema.start_with?(\"rh_test_\"), schema\n  end\n\n",
         )
 }
 
@@ -72,8 +75,8 @@ fn postgresql_blog() -> emit_and_run::Overlay {
 /// and run on a server: its helper makes the process a schema of its own
 /// (search_path through PGOPTIONS, which spinel-pg sends on each
 /// connection) and loads the boot DDL and the fixtures there; the tests
-/// read, validate, update and destroy through the PostgreSQL SQL the emit
-/// lowered; the schema is dropped at exit.
+/// read, insert, validate, update and destroy through the PostgreSQL SQL
+/// the emit lowered; the schema is dropped at exit.
 #[test]
 #[ignore = "requires Spinel, SPINEL_PG_DIR (a spinel-pg checkout) and ROUNDHOUSE_PG_TEST_URL (PostgreSQL)"]
 fn an_emitted_apps_test_runs_natively_on_postgresql() {
@@ -112,7 +115,7 @@ fn an_emitted_apps_test_runs_natively_on_postgresql() {
         db_contract::LANE_DEADLINE,
         "Spinel did not leave the compiled test behind",
     );
-    assert!(stdout.contains("ArticleTest: 6 tests passed"), "{stdout}");
+    assert!(stdout.contains("ArticleTest: 7 tests passed"), "{stdout}");
 }
 
 /// `(owner, name)` for every `def` in a Ruby or RBS source, with `self.`

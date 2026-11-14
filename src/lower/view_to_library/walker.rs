@@ -457,6 +457,14 @@ fn walk_stmt(stmt: &Expr, ctx: &ViewCtx) -> Vec<Expr> {
                     return vec![assign_accumulator_string_new(disc), stmt];
                 }
             }
+            // `<% page_title "Orders" %>`: an app helper called for its
+            // effect (a `content_for` deposit), its value discarded, as
+            // Rails' `<% %>` does. It takes the same rewrite an output
+            // tag's helper call does. A template local of that name is
+            // the local, not the helper.
+            if ctx.app_helper_names.contains(method.as_str()) && !ctx.binds_local(method.as_str()) {
+                return vec![rewrite_helpers_in_expr(stmt, ctx)];
+            }
             vec![todo_io_append("unknown stmt", stmt.span)]
         }
         // `<% case action_name when "all" %>…<% when … %>…<% end %>` at

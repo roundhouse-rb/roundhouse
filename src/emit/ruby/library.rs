@@ -4481,9 +4481,12 @@ fn is_framework_view_helper(name: &str) -> bool {
             // The general asset helper beside the image one — same
             // body, and campfire asks it for an mp3.
             | "asset_path"
-            // The general asset helper beside the image one — same
-            // body, and campfire asks it for an mp3.
             | "image_url"
+            // The absolute form of `asset_path`, beside `image_url`. An
+            // app helper's own `asset_url` still wins: the helper index
+            // is asked first, as `helper :all` mixes app helpers in above
+            // ActionView's.
+            | "asset_url"
             | "path_to_javascript"
             | "javascript_path"
             | "javascript_include_tag"

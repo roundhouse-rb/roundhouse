@@ -22255,3 +22255,5 @@ mod view_keyword_splat;
 mod link_to_app_helper_path;
 #[path = "emit_and_run/partial_object_as.rs"]
 mod partial_object_as;
+#[path = "emit_and_run/helper_asset_url.rs"]
+mod helper_asset_url;

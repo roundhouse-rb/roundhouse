@@ -98,6 +98,30 @@ module ActionView
       )
     end
 
+    # The ruby family's `asset_url` and `image_url` (see the universal
+    # bodies in view_helpers.rb): the asset's path on the request's origin,
+    # as Rails' `url_to_asset` answers it with no `asset_host`
+    # (`compute_asset_host`'s `request.base_url`, for an absolute path
+    # too). A full URL, a protocol-relative one and a `data:` or `cid:`
+    # source pass as given. Outside a request Rails has no host to add,
+    # and neither does this.
+    def self.asset_url(source, skip_pipeline: false)
+      return source if asset_url?(source)
+      path = skip_pipeline || source.start_with?("/") ? source : asset_path(source)
+      request_asset_url(path)
+    end
+
+    def self.image_url(source, skip_pipeline: false)
+      return source if asset_url?(source)
+      path = skip_pipeline || source.start_with?("/") ? source : image_path(source)
+      request_asset_url(path)
+    end
+
+    def self.request_asset_url(path)
+      return path if ActionController::Current.request.nil?
+      url_for_path(path)
+    end
+
     def self.digested_asset_path(source)
       cut = source.length
       query = source.index("?")

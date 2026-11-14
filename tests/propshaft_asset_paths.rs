@@ -40,6 +40,10 @@ html = out.string
 raise html unless html.include?("200")
 raise html unless html.include?(%(<link rel="stylesheet" href="/assets/application-55c8a0db.css" />))
 %w[/assets/application-55c8a0db.css /assets/icons/icon-d6065022.svg /assets/boot-cf177f03.js].each { |path| raise html unless html.include?(path) }
+# The helpers below are called outside a request, where `image_url` has
+# no host to add (Rails' `compute_asset_host`); the dispatch above leaves
+# its request current.
+ActionController::Current.request = nil
 h = ActionView::ViewHelpers
 raise unless h.asset_path("application.css?v=1#shape") == "/assets/application-55c8a0db.css?v=1#shape"
 raise unless h.asset_path("application.css#shape?v=1") == "/assets/application-55c8a0db.css#shape?v=1"

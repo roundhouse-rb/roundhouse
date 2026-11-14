@@ -10,6 +10,9 @@ module ActionView
     def self.back_url: () -> String
     def self.url_for_options: (String path, Hash[Symbol, untyped] options) -> String
     def self.digested_asset_path: (String source) -> String
+    def self.asset_url: (String source, ?skip_pipeline: bool) -> String
+    def self.image_url: (String source, ?skip_pipeline: bool) -> String
+    def self.request_asset_url: (String path) -> String
     def self.class_names: (*(String | Symbol | Integer | bool | Hash[String | Symbol, untyped] | Array[untyped] | nil) args) -> String
     def self.number_helper_for_template: (Symbol method, Object value, ?Hash[Symbol | String, number_option_value] options) -> String?
     def self.number_with_delimiter: (Object value, ?Hash[Symbol | String, number_option_value] options) -> String?

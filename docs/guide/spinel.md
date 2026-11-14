@@ -197,7 +197,8 @@ libpq's `PG*` variables (`PGHOST`, `PGUSER`, ...), and at boot creates
 the tables of the app's schema that are missing. `DATABASE_URL`
 takes no query parameters, so no TLS. Each compiled test file runs in a
 PostgreSQL schema of its own, created when it starts and dropped when it
-exits.
+exits; every connection of the pool takes it as its `search_path`, as
+Rails' `schema_search_path` setting does.
 
 Not carried yet: array columns (`array: true`), which are stored as
 JSON text; `db/structure.sql` loaded as written; and `lock: true` /

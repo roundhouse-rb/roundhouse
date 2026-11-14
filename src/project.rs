@@ -6559,16 +6559,18 @@ else\n  \
 at_exit(&_drop_test_schema)\n\
 end\n";
     // A compiled test file runs its tests inline and exits, so at_exit
-    // comes after them. spinel-pg sends PGOPTIONS from 0.2.1.
+    // comes after them. spinel-pg does not read PGOPTIONS, so the schema
+    // goes to Db.configure as Rails' `schema_search_path`, which db_pg.rb
+    // sets on every connection the pool opens.
     const TEST_POSTGRESQL_SPINEL: &str = "# PostgreSQL (apply_postgresql_tree): the server DATABASE_URL names,\n\
 # else libpq's PG* variables, in a schema of this test process's own,\n\
 # created here and dropped at exit, after the file's tests have run.\n\
-# search_path rides PGOPTIONS, which spinel-pg sends on every connection\n\
-# the pool opens. The pid comes first, so cutting a long file name to\n\
-# PostgreSQL's 63 bytes keeps it.\n\
+# Every connection of the pool resolves the tables to it: Db.configure\n\
+# sets it as the search_path, as Rails' `schema_search_path`. The pid\n\
+# comes first, so cutting a long file name to PostgreSQL's 63 bytes\n\
+# keeps it.\n\
 TEST_SCHEMA = (\"rh_test_\" + Process.pid.to_s + \"_\" + File.basename($0, \".rb\").gsub(/[^a-z0-9_]/, \"_\"))[0, 63]\n\
-ENV[\"PGOPTIONS\"] = \"-c search_path=\" + TEST_SCHEMA\n\
-Db.configure(ENV.fetch(\"DATABASE_URL\", \"\"))\n\
+Db.configure(ENV.fetch(\"DATABASE_URL\", \"\"), schema_search_path: TEST_SCHEMA)\n\
 Db.exec(\"DROP SCHEMA IF EXISTS \" + TEST_SCHEMA + \" CASCADE\")\n\
 Db.exec(\"CREATE SCHEMA \" + TEST_SCHEMA)\n\
 at_exit { Db.exec(\"DROP SCHEMA IF EXISTS \" + TEST_SCHEMA + \" CASCADE\") }\n";
@@ -14312,9 +14314,8 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             "# PostgreSQL, which config/database.yml names: spinel-pg, pure Ruby\n\
              # over sp_net, under runtime/db.rb. Git form for the reason bcrypt\n\
              # gives above: the index's pg is 0.1.0, which predates the\n\
-             # extended query protocol runtime/db.rb runs on. 0.2.1 sends\n\
-             # PGOPTIONS, which test/test_helper.rb's schema rides.\n\
-             pg = { git = \"https://github.com/roundhouse-rb/spinel-pg\", ref = \"v0.2.1\" }\n",
+             # extended query protocol runtime/db.rb runs on (0.2.0).\n\
+             pg = { git = \"https://github.com/roundhouse-rb/spinel-pg\", ref = \"v0.2.0\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));

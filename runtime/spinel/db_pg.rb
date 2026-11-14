@@ -26,6 +26,8 @@
 #                          libpq PG* environment variables as fallbacks.
 #                          No TLS, unix sockets or query parameters; a
 #                          URL that asks for them is refused.
+#                          `schema_search_path:` sets search_path on
+#                          every connection, as Rails' key of that name.
 #   Db.prepare(sql)      — a statement handle (an Integer) on the current
 #                          connection. SQL spells its placeholders $1, $2…
 #   Db.bind_*(h, i, v)   — one-based, as with SQLite; values travel as
@@ -85,14 +87,22 @@ require_relative "pg_driver"
 # variables, then libpq's defaults (localhost:5432, database named after
 # the user).
 class PgConfig
-  def initialize(url)
+  def initialize(url, search_path = "")
     @host = PgUrl.env("PGHOST", "localhost")
     @port = PgUrl.env("PGPORT", "5432").to_i
     @user = PgUrl.env("PGUSER", PgUrl.env("USER", "postgres"))
     @password = PgUrl.env("PGPASSWORD", "")
     @database = PgUrl.env("PGDATABASE", "")
+    @search_path = search_path
     parse(url) if url != ""
     @database = @user if @database == ""
+  end
+
+  # Rails' `schema_search_path`: what its PostgreSQL adapter sets with
+  # `SET search_path TO <value>` on each connection it opens. "" leaves
+  # the server's own.
+  def search_path
+    @search_path
   end
 
   def host
@@ -415,6 +425,17 @@ class PgConn
     if c.nil?
       cfg = @config
       c = PgDriver.open(cfg.host, cfg.port, cfg.database, cfg.user, cfg.password)
+      # The configured schema_search_path, on every connection before its
+      # first use, as Rails' adapter sets it; a session that cannot take
+      # it is closed rather than kept.
+      if cfg.search_path != ""
+        begin
+          c.exec("SET search_path TO " + cfg.search_path)
+        rescue PG::Error => e
+          c.close
+          raise e
+        end
+      end
       @client = c
     end
     c
@@ -786,8 +807,10 @@ module Db
 
   # Pool size: kwarg, overridden by DATABASE_POOL_SIZE as in db.rb. The
   # first connection opens here, so a wrong URL or password fails at
-  # boot rather than on the first request.
-  def self.configure(url, pool_size: 8)
+  # boot rather than on the first request. `schema_search_path:` is
+  # Rails' database.yml key of that name: set on every connection the
+  # pool opens (PgConn#client).
+  def self.configure(url, pool_size: 8, schema_search_path: "")
     @sql_trace = ENV.fetch("RH_SQL_TRACE", "") != ""
     n = pool_size
     ev = ENV["DATABASE_POOL_SIZE"]
@@ -803,7 +826,7 @@ module Db
     stripes = 8 if stripes > 8
     per = n / stripes
     per = 1 if per < 1
-    config = PgConfig.new(url.to_s)
+    config = PgConfig.new(url.to_s, schema_search_path)
     @database = config.database
     pools = []
     i = 0

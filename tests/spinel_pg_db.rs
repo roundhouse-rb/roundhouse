@@ -73,8 +73,8 @@ fn postgresql_blog() -> emit_and_run::Overlay {
 
 /// The emitted blog's model test, compiled with Spinel against spinel-pg
 /// and run on a server: its helper makes the process a schema of its own
-/// (search_path through PGOPTIONS, which spinel-pg sends on each
-/// connection) and loads the boot DDL and the fixtures there; the tests
+/// (Db.configure's `schema_search_path:`, set on each connection the pool
+/// opens) and loads the boot DDL and the fixtures there; the tests
 /// read, insert, validate, update and destroy through the PostgreSQL SQL
 /// the emit lowered; the schema is dropped at exit.
 #[test]

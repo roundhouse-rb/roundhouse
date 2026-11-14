@@ -107,6 +107,10 @@ in `src/project.rs`. Shape notes worth knowing:
     class through `runtime/spinel/pg_errors.rb`.
   - A transaction keeps its connection, and a lease that ends inside
     one rolls it back.
+  - `Db.configure(url, schema_search_path: "a,b")` sets `search_path` on
+    every connection the pool opens, as Rails' `schema_search_path` does;
+    the Spinel tree's test helper puts each test process in its own schema
+    this way.
   - The pool is sharded per thread, as `runtime/spinel/db.rb`'s is.
     `Db.prepare` runs through a named statement cached per connection
     (at most 128, closed on the server when evicted); finalizing a read

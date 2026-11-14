@@ -10,7 +10,10 @@
 # treats it as Integer here — sufficient for the lowered IR; per-target
 # narrowing happens at emit time.
 module Db
-  def self.configure: (String, ?pool_size: Integer) -> void
+  # `schema_search_path:` is Rails' database.yml key of that name, which
+  # only a PostgreSQL shim reads (runtime/spinel/db_pg.rb sets it on every
+  # connection); the SQLite shims have no schemas and don't take it.
+  def self.configure: (String, ?pool_size: Integer, ?schema_search_path: String) -> void
   # `ActiveRecord::Base.connection_db_config` and `transaction_open?`
   # (runtime/spinel/active_record_db_config.rb): the configured
   # database, the adapter name Rails reports for it, and whether the

@@ -35,11 +35,11 @@ fn a_postgresql_primary_ships_the_spinel_pg_tree() {
     let driver = read(&emitted, "runtime/pg_driver.rb");
     assert!(driver.contains("PG.connect(host, port, database, user, password)"), "runtime/pg_driver.rb is not spinel-pg's:\n{driver}");
 
-    // spinel-pg as a spin dependency, pinned to the release that sends
-    // PGOPTIONS, which the test helper's schema rides.
+    // spinel-pg as a spin dependency, pinned to its release with the
+    // extended query protocol.
     let manifest = read(&emitted, "spin.toml");
     assert!(
-        manifest.contains("pg = { git = \"https://github.com/roundhouse-rb/spinel-pg\", ref = \"v0.2.1\" }"),
+        manifest.contains("pg = { git = \"https://github.com/roundhouse-rb/spinel-pg\", ref = \"v0.2.0\" }"),
         "{manifest}"
     );
     let gemfile = read(&emitted, "Gemfile");
@@ -53,10 +53,11 @@ fn a_postgresql_primary_ships_the_spinel_pg_tree() {
     assert!(main.contains("PostgreSQL: DATABASE_URL"), "--help still names the SQLite file");
 
     // Each test process works in a schema of its own, which every pooled
-    // connection reaches through PGOPTIONS.
+    // connection reaches as its schema_search_path.
     let helper = read(&emitted, "test/test_helper.rb");
     assert!(!helper.contains("Db.configure(_test_db_path)\n"), "{helper}");
-    assert!(helper.contains("ENV[\"PGOPTIONS\"] = \"-c search_path=\" + TEST_SCHEMA\n"), "{helper}");
+    assert!(helper.contains("Db.configure(ENV.fetch(\"DATABASE_URL\", \"\"), schema_search_path: TEST_SCHEMA)\n"), "{helper}");
+    assert!(!helper.contains("PGOPTIONS"), "{helper}");
     assert!(helper.contains("at_exit { Db.exec(\"DROP SCHEMA IF EXISTS \" + TEST_SCHEMA + \" CASCADE\") }"), "{helper}");
 }
 

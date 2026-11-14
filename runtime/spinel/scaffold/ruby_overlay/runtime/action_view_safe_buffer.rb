@@ -46,6 +46,13 @@ module ActionView
       SafeString.new(value.to_s)
     end
 
+    # `safe_join` answers a SafeBuffer in Rails, so an `h(...)` of what it
+    # joined (a helper's, or a value handed on) leaves the markup alone.
+    # The parts are joined as the shared body joins them.
+    def self.safe_join(parts, separator = "")
+      SafeString.new(parts.join(separator))
+    end
+
     # Rails' `content_for?` is `present?`-based: a slot holding only
     # whitespace counts as UNSET. The block form always deposits the
     # template's newlines, so a guard-suppressed `content_for :subnav

@@ -22257,3 +22257,5 @@ mod link_to_app_helper_path;
 mod partial_object_as;
 #[path = "emit_and_run/helper_asset_url.rs"]
 mod helper_asset_url;
+#[path = "emit_and_run/safe_join_safe.rs"]
+mod safe_join_safe;

@@ -22253,3 +22253,5 @@ mod helper_view_context;
 mod view_keyword_splat;
 #[path = "emit_and_run/link_to_app_helper_path.rs"]
 mod link_to_app_helper_path;
+#[path = "emit_and_run/partial_object_as.rs"]
+mod partial_object_as;

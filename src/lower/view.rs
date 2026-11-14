@@ -546,11 +546,12 @@ fn classify_render_kwargs(entries: &[(Expr, Expr)]) -> Option<RenderPartial<'_>>
                 }
             }
             Some("collection") => collection = Some(v),
-            Some("as") => {
-                if let ExprNode::Lit { value: Literal::Sym { value } } = &*v.node {
-                    as_name = Some(value.as_str());
-                }
-            }
+            // `as: :name` or `as: "name"`: Rails takes `as.to_sym`.
+            Some("as") => match &*v.node {
+                ExprNode::Lit { value: Literal::Sym { value } } => as_name = Some(value.as_str()),
+                ExprNode::Lit { value: Literal::Str { value } } => as_name = Some(value.as_str()),
+                _ => {}
+            },
             // Which formats the partial is looked up in, not a local
             // (`render_formats_option`).
             Some("formats") => {}

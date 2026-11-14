@@ -198,6 +198,7 @@ fn tiny_blog_round_trips() {
         gem_middleware_args: Default::default(),
         gem_middleware_blocks: Default::default(),
         rack_env_writes: Default::default(),
+        app_outermost_middlewares: vec!["OuterGate".to_string(), "InnerGate".to_string()],
         gem_middleware_refusals: Vec::new(),
         included_hoist_conflicts: Vec::new(),
         superclass_refusals: Vec::new(),

@@ -757,8 +757,8 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     let stacked_application_uses = stack.application_taken;
     let middleware_loops = stack.loops;
     let env_writes_by_class = stack.env_writes_by_class;
-    (app.gem_middlewares, app.gem_middleware_blocks, app.rack_env_writes, app.gem_middleware_refusals) =
-        (stack.classes, stack.blocks, stack.env_writes, stack.diags);
+    (app.gem_middlewares, app.gem_middleware_blocks, app.rack_env_writes, app.app_outermost_middlewares, app.gem_middleware_refusals) =
+        (stack.classes, stack.blocks, stack.env_writes, stack.outermost, stack.diags);
     // `enum` columns declared inside a concern's `included do`, keyed by
     // the module. Local rather than a field on `App`: they exist only
     // until the splice folds them into each including model's own

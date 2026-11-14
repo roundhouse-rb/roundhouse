@@ -1,6 +1,8 @@
-//! The app's own `config.middleware.use(Klass)` in config/application.rb,
-//! of a class the app itself defines: the middleware sits where Rails puts
-//! it, inside RequestId and before the routes.
+//! The app's own `config.middleware.use(Klass)` and
+//! `config.middleware.insert_before(0, Klass)` in config/application.rb, of a
+//! class the app itself defines: each middleware sits where Rails puts it
+//! (`use` inside RequestId and before the routes, position 0 in front of the
+//! static file server and RequestId).
 
 use roundhouse::build_target::BuildTarget;
 
@@ -19,11 +21,26 @@ const PROBE_USE: &str = r#"class ProbeUse
 end
 "#;
 
+const PROBE_GATE: &str = r#"class ProbeGate
+  def initialize(app)
+    @app = app
+  end
+
+  def call(env)
+    path = env["PATH_INFO"]
+    return [403, { "content-type" => "text/plain", "content-length" => "0" }, []] if path == "/gate" || path == "/robots.txt"
+    return [200, { "x-listener" => env["roundhouse.listener"].to_s }, []] if path == "/listener"
+
+    @app.call(env)
+  end
+end
+"#;
+
 const AUTOLOAD: &str = "    config.autoload_lib(ignore: %w[assets tasks])\n";
 
 /// The blog with `ProbeUse` in lib/ and `lines` in its Application class body.
 pub(crate) fn with_application_lines(overlay: emit_and_run::Overlay, lines: &str) -> emit_and_run::Overlay {
-    overlay.write("lib/probe_use.rb", PROBE_USE).edit("config/application.rb", AUTOLOAD, &format!("{AUTOLOAD}{lines}"))
+    overlay.write("lib/probe_use.rb", PROBE_USE).write("lib/probe_gate.rb", PROBE_GATE).edit("config/application.rb", AUTOLOAD, &format!("{AUTOLOAD}{lines}"))
 }
 
 const ASSERTIONS: &str = r#"
@@ -145,4 +162,242 @@ puts "cookies passed"
     let out = std::process::Command::new("ruby").args(["-e", &script]).output().expect("spawn ruby");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("cookies passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+const OUTERMOST_ASSERTIONS: &str = r#"
+require "rack"
+app, = Rack::Builder.parse_file("config.ru")
+get = ->(path) { app.call(Rack::MockRequest.env_for("http://localhost#{path}")) }
+
+# In front of the static file server: the gate answers for a file under public/.
+status, _headers, _body = get.("/robots.txt")
+raise "public file: #{status}" unless status == 403
+# In front of Rails' RequestId: the gate's own answer carries no request id.
+status, headers, body = get.("/gate")
+raise "gate: #{status} #{headers.inspect}" unless status == 403 && headers["x-request-id"].nil? && body.to_a.empty?
+status, headers, _body = get.("/articles")
+raise "past the gate: #{status} #{headers.inspect}" unless status == 200 && !headers["x-request-id"].to_s.empty?
+puts "outermost app middleware passed"
+"#;
+
+#[test]
+fn an_app_middleware_inserted_at_0_answers_in_front_of_the_static_files_and_request_id() {
+    let run = with_application_lines(emit_and_run::real_blog(), "    config.middleware.insert_before 0, ProbeGate\n")
+        .run_ruby(OUTERMOST_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("outermost app middleware passed"), "{}", run.stdout);
+}
+
+#[test]
+fn the_spinel_tree_stacks_middleware_inserted_at_0_around_dispatch_app() {
+    let lines = "    config.middleware.insert_before 0, ProbeGate\n    config.middleware.insert_before 0, ProbeUse\n";
+    let (tree, errors) = with_application_lines(emit_and_run::real_blog(), lines).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let stack = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    // A later insertion at 0 goes in front of an earlier one, as in Rails.
+    assert!(stack.contains("@stack ||= ProbeUse.new(ProbeGate.new(Rest.new))"), "{stack}");
+    let main = std::fs::read_to_string(tree.join("main.rb")).expect("main.rb");
+    assert!(main.contains("unless RequestHooks.request_begin(req, res)\n      OutermostMiddleware.dispatch(req, res)\n"), "{main}");
+}
+
+// Not served over HTTP: the Spinel toolchain lane builds no tree with app middleware, so the emitted adapter runs on CRuby over a stand-in server.
+#[test]
+fn the_spinel_adapter_answers_from_the_middleware_inserted_at_0() {
+    let (tree, errors) =
+        with_application_lines(emit_and_run::real_blog(), "    config.middleware.insert_before 0, ProbeGate\n").emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let adapter = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    let script = format!(
+        r#"{adapter}
+{PROBE_GATE}
+module Tep
+  def self.str_hash = {{}}
+end
+Res = Struct.new(:status, :headers, :body, :file_path, :streaming, :set_cookies, :header_fields)
+Req = Struct.new(:verb, :path, :raw_query, :remote_host, :http_version, :req_headers, :raw_body, :listener_transport)
+module Main
+  def self.dispatch_app(req, res)
+    res.status = 200
+    res.headers["x-request-id"] = "id"
+    res.headers["x-app"] = req.path
+    res.body = +""
+    res.file_path = +"public/robots.txt" if req.path == "/robots.txt"
+    res.file_path = +"public/icon.png" if req.path == "/icon.png"
+  end
+end
+def run(path, listener = "tcp")
+  res = Res.new(0, {{}}, +"", +"", false, [], [])
+  OutermostMiddleware.dispatch(Req.new("GET", path, "", "127.0.0.1", "HTTP/1.1", {{}}, "", listener), res)
+  res
+end
+# The gate's own answer replaces the file the static server would send, and carries only its own headers.
+res = run("/robots.txt")
+raise "gate: #{{res.to_h}}" unless res.status == 403 && res.file_path == "" && res.body == "" && res.headers == {{ "content-type" => "text/plain", "content-length" => "0" }}
+# Past the gate the rest of the stack answers as it would alone: the file is still sent.
+res = run("/icon.png")
+raise "file: #{{res.to_h}}" unless res.status == 200 && res.file_path == "public/icon.png" && res.headers["x-request-id"] == "id"
+# The env names the listener that accepted the connection, as the env of the `use` stack does.
+%w[unix tcp].each do |listener|
+  res = run("/listener", listener)
+  raise "listener #{{listener}}: #{{res.to_h}}" unless res.headers == {{ "x-listener" => listener }}
+end
+puts "outermost adapter passed"
+"#
+    );
+    let out = std::process::Command::new("ruby").args(["-e", &script]).output().expect("spawn ruby");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("outermost adapter passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+const PROBE_COPY: &str = r#"class ProbeCopy
+  def initialize(app)
+    @app = app
+  end
+
+  def call(env)
+    status, headers, body = @app.call(env)
+    return [status, headers.merge("x-copied" => "yes"), body] if env["PATH_INFO"] == "/copy"
+
+    [status, headers, body]
+  end
+end
+"#;
+
+// Not served over HTTP, as the adapter test above: the emitted adapter runs on CRuby over a stand-in server.
+#[test]
+fn the_middleware_inserted_at_0_gets_the_session_cookie_and_a_copy_of_the_headers_keeps_it() {
+    let (tree, errors) = with_application_lines(emit_and_run::real_blog(), "    config.middleware.insert_before 0, ProbeCopy\n")
+        .write("lib/probe_copy.rb", PROBE_COPY)
+        .emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let adapter = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    let script = format!(
+        r#"{adapter}
+{PROBE_COPY}
+module Tep
+  def self.str_hash = {{}}
+end
+Res = Struct.new(:status, :headers, :body, :file_path, :streaming, :set_cookies, :header_fields)
+Req = Struct.new(:verb, :path, :raw_query, :remote_host, :http_version, :req_headers, :raw_body, :listener_transport)
+COOKIE = "_session=abc; path=/; HttpOnly; SameSite=Lax"
+module Main
+  # The session middleware's commit: the cookie is on the server's response, not in its headers.
+  def self.dispatch_app(req, res)
+    res.status = 200
+    res.headers["x-request-id"] = "id"
+    res.body = +"page"
+    res.set_cookies << COOKIE
+  end
+end
+def run(path)
+  res = Res.new(0, {{}}, +"", +"", false, [], [])
+  OutermostMiddleware.dispatch(Req.new("GET", path, "", "127.0.0.1", "HTTP/1.1", {{}}, "", "tcp"), res)
+  res
+end
+# A copy of the headers keeps the cookie, as a copy of Rails' headers does.
+res = run("/copy")
+raise "copy: #{{res.to_h}}" unless res.set_cookies == [COOKIE] && res.headers == {{ "x-request-id" => "id", "x-copied" => "yes" }} && res.body == "page"
+# The same Hash handed back: the cookie once, and not left among the headers.
+res = run("/articles")
+raise "same: #{{res.to_h}}" unless res.set_cookies == [COOKIE] && res.headers == {{ "x-request-id" => "id" }} && res.body == "page"
+puts "outermost cookies passed"
+"#
+    );
+    let out = std::process::Command::new("ruby").args(["-e", &script]).output().expect("spawn ruby");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("outermost cookies passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+const OUTERMOST_AND_USE: &str = "    config.middleware.insert_before 0, ProbeGate\n    config.middleware.use ProbeUse\n";
+
+/// The test harness's request through `OutermostMiddleware.around`: the gate at 0 answers first, then the `use` stack, then the routes.
+const HARNESS_ASSERTIONS: &str = r#"
+routed = []
+harness = ->(path) { OutermostMiddleware.around({ "PATH_INFO" => path }) { |env| routed << env["PATH_INFO"]; [200, {}, ["routed"]] } }
+status, _headers, body = harness.("/gate")
+raise "gate: #{status} #{body.inspect}" unless status == 403 && body.to_a.empty? && routed.empty?
+status, _headers, body = harness.("/use")
+raise "use: #{status} #{body.inspect}" unless status == 418 && routed.empty?
+status, _headers, body = harness.("/articles")
+raise "routed: #{status} #{body.inspect} #{routed.inspect}" unless status == 200 && body == ["routed"] && routed == ["/articles"]
+puts "outermost harness passed"
+"#;
+
+#[test]
+fn the_test_harness_runs_its_request_through_the_middleware_inserted_at_0() {
+    for target in [BuildTarget::Ruby, BuildTarget::Spinel] {
+        let (tree, errors) = with_application_lines(emit_and_run::real_blog(), OUTERMOST_AND_USE).emit(target);
+        assert!(errors.is_empty(), "{target:?}: {errors:#?}");
+        let helper = std::fs::read_to_string(tree.join("test/test_helper.rb")).expect("test_helper.rb");
+        assert!(helper.contains("    answered = OutermostMiddleware.around(rack_env) do |env|\n"), "{target:?}: {helper}");
+    }
+    let run = with_application_lines(emit_and_run::real_blog(), OUTERMOST_AND_USE)
+        .run_ruby(&format!("require \"rack\"\nRack::Builder.parse_file(\"config.ru\")\n{HARNESS_ASSERTIONS}"));
+    run.assert_passes();
+    assert!(run.stdout.contains("outermost harness passed"), "{}", run.stdout);
+}
+
+// Not through a Spinel build: the toolchain lane builds no tree with app middleware, so the emitted stacks run on CRuby.
+#[test]
+fn the_spinel_test_harness_runs_its_request_through_the_middleware_inserted_at_0() {
+    let (tree, errors) = with_application_lines(emit_and_run::real_blog(), OUTERMOST_AND_USE).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let adapter = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    let script = format!(
+        r#"{adapter}
+{PROBE_GATE}
+{PROBE_USE}
+module Tep
+  def self.str_hash = {{}}
+end
+module ActionDispatch
+  module Routing
+    class RouteSet
+      def self.finalize_app! = nil
+    end
+  end
+end
+{HARNESS_ASSERTIONS}"#
+    );
+    let out = std::process::Command::new("ruby").args(["-e", &script]).output().expect("spawn ruby");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("outermost harness passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+}
+
+const GATE_GEM: &str = "vendor/bundle/ruby/3.4.0/gems/gate_gem-0.1.0/lib";
+
+/// Every `.rb` file under `dir`, read.
+fn ruby_sources(dir: &std::path::Path, out: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).expect("read_dir").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            ruby_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rb") {
+            out.push(std::fs::read_to_string(&path).unwrap_or_default());
+        }
+    }
+}
+
+// Not reached from the app's code: only the `insert_before 0` line names the gem's class, so the Spinel gem shake must keep it.
+#[test]
+fn a_source_gems_class_inserted_at_0_stays_in_the_spinel_tree() {
+    let overlay = emit_and_run::real_blog()
+        .edit("Gemfile.lock", "    debug (1.11.1)\n", "    gate_gem (0.1.0)\n    debug (1.11.1)\n")
+        .edit("Gemfile.lock", "DEPENDENCIES\n", "DEPENDENCIES\n  gate_gem\n")
+        .write(".bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n")
+        .write("roundhouse.yml", "extensions:\n  - config/roundhouse\n")
+        .write("config/roundhouse/gems.yml", "source_gems:\n  - {gem: \"gate_gem\"}\n")
+        .write(
+            &format!("{GATE_GEM}/gate_gem.rb"),
+            "module GateGem\n  class Outer\n    def initialize(app)\n      @app = app\n    end\n\n    def call(env)\n      @app.call(env)\n    end\n  end\nend\n",
+        )
+        .edit("config/application.rb", AUTOLOAD, &format!("{AUTOLOAD}    config.middleware.insert_before 0, GateGem::Outer\n"));
+    let (tree, errors) = overlay.emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let stack = std::fs::read_to_string(tree.join("runtime/gem_middleware.rb")).expect("gem_middleware.rb");
+    assert!(stack.contains("@stack ||= GateGem::Outer.new(Rest.new)"), "{stack}");
+    let mut sources = Vec::new();
+    ruby_sources(&tree, &mut sources);
+    let defines_outer = |text: &String| text.contains("class GateGem::Outer") || (text.contains("module GateGem") && text.contains("class Outer"));
+    assert!(sources.iter().any(defines_outer), "no GateGem::Outer in the Spinel tree");
 }

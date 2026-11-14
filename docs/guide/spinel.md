@@ -176,6 +176,48 @@ without it produces a binary whose stylesheets and scripts all 404.
 depends on, so a change on this side that would break it fails here
 first.
 
+## PostgreSQL
+
+An app whose `config/database.yml` names `postgresql` (the `test`
+environment's primary, else the first) compiles to a binary that runs on
+PostgreSQL instead of SQLite. Its SQL is written for PostgreSQL, and its
+`runtime/db.rb` runs on [spinel-pg](https://github.com/roundhouse-rb/spinel-pg),
+a PostgreSQL client in plain Ruby, which `spin.toml` lists. The binary
+links no libpq.
+
+```sh
+roundhouse --target spinel -o out/spinel /path/to/your/rails/app
+cd out/spinel
+spin build
+DATABASE_URL=postgres://user:password@localhost:5432/app ./build/bin/<app>
+```
+
+The server opens the database `DATABASE_URL` names, falling back to
+libpq's `PG*` variables (`PGHOST`, `PGUSER`, ...), and at boot creates
+the tables of the app's schema that are missing. `DATABASE_URL`
+takes no query parameters, so no TLS. Each compiled test file runs in a
+PostgreSQL schema of its own, created when it starts and dropped when it
+exits; every connection of the pool takes it as its `search_path`, as
+Rails' `schema_search_path` setting does.
+
+Not carried yet:
+
+- array columns (`array: true`), which are stored as JSON text;
+- `db/structure.sql` loaded as written, and the expression indexes the
+  generated DDL can't carry (left out with a warning);
+- serialized first boots: two servers that boot on an empty database at
+  the same time race to create its tables;
+- `lock: true` / `with_lock` row locks (`FOR UPDATE`);
+- quoting for a column named after a PostgreSQL reserved word in
+  inserts and updates (`user` goes out bare and is a syntax error);
+- fixtures advancing the key's sequence, as Rails' `reset_pk_sequence!`
+  does: fixtures insert explicit ids, so a test that then creates a row
+  in the same keyed table gets a duplicate key from the sequence's
+  first values;
+- the archive's README and Playwright suite seeding the PostgreSQL
+  database: they seed `storage/development.sqlite3`, so seed the
+  database `DATABASE_URL` names yourself before an end-to-end run.
+
 ## Deploying
 
 The binary and what it reads at run time are the whole deployment:

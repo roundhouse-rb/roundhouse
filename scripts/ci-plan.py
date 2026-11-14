@@ -275,6 +275,21 @@ PG_DB_INPUTS = {
     "runtime/spinel/active_support_time_parsing.rb",
     "runtime/spinel/active_support_time_parsing.rbs",
 }
+# Inputs of the emitted-app gate in tests/spinel_pg_db.rs, which compiles
+# a test of an app on PostgreSQL: the dialect choice and DDL, the tree's
+# assembly (project::apply_postgresql_tree, spin_shape's `pg` dependency),
+# the inserts its keyless tables take (adapter_emit), the scaffold files
+# that assembly rewrites, and the harness that emits it.
+PG_APP_INPUTS = {
+    "src/project.rs",
+    "src/lower/model_to_library/adapter_emit/mod.rs",
+    "src/emit/shared/schema_sql.rs",
+    "src/ingest/database_yml.rs",
+    "runtime/spinel/scaffold/main.rb",
+    "runtime/spinel/scaffold/Gemfile",
+    "runtime/spinel/test/test_helper.rb",
+    "tests/support/emit_and_run.rs",
+}
 # The Db contract suite (tests/support/db_contract.rs): the Spinel lanes
 # each of its files feeds, and the runtime files its LANES copy beside a
 # shim that nothing above routes to them. cruby_prelude.rb feeds only the
@@ -706,7 +721,7 @@ def native_coverage(path):
         "src/lower/view_instrumentation.rs",
     }:
         suites.update(("spinel_active_support_instrumentation", "spinel_mini_profiler"))
-    if path in PG_DB_INPUTS:
+    if path in PG_DB_INPUTS or path in PG_APP_INPUTS:
         suites.add("spinel_pg_db")
     suites.update(DB_CONTRACT_INPUTS.get(path, ()))
     if path in {

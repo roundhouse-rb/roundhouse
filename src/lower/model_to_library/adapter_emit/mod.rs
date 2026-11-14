@@ -344,10 +344,20 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema, writes_
         })
         .collect();
 
+    // A table with no primary key (`id: false`, a join table) has no key
+    // to read back, and Rails reads none: `save_after_validation` assigns
+    // no id without a primary key. SQLite answers with the rowid, which
+    // that leaves unused. PostgreSQL has neither a sequence nor a rowid to
+    // read it from, so the insert reads nothing and answers 0 for the same
+    // unused slot; one that returns generated or default columns returns
+    // 0 in the key's place (below).
+    let keyless_on_postgres = key.is_none()
+        && table.primary_key_columns.is_empty()
+        && crate::emit::shared::schema_sql::Dialect::current() == crate::emit::shared::schema_sql::Dialect::Postgres;
     let insert = Insert {
         table: TableRef(table.name.clone()),
         assignments,
-        returns_rowid: supplied_key.is_none(),
+        returns_rowid: supplied_key.is_none() && !keyless_on_postgres,
     };
     let insert_with_key = insert.clone();
     let op = ArelOp::Insert(insert.clone());
@@ -364,6 +374,9 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema, writes_
             exprs.push(mint);
         }
         exprs.push(SqliteVisitor::default().visit(&op, schema, owner));
+        if keyless_on_postgres {
+            exprs.push(arel_lit_int(0));
+        }
         if let Some(k) = supplied_key {
             exprs.push(ivar_ref(&k.name));
         }
@@ -382,10 +395,12 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema, writes_
             .unwrap_or_else(|| Symbol::from("rowid"));
         let returning_columns: Vec<Symbol> =
             generated.iter().map(|c| c.name.clone()).collect();
+        // A keyless table on PostgreSQL returns no key (it has no rowid);
+        // its slot reads 0, as the ordinary insert above answers.
         let insert = SqliteVisitor::default().visit_insert_returning(
             &insert,
             schema,
-            &returning_key,
+            (!keyless_on_postgres).then_some(&returning_key),
             key_is_integer(table),
             &returning_columns,
         );
@@ -402,7 +417,7 @@ fn synth_adapter_insert(owner: &ClassId, table: &Table, schema: &Schema, writes_
                 let written = SqliteVisitor::default().visit_insert_returning(
                     &keyed,
                     schema,
-                    &returning_key,
+                    Some(&returning_key),
                     key_is_integer(table),
                     &returning_columns,
                 );

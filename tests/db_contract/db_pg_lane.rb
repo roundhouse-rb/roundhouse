@@ -6,7 +6,7 @@
 # general: URL parsing, `last_insert_rowid` from the INSERT's own
 # sequence, open-handle counts, the driver's transaction status, the
 # named-statement cache and its eviction, a terminated session reopened,
-# and sharding.
+# sharding, and the schema_search_path every connection takes.
 #
 # postgres_main.rb calls, in order:
 #
@@ -502,5 +502,28 @@ def lane_after(url)
     Db.finalize(h)
   end
   Db.close
+
+  # Rails' schema_search_path: every connection the pool opens resolves
+  # unqualified names in the schema, the second (opened on first use)
+  # as well as the first (opened by configure).
+  path = ENV.fetch("ROUNDHOUSE_PG_TEST_SCHEMA", "") + "_path"
+  Db.configure(url, pool_size: 1)
+  Db.exec("DROP SCHEMA IF EXISTS " + path + " CASCADE")
+  Db.exec("CREATE SCHEMA " + path)
+  Db.exec("CREATE TABLE " + path + ".marks (v text)")
+  Db.exec("INSERT INTO " + path + ".marks (v) VALUES ('in the schema')")
+  Db.close
+  begin
+    Db.configure(url, pool_size: 2, schema_search_path: path)
+    first = Db.pool.conn(0).simple("SELECT v FROM marks").getvalue(0, 0).to_s
+    check_str("schema_search_path on the first connection", "in the schema", first)
+    second = Db.pool.conn(1).simple("SELECT v FROM marks").getvalue(0, 0).to_s
+    check_str("schema_search_path on a second connection", "in the schema", second)
+  ensure
+    Db.close
+    Db.configure(url, pool_size: 1)
+    Db.exec("DROP SCHEMA IF EXISTS " + path + " CASCADE")
+    Db.close
+  end
   nil
 end

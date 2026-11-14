@@ -147,6 +147,8 @@ require_relative "runtime/response_headers_cruby"
 require_relative "runtime/response_header_names_cruby"
 # Signed cookies verified once per value per thread, not per request.
 require_relative "runtime/message_verifier_cruby"
+# A fresh request id written as one String (after runtime/action_dispatch, which defines RequestId).
+require_relative "runtime/request_id_cruby"
 # `allow_browser`'s verdict once per User-Agent per thread, not per request.
 require_relative "runtime/browser_blocker_cruby"
 # `Hash#to_query`'s nested bracket grammar — a reopen of the shared

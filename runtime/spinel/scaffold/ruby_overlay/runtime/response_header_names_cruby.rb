@@ -27,6 +27,11 @@
 #   would have stored. Only plain UTF-8 String names are kept, so the key's
 #   encoding is the one `downcase` gives; anything else is downcased as
 #   before.
+# - The store hands out its own pairs. Main.dispatch_core copied the store
+#   into a Hash for whoever writes the response; with `each` here it hands
+#   on the store itself. `each` yields each name as first written and its
+#   value, in the order written, to a block that takes the two. It is not
+#   Hash#each beyond that: there is no Enumerator without a block.
 module ActionController
   class HeaderStore
     # `store_value` for a name `index_of` did not find, its downcased form given.
@@ -35,6 +40,18 @@ module ActionController
       @lower << lower
       @vals << value
       nil
+    end
+
+    # Each name as first written and its value, in the order written: what
+    # a Hash copied from the store entry by entry would yield.
+    def each
+      i = 0
+      n = @keys.size
+      while i < n
+        yield @keys[i], @vals[i]
+        i += 1
+      end
+      self
     end
   end
 

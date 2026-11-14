@@ -4125,6 +4125,48 @@ puts "path extension contract passed"
         .assert_passes();
 }
 
+/// The headers of a response reach Rack from the controller's header store
+/// itself, not through a Hash filled from it entry by entry: the store is
+/// not walked by index, and the response carries the names and values it
+/// carried, in the order they were written.
+#[test]
+fn the_dispatcher_hands_on_the_header_store_without_copying_it() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+walked = 0
+ActionController::HeaderStore.prepend(Module.new {
+  define_method(:key_at) { |i|
+    walked += 1 if caller_locations(1, 1).first.path.end_with?("/main.rb")
+    super(i)
+  }
+})
+defaults = { "x-frame-options" => "SAMEORIGIN", "x-xss-protection" => "0", "x-content-type-options" => "nosniff",
+             "x-permitted-cross-domain-policies" => "none", "referrer-policy" => "strict-origin-when-cross-origin" }
+["/articles/new", "/no-such-page"].each do |path|
+  walked = 0
+  response = client.get(path)
+  check.(response.status == (path == "/articles/new" ? 200 : 404), "#{path} answers #{response.status}")
+  next unless response.status == 200
+  defaults.each { |name, value| check.(response.headers[name] == value, "#{path}: #{name} is #{response.headers[name].inspect}") }
+  names = response.headers.keys
+  check.(names.first == "content-type", "#{path}: the first header is #{names.first.inspect}")
+  check.((names & defaults.keys) == defaults.keys, "#{path}: the default headers come in the order #{(names & defaults.keys).inspect}")
+  check.(walked == 0, "#{path}: the dispatcher walked the header store by index #{walked} times")
+end
+puts "header store contract passed"
+"##)
+        .assert_passes();
+}
+
 /// `Dry::Struct` classes construct, coerce and refuse as dry-struct does,
 /// with no dry-struct in the emitted tree.
 #[test]

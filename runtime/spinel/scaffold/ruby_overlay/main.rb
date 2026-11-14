@@ -428,14 +428,9 @@ module Main
     controller.commit_default_headers!
     # Headers the action set beyond Content-Type/Location — a
     # `Content-Disposition` on a download, the Cache-Control a blob
-    # route asks for — ride as the tuple's sixth element.
-    extra_headers = {}
-    hi = 0
-    hn = controller.headers.size
-    while hi < hn
-      extra_headers[controller.headers.key_at(hi)] = controller.headers.val_at(hi)
-      hi += 1
-    end
+    # route asks for — ride as the tuple's sixth element: the store itself,
+    # which hands out its pairs in the order written (`each`), not a copy.
+    extra_headers = controller.headers
     if is_redirect
       [controller.status,
        %(<a href="#{ActionView::ViewHelpers.html_escape(controller.location.to_s)}">Redirecting</a>),

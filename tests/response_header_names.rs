@@ -168,3 +168,92 @@ puts "ALL OK #{states.size} stores"
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     assert!(String::from_utf8_lossy(&output.stdout).contains("ALL OK"));
 }
+
+/// The dispatcher hands the header store itself to whatever writes the
+/// response, where it handed a Hash filled from the store entry by entry.
+/// `each` yields what that Hash yields: every name as first written with
+/// its value, in the order written; so the Rack headers and the CGI lines
+/// written from the store are the ones written from the copy.
+#[test]
+fn the_header_store_yields_the_pairs_of_its_copy_into_a_hash() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = r##"
+require "stringio"
+require_relative "runtime/ruby/action_controller/base"
+require_relative "runtime/ruby/action_controller/default_headers"
+require_relative "runtime/spinel/cgi_io"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/header_validation_cruby"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/response_headers_cruby"
+require_relative "runtime/spinel/scaffold/ruby_overlay/runtime/response_header_names_cruby"
+S = ActionController::HeaderStore
+# What the dispatcher handed on before: a Hash filled from the store, entry by entry.
+copy = lambda do |store|
+  out = {}
+  i = 0
+  while i < store.size
+    out[store.key_at(i)] = store.val_at(i)
+    i += 1
+  end
+  out
+end
+# The two readers of what the dispatcher hands on: Main.rack_response and CgiIo.write_response.
+rack = lambda do |pairs|
+  headers = {}
+  pairs.each { |k, v| headers[ActionController.rack_header_name(k)] = v unless v.nil? }
+  headers
+end
+cgi = lambda do |pairs|
+  io = StringIO.new
+  CgiIo.write_response(io, 200, "", extra_headers: pairs)
+  io.string
+end
+writes = [
+  [],
+  [["Content-Disposition", "inline"]],
+  [["X-A", "1"], ["X-B", "2"], ["X-A", "3"]],
+  [["x-case", "lower"], ["X-Case", "upper"]],
+  [["Cache-Control", "no-store"], ["ETag", "\"v\""], ["Vary", "Accept"], ["X-Empty", ""]],
+  [["Bad Name", "x"], ["X-Ok", "y"], ["X-Bad-Value", "a\nb"]],
+  [["X-Num", "7"], ["Referrer-Policy", "no-referrer"]],
+]
+count = 0
+writes.each do |pairs|
+  [false, true].each do |defaults|
+    [false, true].each do |deleted|
+      store = S.new
+      pairs.each { |k, v| store[k] = v }
+      if defaults
+        store.rh_append("X-Frame-Options", "x-frame-options", "SAMEORIGIN") if store.index_of("X-Frame-Options") < 0
+        store.rh_append("Referrer-Policy", "referrer-policy", "strict-origin-when-cross-origin") if store.index_of("Referrer-Policy") < 0
+      end
+      store.delete(pairs.first.first) if deleted && !pairs.empty?
+      want = copy.(store)
+      got = []
+      back = store.each { |k, v| got << [k, v] }
+      raise "FAILED: #{pairs.inspect} yields #{got.inspect}, the copy holds #{want.to_a.inspect}" unless got == want.to_a
+      raise "FAILED: each answers #{back.class}, want the store" unless back.equal?(store)
+      raise "FAILED: #{pairs.inspect} gives Rack #{rack.(store).to_a.inspect}, was #{rack.(want).to_a.inspect}" unless rack.(store).to_a == rack.(want).to_a
+      raise "FAILED: #{pairs.inspect} writes other CGI lines" unless cgi.(store) == cgi.(want)
+      count += 1
+    end
+  end
+end
+# Yielding the pairs allocates nothing; the copy was a Hash.
+store = S.new
+[["Content-Disposition", "inline"], ["X-A", "1"], ["X-B", "2"]].each { |k, v| store[k] = v }
+sink = 0
+200.times { store.each { |k, v| sink += v.bytesize } }
+before = GC.stat(:total_allocated_objects)
+1000.times { store.each { |k, v| sink += v.bytesize } }
+per_call = (GC.stat(:total_allocated_objects) - before).fdiv(1000)
+raise "FAILED: each allocates #{per_call} objects per call, want 0" unless per_call < 0.5
+count += 1
+puts "ALL OK #{count}"
+"##;
+    let Some(output) = prerequisite::output_of(Command::new("ruby").args(["-e", script]).current_dir(root)) else {
+        return;
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", String::from_utf8_lossy(&output.stderr));
+    assert!(stdout.contains("ALL OK 29"), "{stdout}");
+}

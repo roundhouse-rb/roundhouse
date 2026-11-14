@@ -162,7 +162,7 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
         // convention; additional hash entries get dropped today —
         // matches existing classifier policy). Its locals are bound as a
         // record render's are.
-        RenderPartial::Named { partial, arg, locals } => {
+        RenderPartial::Named { partial, arg, locals, object } => {
             let entries = locals.unwrap_or_default();
             let (module, stem) = super::partial_name_to_key(partial, &ctx.resource_dir, &ctx.partial_stems);
             let record = match ctx.strict_locals.get(&(module.clone(), stem.clone())) {
@@ -170,14 +170,14 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
                 None => singularize(&snake_case(last_segment(&module))),
             };
             if !evaluated_out_of_order(entries, call_position(&module, &stem, Some(&record), ctx), ctx) {
-                let call = named_partial_call(partial, *arg, *locals, ctx)?;
+                let call = named_partial_object_call(partial, *arg, *locals, *object, ctx)?;
                 return Some(accumulator_append_call(call, ctx));
             }
             // The temps are named after the first local's value, as a
             // collection's are after the collection.
             let mut binds = Vec::new();
             let bound = bind_effectful_locals(entries, entries[0].1.span, ctx, &mut binds);
-            binds.push(accumulator_append_call(named_partial_call(partial, *arg, Some(&bound), ctx)?, ctx));
+            binds.push(accumulator_append_call(named_partial_object_call(partial, *arg, Some(&bound), *object, ctx)?, ctx));
             Some(seq(binds))
         }
         // `render layout: "x" do … end` needs MULTIPLE statements (the
@@ -1288,6 +1288,23 @@ pub(super) fn named_partial_call(
     named_partial_call_with_record(partial, arg, locals, None, ctx)
 }
 
+/// `named_partial_call` for a render that may name its `object:`. With
+/// `locals:` beside it, the record is the object, which Rails binds under
+/// the `as:` name whatever the hash holds. Without them the object is
+/// already the single arg.
+fn named_partial_object_call(
+    partial: &str,
+    arg: Option<&Expr>,
+    locals: Option<&[(Expr, Expr)]>,
+    object: Option<&Expr>,
+    ctx: &ViewCtx,
+) -> Option<Expr> {
+    match (object, locals) {
+        (Some(object), Some(_)) => named_partial_call_with_record(partial, None, locals, Some(object.clone()), ctx),
+        _ => named_partial_call(partial, arg, locals, ctx),
+    }
+}
+
 /// `named_partial_call` with the record argument supplied directly
 /// rather than resolved from `arg`/`locals`.
 ///
@@ -1334,11 +1351,12 @@ pub(super) fn named_partial_call_with_record(
             let strict_key = (module_camel.clone(), method_sym.clone());
             // The name the partial's definition takes its record by: its
             // call sites' element local where they agree on one, else the
-            // directory's singular.
+            // directory's singular. As written, the `locals:` key it binds
+            // (`as: :class` takes `locals: { class: }`).
             let record_name = ctx
                 .partial_record_locals
                 .get(&strict_key)
-                .map(|local| crate::naming::safe_local(local))
+                .cloned()
                 .unwrap_or_else(|| singularize(&snake_case(last_segment(&module_camel))));
             let strict_decl = ctx.strict_locals.get(&strict_key);
             // A strict-locals partial's positional record is its FIRST

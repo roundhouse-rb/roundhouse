@@ -592,13 +592,14 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // A partial's locals are its interface: every `locals:` key any call
     // site passes becomes a trailing nil-default param (sorted; see
     // render_locals_keys). Names already on the signature as the record
-    // or flash/defined? extras are skipped here.
+    // or flash/defined? extras are skipped here. The record is a
+    // `safe_local` name, so `locals: { class: }` is the `class_` record.
     let mut extra_params = extra_params;
     if is_partial {
         let keys_map = &lx.locals_keys;
         if let Some(keys) = view_key.as_ref().and_then(|k| keys_map.get(k).cloned()) {
             for k in keys {
-                if k != arg_name && !extra_params.contains(&k) {
+                if crate::naming::safe_local(&k) != arg_name && !extra_params.contains(&k) {
                     extra_params.push(k);
                 }
             }
@@ -2837,7 +2838,7 @@ pub(crate) fn ivar_record_partials(
                 &|_| false,
             ) {
                 // Bound as `named_partial_call_with_record` binds it.
-                Some(RenderPartial::Named { partial, arg, locals }) => {
+                Some(RenderPartial::Named { partial, arg, locals, .. }) => {
                     let target_dir = partial.rsplit_once('/').map_or(dir, |(d, _)| d);
                     let module_camel = camelize_path(&snake_case(target_dir));
                     let record = singularize(&snake_case(last_segment(&module_camel)));
@@ -3079,7 +3080,7 @@ pub(crate) fn partial_call_contracts(
             .map(|s| s.as_str().to_string());
         if let Some(keys) = keys_map.get(&key) {
             for k in keys {
-                if k != &record && !extras.contains(k) {
+                if crate::naming::safe_local(k) != record && !extras.contains(k) {
                     extras.push(k.clone());
                 }
             }
@@ -3468,7 +3469,7 @@ pub(super) fn partial_extras_map(
             closure_raw.iter().map(|s| ivar_local(&ivar_locals, s.as_str())).collect();
         if let Some(keys) = keys_map.get(&key) {
             for k in keys {
-                if k != &arg_name && !extras.contains(k) {
+                if crate::naming::safe_local(k) != arg_name && !extras.contains(k) {
                     extras.push(k.clone());
                 }
             }

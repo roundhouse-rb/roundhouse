@@ -1331,8 +1331,15 @@ pub(super) fn named_partial_call_with_record(
                     })
                 })
             };
-            let record_name = singularize(&snake_case(last_segment(&module_camel)));
             let strict_key = (module_camel.clone(), method_sym.clone());
+            // The name the partial's definition takes its record by: its
+            // call sites' element local where they agree on one, else the
+            // directory's singular.
+            let record_name = ctx
+                .partial_record_locals
+                .get(&strict_key)
+                .map(|local| crate::naming::safe_local(local))
+                .unwrap_or_else(|| singularize(&snake_case(last_segment(&module_camel))));
             let strict_decl = ctx.strict_locals.get(&strict_key);
             // A strict-locals partial's positional record is its FIRST
             // declared local (the def side builds the signature from the

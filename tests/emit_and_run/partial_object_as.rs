@@ -16,9 +16,11 @@ fn app() -> emit_and_run::Overlay {
   end
 end
 "##)
-        .write("app/views/probes/person.html.erb", r##"<p id="r">[<%= render partial: "shared/badge", object: @article, as: "someone" %>|<%= render partial: "shared/badge", object: @article, as: :someone %>|<%= render partial: "shared/person", object: @article %>]</p>
+        .write("app/views/probes/person.html.erb", r##"<p id="r">[<%= render partial: "shared/badge", object: @article, as: "someone" %>|<%= render partial: "shared/badge", object: @article, as: :someone %>|<%= render partial: "shared/person", object: @article %>|<%= render partial: "shared/badge", locals: { someone: @article } %>|<%= render partial: "shared/card", collection: [@article], as: :article %>|<%= render partial: "shared/card", object: @article, locals: { article: @article } %>]</p>
 "##)
         .write("app/views/shared/_badge.html.erb", r##"<b><%= someone.title %></b>
+"##)
+        .write("app/views/shared/_card.html.erb", r##"<i><%= article.title %></i>
 "##)
         .write("app/views/shared/_person.html.erb", r##"<span><%= person.title %></span>
 "##)
@@ -38,7 +40,7 @@ class ProbesControllerTest < ActionDispatch::IntegrationTest
   test "an object render's as: names the partial's local, a String as well as a Symbol" do
     get "/probes/person"
     t = Article.first.title
-    assert_includes response.body, "[<b>#{t}</b>\n|<b>#{t}</b>\n|<span>#{t}</span>\n]"
+    assert_includes response.body, "[<b>#{t}</b>\n|<b>#{t}</b>\n|<span>#{t}</span>\n|<b>#{t}</b>\n|<i>#{t}</i>\n|<i>#{t}</i>\n]"
   end
 end
 "##)
@@ -61,7 +63,7 @@ controller.request_method = "GET"
 controller.params = {}
 controller.process_action(:person)
 body = controller.body
-raise body unless body.include?("[<b>Title</b>\n|<b>Title</b>\n|<span>Title</span>\n]")
+raise body unless body.include?("[<b>Title</b>\n|<b>Title</b>\n|<span>Title</span>\n|<b>Title</b>\n|<i>Title</i>\n|<i>Title</i>\n]")
 puts "probe passed"
 "##;
 

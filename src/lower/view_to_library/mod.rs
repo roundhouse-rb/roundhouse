@@ -907,6 +907,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         lexxy_editor_adapter: app.gem_lock.as_ref().is_some_and(lexxy_uses_editor_adapter),
         partial_ivars: closures.clone(),
+        partial_record_locals: lx.collection_element_locals.clone(),
         ivar_records: lx.ivar_records.clone(),
         formats: std::iter::once(view.format.as_str())
             .chain((view.format.as_str() != "html").then_some("html"))
@@ -3748,11 +3749,36 @@ fn collection_element_locals_from_views(
     use crate::det::{HashMap, HashSet};
     let mut out: HashMap<ViewKey, String> = HashMap::default();
     let mut conflicted: HashSet<ViewKey> = HashSet::default();
+    let mut objects = ElementLocals::default();
     for view in views {
         let (dir, _) = split_view_name(view.name.as_str());
-        collect_collection_element_locals(&view.body, dir, stems, &mut out, &mut conflicted);
+        let mut collections = ElementLocals { out: std::mem::take(&mut out), conflicted: std::mem::take(&mut conflicted) };
+        collect_collection_element_locals(&view.body, dir, stems, &mut collections, &mut objects);
+        (out, conflicted) = (collections.out, collections.conflicted);
+    }
+    // An object render's local names the partial only where no
+    // collection render does, so a partial a collection binds keeps
+    // that binding (an object render's call passes its object as the
+    // record either way).
+    for (key, local) in objects.out {
+        if !out.contains_key(&key) && !conflicted.contains(&key) {
+            out.insert(key, local);
+        }
+    }
+    for key in objects.conflicted {
+        if !out.contains_key(&key) {
+            conflicted.insert(key);
+        }
     }
     (out, conflicted)
+}
+
+/// Call sites' element locals by partial, and the partials whose call
+/// sites disagree.
+#[derive(Default)]
+struct ElementLocals {
+    out: crate::det::HashMap<ViewKey, String>,
+    conflicted: crate::det::HashSet<ViewKey>,
 }
 
 /// The record arg a view / partial takes: an unambiguous collection
@@ -3777,8 +3803,8 @@ fn collect_collection_element_locals(
     e: &Expr,
     dir: &str,
     stems: &PartialStems,
-    out: &mut crate::det::HashMap<ViewKey, String>,
-    conflicted: &mut crate::det::HashSet<ViewKey>,
+    collections: &mut ElementLocals,
+    objects: &mut ElementLocals,
 ) {
     if let ExprNode::Send { recv, method, args, block, .. } = &*e.node {
         if let Some(crate::lower::view::RenderPartial::CollectionNamed {
@@ -3800,16 +3826,16 @@ fn collect_collection_element_locals(
                     let base = partial.rsplit('/').next().unwrap_or(partial);
                     base.trim_start_matches('_').to_string()
                 });
-            record_element_local(key, local, out, conflicted);
+            record_element_local(key, local, collections);
         } else if method.as_str() == "render"
             && recv.is_none()
             && let Some((partial, local)) = object_render_local(args)
         {
-            record_element_local(partial_name_to_key(partial, dir, stems), local, out, conflicted);
+            record_element_local(partial_name_to_key(partial, dir, stems), local, objects);
         }
     }
     e.node.for_each_child(&mut |c| {
-        collect_collection_element_locals(c, dir, stems, out, conflicted)
+        collect_collection_element_locals(c, dir, stems, collections, objects)
     });
 }
 
@@ -3844,23 +3870,18 @@ fn object_render_local(args: &[Expr]) -> Option<(&str, String)> {
 
 /// One call site's element local for a partial. Two sites that disagree
 /// leave the partial on its convention name.
-fn record_element_local(
-    key: ViewKey,
-    local: String,
-    out: &mut crate::det::HashMap<ViewKey, String>,
-    conflicted: &mut crate::det::HashSet<ViewKey>,
-) {
-    if conflicted.contains(&key) {
+fn record_element_local(key: ViewKey, local: String, seen: &mut ElementLocals) {
+    if seen.conflicted.contains(&key) {
         return;
     }
-    match out.get(&key) {
+    match seen.out.get(&key) {
         Some(existing) if *existing != local => {
-            out.remove(&key);
-            conflicted.insert(key);
+            seen.out.remove(&key);
+            seen.conflicted.insert(key);
         }
         Some(_) => {}
         None => {
-            out.insert(key, local);
+            seen.out.insert(key, local);
         }
     }
 }
@@ -5397,6 +5418,11 @@ pub(super) struct ViewCtx {
     /// needed ivars here and passes them as call-site args (the caller's
     /// own locals — its closure ⊇ the partial's, so it always has them).
     pub(super) partial_ivars: std::rc::Rc<crate::det::HashMap<ViewKey, Vec<Symbol>>>,
+    /// A partial's record local where its call sites name one other
+    /// than the directory's singular (`collection_element_locals`): an
+    /// explicit `locals:` hash binds the record by this name, as the
+    /// partial's definition takes it.
+    pub(super) partial_record_locals: std::rc::Rc<crate::det::HashMap<ViewKey, String>>,
     /// The partials whose record param stands for its ivar
     /// ([`ivar_record_partials`]): a render passes that ivar in the
     /// record slot. Every other partial takes it as a closure param.

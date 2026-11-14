@@ -17,3 +17,13 @@ fn a_gem_class_reopened_for_a_constant_and_an_include_runs_natively() {
     run.assert_passes();
     assert!(run.stdout.contains("extras passed"), "{}", run.stdout);
 }
+
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn a_gem_class_reopened_in_an_initializer_runs_natively() {
+    for app in [contract::initializer_app(), contract::compact_initializer_app()] {
+        let run = app.run_spinel(contract::LOCAL_ASSERTIONS);
+        run.assert_passes();
+        assert!(run.stdout.contains("reopen passed"), "{}", run.stdout);
+    }
+}

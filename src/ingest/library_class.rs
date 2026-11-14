@@ -241,6 +241,10 @@ enum Walk<'a> {
 /// modules that define methods). A gem's marker modules are read by
 /// name (`Globgem::MarkAY.name`); an app's empty helper modules keep
 /// their treatment, so only the gem-source ingest asks for these.
+///
+/// With no method, constant or include to carry a span, the module's
+/// `parent_span` is its name's, so it is known as this file's (an app
+/// reopening it in an initializer is reopening the gem's module).
 pub(super) fn ingest_empty_modules(source: &[u8], file: &str) -> IngestResult<Vec<LibraryClass>> {
     let result = super::prism::parse(source, file);
     let root = result.node();
@@ -249,7 +253,9 @@ pub(super) fn ingest_empty_modules(source: &[u8], file: &str) -> IngestResult<Ve
         if module.body().is_some() {
             continue;
         }
-        out.push(library_class_from_module_node_with_scope(&module, &scope, file)?);
+        let mut lc = library_class_from_module_node_with_scope(&module, &scope, file)?;
+        lc.parent_span = super::util::node_span(&module.constant_path(), file);
+        out.push(lc);
     }
     Ok(out)
 }

@@ -1,27 +1,82 @@
 // Not both arms kept: a `defined?` of a class the app carries is settled when the body loads, and Ruby never defines the other arm's methods (et-orbi's tzinfo 1.x fallbacks).
 use crate::app::App;
-use crate::dialect::{ConditionalDefinitions, LibraryClass};
+use crate::dialect::{ConditionalDefinitions, LibraryClass, MethodDef};
 use crate::expr::ExprNode;
 
 pub(super) fn settle(app: &mut App) {
     let resolver = app.const_resolver.for_sources(&app.sources);
-    let known: crate::det::HashSet<String> = app
-        .library_classes
-        .iter()
-        .map(|c| c.name.0.as_str().to_string())
-        .chain(app.models.iter().map(|m| m.name.0.as_str().to_string()))
-        .collect();
-    let class_side = ClassSide::of(app);
+    let settler = Settler::of(app, &resolver);
     for lc in app.library_classes.iter_mut() {
         let records = std::mem::take(&mut lc.conditional_definitions);
-        let owner = lc.name.0.as_str().to_string();
         for record in records {
-            let here = Here { known: &known, resolver: &resolver, class_side: &class_side, owner: &owner, span: record.span };
-            match settled_arm(&record, &here) {
+            match settler.arm(lc.name.0.as_str(), &record) {
                 Some(kept) => drop_other_arms(lc, &record, kept),
                 None => lc.conditional_definitions.push(record),
             }
         }
+    }
+}
+
+/// What a load-time conditional settles to, as `settle` decides it, built
+/// once over the program's classes. The concern splice asks it too, before
+/// `settle` runs.
+pub(super) struct Settler<'r> {
+    known: crate::det::HashSet<String>,
+    resolver: &'r crate::analyze::ConstResolver,
+    class_side: ClassSide,
+}
+
+impl<'r> Settler<'r> {
+    pub(super) fn of(app: &App, resolver: &'r crate::analyze::ConstResolver) -> Self {
+        let known = app
+            .library_classes
+            .iter()
+            .map(|c| c.name.0.as_str().to_string())
+            .chain(app.models.iter().map(|m| m.name.0.as_str().to_string()))
+            .collect();
+        let mut settler = Settler { known, resolver, class_side: ClassSide::of(app) };
+        // A class-side method in a conditional's arm answers a later
+        // `respond_to?` only once that arm is known to run, and settling
+        // one conditional can settle another: until no arm adds a method.
+        loop {
+            let mut reached = Vec::new();
+            for lc in &app.library_classes {
+                let owner = lc.name.0.as_str();
+                for record in &lc.conditional_definitions {
+                    let Some(arm) = settler.arm(owner, record).and_then(|k| record.arms.get(k)) else { continue };
+                    reached.extend(
+                        lc.methods
+                            .iter()
+                            .filter(|m| m.receiver == crate::dialect::MethodReceiver::Class && arm.methods.iter().any(|member| member.is(m)))
+                            .map(|m| (owner, m)),
+                    );
+                }
+            }
+            let mut added = false;
+            for (owner, m) in reached {
+                added |= settler.class_side.add(owner, m);
+            }
+            if !added {
+                break;
+            }
+        }
+        settler
+    }
+
+    /// The arm of `record`, in the body of `owner`, that Ruby runs.
+    fn arm(&self, owner: &str, record: &ConditionalDefinitions) -> Option<usize> {
+        let here = Here { known: &self.known, resolver: self.resolver, class_side: &self.class_side, owner, span: record.span };
+        settled_arm(record, &here)
+    }
+
+    /// Whether `method`, one of `lc`'s, is defined as Ruby loads the body:
+    /// `Some(true)` outside every load-time conditional or in the arm one is
+    /// known to take, `Some(false)` in an arm it is known to skip, `None`
+    /// when only running the program answers.
+    pub(super) fn defines(&self, lc: &LibraryClass, method: &MethodDef) -> Option<bool> {
+        let Some(record) = lc.conditional_definitions.iter().find(|c| c.contains(method)) else { return Some(true) };
+        let arm = record.arms.iter().position(|a| a.methods.iter().any(|m| m.is(method)))?;
+        Some(self.arm(lc.name.0.as_str(), record)? == arm)
     }
 }
 
@@ -34,6 +89,8 @@ struct ClassSide {
 }
 
 impl ClassSide {
+    /// The class-side methods defined outside every load-time conditional;
+    /// one inside an arm is added when the arm is known to run.
     fn of(app: &App) -> Self {
         let mut methods: crate::det::HashMap<String, Vec<(String, crate::span::Span)>> = crate::det::HashMap::default();
         let mut parents = crate::det::HashMap::default();
@@ -43,13 +100,30 @@ impl ClassSide {
                 lc.methods
                     .iter()
                     .filter(|m| m.receiver == crate::dialect::MethodReceiver::Class)
-                    .map(|m| (m.name.as_str().to_string(), if m.name_span.is_synthetic() { m.body.span } else { m.name_span })),
+                    .filter(|m| !lc.conditional_definitions.iter().any(|c| c.contains(m)))
+                    .map(|m| (m.name.as_str().to_string(), Self::start(m))),
             );
             if let Some(parent) = &lc.parent {
                 parents.insert(name, parent.0.as_str().trim_start_matches("::").to_string());
             }
         }
         ClassSide { methods, parents }
+    }
+
+    /// Where a method's definition starts (a synthesized one has no file).
+    fn start(m: &MethodDef) -> crate::span::Span {
+        if m.name_span.is_synthetic() { m.body.span } else { m.name_span }
+    }
+
+    /// Adds `m` to `class`'s class-side methods; whether it was not there.
+    fn add(&mut self, class: &str, m: &MethodDef) -> bool {
+        let entry = (m.name.as_str().to_string(), Self::start(m));
+        let methods = self.methods.entry(class.to_string()).or_default();
+        if methods.contains(&entry) {
+            return false;
+        }
+        methods.push(entry);
+        true
     }
 
     /// Whether `class` or a superclass the program carries defines `name` on its class side by the time the body
@@ -60,7 +134,12 @@ impl ClassSide {
         while let Some(c) = at {
             let defined = self.methods.get(&c).into_iter().flatten().filter(|(m, _)| m == name);
             // Not any of the class's own: one defined further down its body, or in a reopening loaded who knows when, is not there yet.
-            let before = |span: &crate::span::Span| c != class || (!span.is_synthetic() && span.file == here.file && span.start < here.start);
+            // A superclass's written further down the same file is not there yet either; one from another file is taken as loaded
+            // before, as which of two files loads first is not known here.
+            let same_file = |span: &crate::span::Span| !span.is_synthetic() && span.file == here.file;
+            let before = |span: &crate::span::Span| {
+                if c == class { same_file(span) && span.start < here.start } else { !same_file(span) || span.start < here.start }
+            };
             if defined.into_iter().any(|(_, span)| before(span)) {
                 return Some(true);
             }

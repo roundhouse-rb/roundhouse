@@ -263,10 +263,18 @@ pub(super) const FRAMEWORK_ROOTS: &[&str] = &[
 /// into `rails dbconsole`) out of the tree. Core classes and framework
 /// roots are never taken from here: a top-level definition of one is a
 /// reopen of something the runtime already provides.
+///
+/// A reopen of a class or module a gem compiled from source declares
+/// (`class Rack::Attack` / `class Request` adding the methods the app's
+/// throttles call) is kept whatever its name, beside the gem's opening:
+/// Bundler loads the gem before Rails runs the initializer, so the class
+/// holds both, and a method both define is the initializer's. The emit
+/// writes the openings into one file, the gem's first.
 fn keep_initializer_defined(
     app: &mut App,
     dir: &Path,
     sources: &[crate::span::SourceFile],
+    gem_mounts: &[PathBuf],
     candidates: Vec<LibraryClass>,
     callback_constants: &std::collections::HashSet<String>,
 ) {
@@ -304,8 +312,17 @@ fn keep_initializer_defined(
             })
         })
     };
+    let from_gem = |lc: &LibraryClass| {
+        opening_file(lc, sources).is_some_and(|file| gem_mounts.iter().any(|mount| Path::new(file).starts_with(mount)))
+    };
+    let gem_declared: HashSet<String> =
+        app.library_classes.iter().filter(|c| from_gem(c)).map(|c| c.name.0.as_str().to_string()).collect();
     for lc in candidates {
         let name = lc.name.0.as_str().to_string();
+        if gem_declared.contains(&name) {
+            app.library_classes.push(lc);
+            continue;
+        }
         if name.contains("::")
             || FRAMEWORK_ROOTS.contains(&name.as_str())
             || CORE.contains(&name.as_str())
@@ -318,6 +335,41 @@ fn keep_initializer_defined(
         }
         app.library_classes.push(lc);
     }
+}
+
+/// The first of an opening's spans that points at a source.
+fn opening_span(lc: &LibraryClass) -> Option<crate::span::Span> {
+    std::iter::once(lc.parent_span)
+        .chain(lc.include_spans.iter().copied())
+        .chain(lc.constants.iter().map(|(_, v)| v.span))
+        // A method's name before its body: an `attr_reader`'s reader has
+        // a synthesized body but the name it was written with.
+        .chain(lc.methods.iter().map(|m| m.name_span))
+        .chain(lc.methods.iter().map(|m| m.body.span))
+        // A body that only sets a class-level variable (`@configured = true`).
+        .chain(lc.class_ivar_initializers.iter().map(|e| e.span))
+        .chain(lc.unknown_calls.iter().map(|c| c.span))
+        .find(|s| !s.is_synthetic())
+}
+
+/// The file an opening was read from.
+fn opening_file<'s>(lc: &LibraryClass, sources: &'s [crate::span::SourceFile]) -> Option<&'s str> {
+    let span = opening_span(lc)?;
+    sources.get((span.file.0 as usize).checked_sub(1)?).map(|f| f.path.as_str())
+}
+
+/// Every opening of the program's library classes in load order, as far as
+/// the splices need it: a source gem's openings first, as Bundler loads the
+/// gem before the app's code runs, then the rest as read. The order within
+/// each group is kept. From the App's sources: the registry is drained by
+/// the time the splices run. It takes those two fields rather than the App,
+/// so a splice can change the App's other fields while it reads them.
+fn openings_gem_first<'a>(library_classes: &'a [LibraryClass], sources: &[crate::span::SourceFile]) -> Vec<&'a LibraryClass> {
+    let from_source_gem =
+        |lc: &LibraryClass| opening_file(lc, sources).is_some_and(super::absence_guards::is_source_gem_path);
+    let mut openings: Vec<&LibraryClass> = library_classes.iter().collect();
+    openings.sort_by_key(|lc| !from_source_gem(lc));
+    openings
 }
 
 /// Admission is based on the callable retained from app source, not a target's
@@ -3007,8 +3059,9 @@ end
     let observed: crate::det::HashSet<PathBuf> =
         enum_input_files.iter().chain(boot_files.iter()).cloned().collect();
     enum_constants.validate_consumed_sources(&app, &sources, &observed)?;
+    let gem_mounts: Vec<PathBuf> = source_gems.iter().map(|gem| gem.mount.clone()).collect();
     let callback_constants = super::after_initialize::named_constants(&callbacks);
-    keep_initializer_defined(&mut app, dir, &sources, initializer_defined, &callback_constants);
+    keep_initializer_defined(&mut app, dir, &sources, &gem_mounts, initializer_defined, &callback_constants);
     // `self.queue_adapter =` on ApplicationJob (see `App::queue_adapter`).
     apply_application_job_queue_adapter(&mut app);
     let const_resolver = crate::timings::phase("rubydex: wait", || const_resolver.finish());
@@ -3318,7 +3371,8 @@ end
     carry_included_block_includes_into_controllers(&mut app);
     refuse_unread_concern_filters(&app)?;
     drop_modelled_included_hooks(&mut app);
-    splice_concerns_into_controllers(&mut app);
+    let splice_resolver = const_resolver.for_sources(&app.sources);
+    splice_concerns_into_controllers(&mut app, &splice_resolver);
     // After the splice: a concern's filter reads the key as the controller's own body does.
     crate::lower::primary_key_send::rewrite_guarded(&mut app);
     // After the splice: an action a concern provides is not implicit.
@@ -4988,22 +5042,46 @@ fn carry_included_block_includes_into_controllers(app: &mut App) {
 /// `splice_concern_class_methods_into_includers`, and takes its include
 /// order: the first module of the includer's include closure that defines
 /// `to_param` wins.
+///
+/// A module opened more than once (a source gem's, reopened by an
+/// initializer) has the `to_param` of its openings read in load order
+/// (`openings_gem_first`), as the controller splice reads a concern's
+/// methods: a later definition replaces an earlier one, in the same
+/// opening or a later one, as a reopen does in Ruby. One under a load-time
+/// `if` is what `settle` makes of it: in an arm known to run it replaces as
+/// any definition does, in one known not to it is left out, and when only
+/// running the program answers the earlier definition stays. Its body
+/// reads the constants of every opening of the module.
 fn splice_concern_to_param_into_includers(app: &mut App) {
     use crate::det::{HashMap, HashSet};
     use crate::dialect::{MethodReceiver, ModelBodyItem};
     use crate::ident::{ClassId, Symbol};
 
     let name = Symbol::from("to_param");
-    let mut defs: HashMap<ClassId, (crate::dialect::MethodDef, HashSet<Symbol>)> = HashMap::default();
+    let mut defs: HashMap<ClassId, crate::dialect::MethodDef> = HashMap::default();
     let mut module_includes: HashMap<ClassId, Vec<ClassId>> = HashMap::default();
-    for lc in &app.library_classes {
+    // Every opening's constants: the body of one opening's `to_param` reads another's lexically.
+    let mut module_consts: HashMap<ClassId, HashSet<Symbol>> = HashMap::default();
+    let resolver = app.const_resolver.for_sources(&app.sources);
+    let settler = super::settled_conditionals::Settler::of(app, &resolver);
+    for lc in openings_gem_first(&app.library_classes, &app.sources) {
         module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.iter().cloned());
-        if !lc.is_module || defs.contains_key(&lc.name) {
+        module_consts.entry(lc.name.clone()).or_default().extend(lc.constants.iter().map(|(n, _)| n.clone()));
+        if !lc.is_module {
             continue;
         }
-        // The last def of the name is the one Ruby keeps.
-        if let Some(m) = lc.methods.iter().rev().find(|m| m.name == name && m.receiver == MethodReceiver::Instance) {
-            defs.insert(lc.name.clone(), (m.clone(), lc.constants.iter().map(|(n, _)| n.clone()).collect()));
+        // In source order, within an opening as across them: a later
+        // definition replaces the one standing, unless it is known not to run.
+        for m in lc.methods.iter().filter(|m| m.name == name && m.receiver == MethodReceiver::Instance) {
+            match settler.defines(lc, m) {
+                Some(true) => {
+                    defs.insert(lc.name.clone(), m.clone());
+                }
+                None => {
+                    defs.entry(lc.name.clone()).or_insert_with(|| m.clone());
+                }
+                Some(false) => {}
+            }
         }
     }
     if defs.is_empty() {
@@ -5029,17 +5107,17 @@ fn splice_concern_to_param_into_includers(app: &mut App) {
                 queue.extend(nested.iter().cloned());
             }
         }
-        let Some((concern, (method, consts))) = found else { continue };
+        let Some((concern, method)) = found else { continue };
         let mut method = method.clone();
         method.enclosing_class = Some(model.name.0.clone());
-        if !consts.is_empty() {
+        if let Some(consts) = module_consts.get(&concern).filter(|c| !c.is_empty()) {
             qualify_lexical_consts(&mut method.body, &concern, consts);
         }
         model.body.push(ModelBodyItem::Method { method, leading_comments: Vec::new(), leading_blank_line: true });
     }
 }
 
-fn splice_concerns_into_controllers(app: &mut App) {
+fn splice_concerns_into_controllers(app: &mut App, resolver: &crate::analyze::ConstResolver) {
     use crate::dialect::{Action, ControllerBodyItem, MethodReceiver, RenderTarget};
     use crate::ty::{Row, Ty};
 
@@ -5076,16 +5154,37 @@ fn splice_concerns_into_controllers(app: &mut App) {
         })
         .filter(|(_, calls)| !calls.is_empty())
         .collect();
-    for lc in &app.library_classes {
-        module_methods.insert(
-            lc.name.clone(),
-            lc.methods
-                .iter()
-                .filter(|m| matches!(m.receiver, MethodReceiver::Instance))
-                .collect(),
-        );
-        module_constants
-            .insert(lc.name.clone(), lc.constants.iter().map(|(n, _)| n.clone()).collect());
+    // A module opened more than once (a source gem's, reopened by the
+    // app in `lib/` or an initializer) has every opening's methods, read
+    // in load order: Bundler loads the gem before the app's code runs, so
+    // a gem's opening comes first. A method a later opening defines again
+    // replaces the earlier one, as a reopen does in Ruby; the splice below
+    // takes the first of a name. One defined under a load-time `if` is
+    // what `settle` makes of it, asked here before that pass runs: in an
+    // arm known to run it replaces as any definition does, in one known
+    // not to it is left out, and when only running the program answers
+    // the earlier definition stays ahead of it.
+    let settler = super::settled_conditionals::Settler::of(app, resolver);
+    for lc in openings_gem_first(&app.library_classes, &app.sources) {
+        let conditional = |m: &crate::dialect::MethodDef| settler.defines(lc, m).is_none();
+        let instance: Vec<&crate::dialect::MethodDef> = lc
+            .methods
+            .iter()
+            .filter(|m| matches!(m.receiver, MethodReceiver::Instance) && settler.defines(lc, m) != Some(false))
+            .collect();
+        // Within one opening, too, the last definition of a name is the
+        // one Ruby keeps; an earlier one is replaced, not an ancestor a
+        // `super` reaches.
+        let opened: Vec<&crate::dialect::MethodDef> = instance
+            .iter()
+            .enumerate()
+            .filter(|&(at, m)| !instance[at + 1..].iter().any(|later| later.name == m.name && !conditional(later)))
+            .map(|(_, m)| *m)
+            .collect();
+        let methods = module_methods.entry(lc.name.clone()).or_default();
+        methods.retain(|m| !opened.iter().any(|o| o.name == m.name && !conditional(o)));
+        methods.extend(opened);
+        module_constants.entry(lc.name.clone()).or_default().extend(lc.constants.iter().map(|(n, _)| n.clone()));
         module_includes.entry(lc.name.clone()).or_default().extend(lc.includes.iter().cloned());
     }
     let filter_edges = filter_dependency_edges(app, &module_includes);

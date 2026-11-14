@@ -203,6 +203,8 @@ impl Overlay {
             .arg(&script)
             .current_dir(&emitted)
             .env("BLOG_DB", ":memory:")
+            // A variable a test's guard reads, unset unless the test sets it.
+            .env_remove("SHELF_SLUG")
             .envs(env.iter().copied())
             .output()
             .expect("spawn ruby");

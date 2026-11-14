@@ -95,8 +95,9 @@ in `src/project.rs`. Shape notes worth knowing:
   PostgreSQL: on Spinel through the pure-Ruby spinel-pg driver (no
   libpq), on CRuby through the pg gem. The few places the two drivers
   differ go through `PgDriver` (`pg_driver.rb`, and
-  `pg_driver_cruby.rb`, which CRuby gets as `pg_driver.rb`). No target
-  selects it yet. `tests/spinel_pg_db.rs` compiles it with Spinel, and
+  `pg_driver_cruby.rb`, which CRuby gets as `pg_driver.rb`). The Ruby
+  and Spinel targets select it for an app whose `config/database.yml`
+  names postgresql (`project::apply_postgresql_tree`). `tests/spinel_pg_db.rs` compiles it with Spinel, and
   `tests/db_contract.rs` runs it on CRuby, each against a live server
   (`ROUNDHOUSE_PG_TEST_URL`).
   - `Db.exec_returning` answers the returned rows.

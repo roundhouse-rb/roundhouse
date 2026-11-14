@@ -12,12 +12,13 @@
 # the pg gem, whose API spinel-pg mirrors; pg_driver.rb holds the few
 # places the two differ (pg_driver_cruby.rb is the gem's).
 #
-# The Ruby target ships it as runtime/db.rb, with pg_driver_cruby.rb, for
-# an app whose `config/database.yml` names postgresql for the test
-# environment's primary (src/project.rs::apply_postgresql_tree), and
-# lowers that app's SQL for PostgreSQL. Spinel's wiring (`pg` as a spin
-# dependency) follows. The Db contract runs it directly on both runtimes
-# (tests/spinel_pg_db.rs, tests/db_contract.rs).
+# Both targets ship it as runtime/db.rb for an app whose
+# `config/database.yml` names postgresql for the test environment's
+# primary (src/project.rs::apply_postgresql_tree), and lower that app's
+# SQL for PostgreSQL: the Ruby target with pg_driver_cruby.rb, the Spinel
+# target with spinel-pg's pg_driver.rb and `pg` as a spin dependency. The
+# Db contract runs it directly on both runtimes (tests/spinel_pg_db.rs,
+# tests/db_contract.rs).
 #
 # What maps onto what:
 #

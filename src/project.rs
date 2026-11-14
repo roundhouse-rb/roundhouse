@@ -3891,13 +3891,26 @@ fn target_files_inner(
     let files = crate::timings::phase(format_args!("emit {}: assemble", target.as_str()), || crate::runtime_loader::with_app_locales(app, || match target {
         BuildTarget::Blog => blog_files(fixture),
         BuildTarget::Futamura => futamura_files(fixture),
-        BuildTarget::Spinel => spinel_files_with_source_markers(app, fixture, param_binds).and_then(|(mut files, _)| {
-            spinel_relation_model_handle(&mut files)?;
-            widen_spinel_hash_config_arrays(&mut files);
-            let mut files = spin_shape(files)?;
-            apply_spinel_int_overflow(&mut files, app);
-            Ok(files)
-        }),
+        // In the app's own dialect too, as the Ruby target below: an app
+        // on PostgreSQL runs on spinel-pg (`apply_postgresql_tree`), with
+        // the read binds off, since their `?` marks are not its `$n`.
+        BuildTarget::Spinel => {
+            let dialect = crate::emit::shared::schema_sql::Dialect::for_app(app);
+            let postgresql = dialect == crate::emit::shared::schema_sql::Dialect::Postgres;
+            dialect.scope(|| {
+                spinel_files_with_source_markers(app, fixture, param_binds && !postgresql).and_then(|(mut files, _)| {
+                    spinel_relation_model_handle(&mut files)?;
+                    widen_spinel_hash_config_arrays(&mut files);
+                    // Before spin_shape, which writes spin.toml from the Db it finds.
+                    if postgresql {
+                        apply_postgresql_tree(&mut files, app, RequireTarget::Spinel)?;
+                    }
+                    let mut files = spin_shape(files)?;
+                    apply_spinel_int_overflow(&mut files, app);
+                    Ok(files)
+                })
+            })
+        }
         // The ruby family gets the bundled-library requires too: the
         // table used to live inside `spin_shape` and so reached only
         // the spinel tree, which cost campfire two test files on a
@@ -5697,7 +5710,7 @@ fn ruby_family_runtime_files(
     // already annotated in `spinel_files`.
     apply_pay_demand(&mut files, app)?;
     if flavor == RubyFlavor::CRuby && crate::emit::shared::schema_sql::Dialect::current() == crate::emit::shared::schema_sql::Dialect::Postgres {
-        apply_postgresql_tree(&mut files, app)?;
+        apply_postgresql_tree(&mut files, app, RequireTarget::RubyFamily)?;
     }
     apply_conditional_declarations(&mut files, app);
     apply_file_programs(&mut files, app);
@@ -6441,14 +6454,22 @@ fn report_program_error(span: crate::span::Span, construct: &str, message: &str)
     emit::diagnostics::push(diagnostic);
 }
 
-/// The Ruby tree of an app whose primary database is PostgreSQL
+/// The tree of an app whose primary database is PostgreSQL
 /// (`Dialect::for_app`); the SQL in it was lowered for PostgreSQL by the
-/// same emit. Its Db is runtime/spinel/db_pg.rb over the pg gem, its
-/// driver differences pg_driver_cruby.rb, and its database the server
-/// `DATABASE_URL` names (with libpq's `PG*` variables as fallbacks), at
-/// boot and in the emitted tests. Each test file runs in a schema of its
-/// own, created when it starts and dropped when it exits.
-fn apply_postgresql_tree(files: &mut Vec<(String, String)>, app: &App) -> Result<(), String> {
+/// same emit. Its Db is runtime/spinel/db_pg.rb, and its database the
+/// server `DATABASE_URL` names (with libpq's `PG*` variables as
+/// fallbacks), at boot and in the emitted tests. Each test file runs in a
+/// schema of its own, created when it starts and dropped when it exits.
+///
+/// The Ruby tree runs db_pg.rb on the pg gem, its driver differences
+/// pg_driver_cruby.rb. The Spinel tree runs it on spinel-pg, whose
+/// runtime/pg_driver.rb it already has; `spin_shape` then lists `pg` in
+/// spin.toml for the `require "pg"` it finds in runtime/db.rb.
+fn apply_postgresql_tree(files: &mut Vec<(String, String)>, app: &App, target: RequireTarget) -> Result<(), String> {
+    let target_name = match target {
+        RequireTarget::RubyFamily => "ruby",
+        RequireTarget::Spinel => "spinel",
+    };
     if !app.sql_functions.is_empty() {
         // An error diagnostic as well as the refusal, as
         // `extension_gem_refusals` reports one, so `check` names it.
@@ -6459,7 +6480,7 @@ fn apply_postgresql_tree(files: &mut Vec<(String, String)>, app: &App) -> Result
         );
         let diagnostic = crate::diagnostic::Diagnostic::unsupported(
             crate::span::Span::synthetic(),
-            Some(crate::ident::Symbol::from("ruby")),
+            Some(crate::ident::Symbol::from(target_name)),
             "sqlite_functions",
             message,
         );
@@ -6472,10 +6493,20 @@ fn apply_postgresql_tree(files: &mut Vec<(String, String)>, app: &App) -> Result
         Ok(files.remove(at).1)
     };
     let db_pg = take(files, "runtime/db_pg.rb")?;
-    let driver = take(files, "runtime/pg_driver_cruby.rb")?;
-    files.retain(|(p, _)| !matches!(p.as_str(), "runtime/db.rb" | "runtime/pg_driver.rb" | "Gemfile.lock"));
+    match target {
+        RequireTarget::RubyFamily => {
+            let driver = take(files, "runtime/pg_driver_cruby.rb")?;
+            files.retain(|(p, _)| !matches!(p.as_str(), "runtime/db.rb" | "runtime/pg_driver.rb" | "Gemfile.lock"));
+            files.push(("runtime/pg_driver.rb".to_string(), driver));
+        }
+        RequireTarget::Spinel => {
+            if !files.iter().any(|(p, _)| p == "runtime/pg_driver.rb") {
+                return Err("PostgreSQL tree: runtime/pg_driver.rb (spinel-pg's) not found".to_string());
+            }
+            files.retain(|(p, _)| !matches!(p.as_str(), "runtime/db.rb" | "Gemfile.lock"));
+        }
+    }
     files.push(("runtime/db.rb".to_string(), db_pg));
-    files.push(("runtime/pg_driver.rb".to_string(), driver));
 
     // The gem, and a fresh lock: the committed one is SQLite's.
     let gemfile = files.iter_mut().find(|(p, _)| p == "Gemfile").ok_or("PostgreSQL tree: Gemfile not found")?;
@@ -6484,13 +6515,29 @@ fn apply_postgresql_tree(files: &mut Vec<(String, String)>, app: &App) -> Result
     }
     gemfile.1 = gemfile.1.replace("gem \"sqlite3\"", "gem \"pg\"");
 
-    const SERVER_SQLITE: &str = "    db_path = ENV[\"BLOG_DB\"]\n    path = (!db_path.nil? && !db_path.empty?) ? db_path : \"storage/development.sqlite3\"\n";
     const SERVER_POSTGRESQL: &str = "    # PostgreSQL: the server DATABASE_URL names, else libpq's PG*\n    # variables (apply_postgresql_tree).\n    path = ENV.fetch(\"DATABASE_URL\", \"\")\n";
+    // The Ruby overlay's server spells the SQLite path out; the Spinel
+    // server asks `Main.default_db_path`, and its --help names the file.
+    let server: &[(&str, &str)] = match target {
+        RequireTarget::RubyFamily => &[(
+            "    db_path = ENV[\"BLOG_DB\"]\n    path = (!db_path.nil? && !db_path.empty?) ? db_path : \"storage/development.sqlite3\"\n",
+            SERVER_POSTGRESQL,
+        )],
+        RequireTarget::Spinel => &[
+            ("    path = Main.default_db_path\n", SERVER_POSTGRESQL),
+            (
+                "    puts \"  SQLite file: BLOG_DB env (default storage/development.sqlite3)\"\n",
+                "    puts \"  PostgreSQL: DATABASE_URL env, else libpq's PG* variables\"\n",
+            ),
+        ],
+    };
     let main = files.iter_mut().find(|(p, _)| p == "main.rb").ok_or("PostgreSQL tree: main.rb not found")?;
-    if !main.1.contains(SERVER_SQLITE) {
-        return Err("PostgreSQL tree: main.rb's database path no longer matches".to_string());
+    for (sqlite, postgresql) in server {
+        if !main.1.contains(sqlite) {
+            return Err(format!("PostgreSQL tree: main.rb's database path no longer matches `{}`", sqlite.trim()));
+        }
+        main.1 = main.1.replace(sqlite, postgresql);
     }
-    main.1 = main.1.replace(SERVER_SQLITE, SERVER_POSTGRESQL);
 
     const TEST_SQLITE: &str = "Db.configure(_test_db_path)\n";
     const TEST_POSTGRESQL: &str = "# PostgreSQL (apply_postgresql_tree): the server DATABASE_URL names,\n\
@@ -6511,11 +6558,29 @@ Minitest.after_run(&_drop_test_schema)\n\
 else\n  \
 at_exit(&_drop_test_schema)\n\
 end\n";
+    // A compiled test file runs its tests inline and exits, so at_exit
+    // comes after them. spinel-pg sends PGOPTIONS from 0.2.1.
+    const TEST_POSTGRESQL_SPINEL: &str = "# PostgreSQL (apply_postgresql_tree): the server DATABASE_URL names,\n\
+# else libpq's PG* variables, in a schema of this test process's own,\n\
+# created here and dropped at exit, after the file's tests have run.\n\
+# search_path rides PGOPTIONS, which spinel-pg sends on every connection\n\
+# the pool opens. The pid comes first, so cutting a long file name to\n\
+# PostgreSQL's 63 bytes keeps it.\n\
+TEST_SCHEMA = (\"rh_test_\" + Process.pid.to_s + \"_\" + File.basename($0, \".rb\").gsub(/[^a-z0-9_]/, \"_\"))[0, 63]\n\
+ENV[\"PGOPTIONS\"] = \"-c search_path=\" + TEST_SCHEMA\n\
+Db.configure(ENV.fetch(\"DATABASE_URL\", \"\"))\n\
+Db.exec(\"DROP SCHEMA IF EXISTS \" + TEST_SCHEMA + \" CASCADE\")\n\
+Db.exec(\"CREATE SCHEMA \" + TEST_SCHEMA)\n\
+at_exit { Db.exec(\"DROP SCHEMA IF EXISTS \" + TEST_SCHEMA + \" CASCADE\") }\n";
+    let test_postgresql = match target {
+        RequireTarget::RubyFamily => TEST_POSTGRESQL,
+        RequireTarget::Spinel => TEST_POSTGRESQL_SPINEL,
+    };
     let helper = files.iter_mut().find(|(p, _)| p == "test/test_helper.rb").ok_or("PostgreSQL tree: test/test_helper.rb not found")?;
     if !helper.1.contains(TEST_SQLITE) {
         return Err("PostgreSQL tree: test_helper.rb's database setup no longer matches".to_string());
     }
-    helper.1 = helper.1.replace(TEST_SQLITE, TEST_POSTGRESQL);
+    helper.1 = helper.1.replace(TEST_SQLITE, test_postgresql);
     Ok(())
 }
 
@@ -14234,6 +14299,22 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
              # pipelined; 0.3.2 adds the script and evalsha the worker's\n\
              # scheduler runs, and 0.3.3 the multi its dead-set write runs in.\n\
              redis = { git = \"https://github.com/roundhouse-rb/spinel-redis\", ref = \"v0.3.3\" }\n",
+        );
+    }
+    // runtime/db.rb is db_pg.rb when the app's primary database is
+    // PostgreSQL (`apply_postgresql_tree`), and it requires spinel-pg.
+    let needs_pg = files.iter().any(|(p, c)| p == "runtime/db.rb" && c.lines().any(|l| l == "require \"pg\""));
+    if needs_pg {
+        if !manifest.lines().any(|l| l.trim() == "[dependencies]") {
+            manifest.push_str("\n[dependencies]\n");
+        }
+        manifest.push_str(
+            "# PostgreSQL, which config/database.yml names: spinel-pg, pure Ruby\n\
+             # over sp_net, under runtime/db.rb. Git form for the reason bcrypt\n\
+             # gives above: the index's pg is 0.1.0, which predates the\n\
+             # extended query protocol runtime/db.rb runs on. 0.2.1 sends\n\
+             # PGOPTIONS, which test/test_helper.rb's schema rides.\n\
+             pg = { git = \"https://github.com/roundhouse-rb/spinel-pg\", ref = \"v0.2.1\" }\n",
         );
     }
     files.push(("spin.toml".to_string(), manifest));

@@ -148,6 +148,32 @@ module SidekiqRedis
     nil
   end
 
+  # The heartbeat's side, which tests/sidekiq_heartbeat/driver.rb holds
+  # to Sidekiq's: nothing here starts the heartbeat or the cleanup.
+  def self.flush_stats(conn, processed, failed, date)
+    raise "the worker driver flushes no stats"
+  end
+
+  def self.write_work(conn, key, work)
+    raise "the worker driver writes no work hash"
+  end
+
+  def self.ping(conn)
+    nil
+  end
+
+  def self.beat(conn, identity, fields)
+    raise "the worker driver sends no heartbeat"
+  end
+
+  def self.clear_heartbeat(conn, identity)
+    raise "the worker driver clears no heartbeat"
+  end
+
+  def self.cleanup_processes(conn)
+    0
+  end
+
   # The scheduler's side. SETS holds "set<TAB>job" entries; EVALSHA pops
   # the first entry for its set, as the Lua pop does. SCRIPT_LOADED off
   # makes the next EVALSHA fail with NOSCRIPT, as after SCRIPT FLUSH.

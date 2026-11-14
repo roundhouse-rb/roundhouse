@@ -1924,7 +1924,7 @@ evaluate, at run time) gets no wrapper, and each call to its
   an Object argument can still execute/be held where Rails raises SerializationError.
   An app carrying Solid Queue's record models uses its SQL runner:
   payloads go to `solid_queue_jobs`, and the drain claims those records.
-- **The worker role has no heartbeat.** The same build runs the pushed
+- **The worker role writes no job metrics.** The same build runs the pushed
   jobs as `./app sidekiq` (spinel) or `ruby sidekiq.rb` (ruby, jruby),
   a Sidekiq 8.1 server process with BasicFetch
   (`runtime/spinel/sidekiq/sidekiq_worker.rb`); a Ruby Sidekiq process
@@ -1955,9 +1955,19 @@ evaluate, at run time) gets no wrapper, and each call to its
   error goes on to Sidekiq's rules. A handler with a block, a computed
   option or an exception class the tree doesn't define is an error
   (`job-handler-unsupported`) at its call; `after_discard` is dropped
-  with a warning. The heartbeat Sidekiq's Web UI
-  reads (and the process count the scheduler scales by) is still
-  missing. Under
+  with a warning. A heartbeat thread writes what a Sidekiq 8.1.7
+  process writes every 10 seconds, so the Web UI's Busy page and
+  `Sidekiq::ProcessSet` list the worker: the processed and failed
+  counts (`stat:processed`, `stat:failed`, per day too), its running
+  jobs in `<identity>:work`, and the process hash under `processes`
+  (`info` with Sidekiq's fields, its `version` `"8.1.7"` and its
+  `labels` holding `"roundhouse"`; `-g` sets its `tag`, the directory's
+  name by default). The Web UI's Quiet, Stop and thread-dump buttons
+  reach it through that beat, as TSTP, TERM and TTIN do; at shutdown
+  it leaves `processes`, and the scheduler drops processes whose
+  heartbeat expired, as Sidekiq's poller does, and counts Roundhouse
+  workers when it spaces its polls. Sidekiq 8's job metrics (the Web
+  UI's Metrics tab) are not written. Under
   config/cable.yml's `adapter: redis`, every process's broadcasts go
   out as `PUBLISH <channel_prefix>:<stream>`, as Action Cable's Redis
   adapter sends them, and each server process delivers what it

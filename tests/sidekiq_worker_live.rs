@@ -27,6 +27,13 @@
 //! worker then runs the requeued job and the one queued while the first
 //! was quiet, so no job is lost.
 //!
+//! The heartbeat tests run the same worker process and read it through
+//! `Sidekiq::ProcessSet` and `Sidekiq::WorkSet`, what the Web UI's Busy
+//! page reads: the process with its tag, labels and threads, the
+//! Dashboard's processed count, a running job, then the Web UI's Quiet and Stop sent through Redis as its
+//! buttons send them. Stop shuts the worker down, and it leaves
+//! `processes` empty.
+//!
 //! One thread: the tests flush and fill the same scratch database, as
 //! `sidekiq_push_live` does. The Spinel tests need a spinel-redis with
 //! `brpop` (v0.3.1), for the scheduler `script` and `evalsha` (v0.3.2),
@@ -186,6 +193,26 @@ impl Worker {
         }
     }
 
+    /// The exit, with no signal from here: 0 within `seconds`. Answers
+    /// everything the worker printed.
+    fn wait_exit(mut self, seconds: u64) -> String {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
+        let status = loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "the worker did not exit within {seconds} s:\n{}", self.seen.join("\n"));
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        while let Ok(line) = self.lines.recv_timeout(Duration::from_secs(2)) {
+            println!("worker: {line}");
+            self.seen.push(line);
+        }
+        let out = self.seen.join("\n");
+        assert!(status.success(), "the worker exited {status}:\n{out}");
+        out
+    }
+
     fn signal(&self, name: &str) {
         let status = Command::new("kill").arg(format!("-{name}")).arg(self.child.id().to_string()).status().unwrap();
         assert!(status.success(), "kill -{name}");
@@ -284,4 +311,93 @@ fn the_spinel_worker_process_shuts_down_on_term_and_loses_no_job() {
         c
     };
     shutdown_round(&dir, &url, &worker);
+}
+
+/// What `Sidekiq::ProcessSet` sees of the Roundhouse worker, polled
+/// until `want` holds (each beat is 10 s apart) or `seconds` pass.
+fn wait_process(dir: &Path, url: &str, seconds: u64, want: &dyn Fn(&str) -> bool) -> String {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    loop {
+        let line = ruby(dir, url, &["reader.rb", "process"]).lines().last().unwrap_or("").to_string();
+        if want(&line) {
+            return line;
+        }
+        assert!(Instant::now() < deadline, "Sidekiq::ProcessSet never showed it within {seconds} s; last: {line}");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// The heartbeat round: the worker shows on the Busy page with its job,
+/// and the Web UI's Quiet and Stop reach it through Redis.
+fn heartbeat_round(dir: &Path, url: &str, worker: &dyn Fn() -> Command) {
+    ruby(dir, url, &["reader.rb", "flush"]);
+    ruby(dir, url, &["rails_push.rb", "RecordJob:r1"]);
+    // SlowJob outlasts Quiet and Stop (each up to two beats), so Stop pushes it back.
+    let mut w = Worker::start(worker(), url, "120");
+    let pid = w.child.id();
+    w.wait_for("ran r1", 20);
+    let seen = wait_process(dir, url, 15, &|l| l.starts_with("process pid="));
+    for part in [
+        format!("pid={pid} "),
+        "tag=live ".to_string(),
+        "labels=roundhouse ".to_string(),
+        "version=8.1.7 ".to_string(),
+        "concurrency=2 ".to_string(),
+        "busy=0 ".to_string(),
+        "quiet=false ".to_string(),
+        "queues=default ".to_string(),
+        "rss=true ".to_string(),
+        "beat=true ".to_string(),
+    ] {
+        assert!(seen.contains(&part), "Sidekiq::ProcessSet: want {part:?} in {seen}");
+    }
+
+    // The Dashboard's processed count: r1, flushed by a beat.
+    wait_process(dir, url, 15, &|l| l.contains("processed=1 "));
+
+    ruby(dir, url, &["rails_push.rb", "SlowJob:s1"]);
+    w.wait_for("slow started s1", 20);
+    wait_process(dir, url, 15, &|l| l.contains("busy=1 ") && l.contains("work=default:SlowJob"));
+
+    ruby(dir, url, &["reader.rb", "quiet"]);
+    w.wait_for("no longer accepting new work", 15);
+    wait_process(dir, url, 15, &|l| l.contains("quiet=true "));
+
+    ruby(dir, url, &["reader.rb", "stop"]);
+    // The next beat picks Stop up (10 s), then -t 1 and the idle fetches' wait.
+    let out = w.wait_exit(25);
+    assert!(out.contains("Shutting down"), "{out}");
+    assert!(out.contains("Pushed 1 jobs back to Redis"), "{out}");
+    assert!(out.contains("Bye!"), "{out}");
+    let gone = ruby(dir, url, &["reader.rb", "process"]);
+    assert!(gone.lines().last().unwrap_or("").starts_with("process none of 0"), "the worker left processes behind: {gone}");
+}
+
+#[test]
+#[ignore = "requires SIDEKIQ_LIVE_REDIS_URL and the redis, sidekiq and activejob gems"]
+fn the_cruby_worker_shows_in_sidekiqs_process_set_and_obeys_its_buttons() {
+    let url = required_env("SIDEKIQ_LIVE_REDIS_URL", "a scratch Redis database");
+    let dir = scratch("roundhouse-sidekiq-worker-heartbeat-cruby");
+    let worker = || {
+        let mut c = Command::new("ruby");
+        c.args(["worker.rb", "sidekiq", "-q", "default", "-c", "2", "-t", "1", "-g", "live"]).current_dir(&dir);
+        c
+    };
+    heartbeat_round(&dir, &url, &worker);
+}
+
+#[test]
+#[ignore = "requires Spinel, SPINEL_REDIS_DIR (spinel-redis v0.3.3), SIDEKIQ_LIVE_REDIS_URL and the sidekiq and activejob gems"]
+fn the_spinel_worker_shows_in_sidekiqs_process_set_and_obeys_its_buttons() {
+    let url = required_env("SIDEKIQ_LIVE_REDIS_URL", "a scratch Redis database");
+    let redis_dir = required_env("SPINEL_REDIS_DIR", "a spinel-redis checkout");
+    let dir = scratch("roundhouse-sidekiq-worker-heartbeat-spinel");
+    let compiler = std::env::var("SPINEL").unwrap_or_else(|_| "spinel".into());
+    run(Command::new(compiler).args(["-I", &redis_dir, "worker.rb", "-o", "worker"]).current_dir(&dir));
+    let worker = || {
+        let mut c = Command::new(dir.join("worker"));
+        c.args(["sidekiq", "-q", "default", "-c", "2", "-t", "1", "-g", "live"]).current_dir(&dir);
+        c
+    };
+    heartbeat_round(&dir, &url, &worker);
 }

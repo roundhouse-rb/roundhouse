@@ -288,6 +288,91 @@ module SidekiqRedis
     nil
   end
 
+  # ---- the heartbeat -----------------------------------------------------
+  #
+  # What a Sidekiq 8.1.7 process writes to be visible to the Web UI and
+  # to `Sidekiq::ProcessSet` (`Launcher#flush_stats`, the beat, and
+  # `#clear_heartbeat`), command for command, on the control connection.
+
+  STATS_TTL = 157_680_000
+  BEAT_TTL = 60
+
+  # The jobs run and failed since the last flush, added to the totals
+  # and to `date`'s (UTC, YYYY-MM-DD), each day kept five years, in one
+  # round trip.
+  def self.flush_stats(conn, processed, failed, date)
+    conn.pipelined do |p|
+      p.incrby("stat:processed", processed)
+      p.incrby("stat:processed:" + date, processed)
+      p.expire("stat:processed:" + date, STATS_TTL)
+      p.incrby("stat:failed", failed)
+      p.incrby("stat:failed:" + date, failed)
+      p.expire("stat:failed:" + date, STATS_TTL)
+    end
+    nil
+  end
+
+  # `<identity>:work` replaced, in one MULTI, by the jobs running now
+  # (thread id => its JSON entry), kept a minute.
+  def self.write_work(conn, key, work)
+    conn.multi do |tx|
+      tx.unlink(key)
+      if work.length > 0
+        tx.hset(key, work)
+        tx.expire(key, BEAT_TTL)
+      end
+    end
+    nil
+  end
+
+  def self.ping(conn)
+    conn.ping
+    nil
+  end
+
+  # The beat proper, in one MULTI: this process in `processes`, its hash
+  # (`fields`, in Sidekiq's order) kept a minute, and the oldest signal
+  # the Web UI left for it. Answers that signal, or "" when there is none.
+  def self.beat(conn, identity, fields)
+    replies = conn.multi do |tx|
+      tx.sadd("processes", identity)
+      tx.exists(identity)
+      tx.hset(identity, fields)
+      tx.expire(identity, BEAT_TTL)
+      tx.rpop(identity + "-signals")
+    end
+    signal = replies[4]
+    signal.nil? ? "" : signal.to_s
+  end
+
+  # At shutdown: out of `processes`, and the work hash gone. Sidekiq
+  # sends the two in one pipeline; spinel-redis's pipeline has no SREM,
+  # so here they are two round trips.
+  def self.clear_heartbeat(conn, identity)
+    conn.srem("processes", identity)
+    conn.unlink(identity + ":work")
+    nil
+  end
+
+  # The poller's cleanup (`Poller#cleanup`): at most once a minute
+  # across every process (`SET process_cleanup 1 NX EX 60`), drop from
+  # `processes` each identity whose hash has expired, a process that
+  # died without its shutdown write. Answers how many were dropped.
+  # Sidekiq pipelines the HGETs and sends one SREM; spinel-redis's
+  # pipeline has neither and its SREM takes one member, so here each is
+  # its own round trip.
+  def self.cleanup_processes(conn)
+    return 0 unless conn.set("process_cleanup", "1", nx: true, ex: 60)
+    procs = []
+    conn.sscan_each("processes") { |m| procs.push(m) }
+    gone = []
+    procs.each do |identity|
+      gone.push(identity) if conn.hget(identity, "info").nil?
+    end
+    gone.each { |identity| conn.srem("processes", identity) }
+    gone.length
+  end
+
   # Leave at once, with processor threads still parked: no at_exit, no
   # ensure, as Sidekiq's process ends after its requeue.
   def self.hard_exit(code)

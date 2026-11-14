@@ -7,7 +7,7 @@
 # whose `cli` says the app isn't on Sidekiq (`project::spin_shape` and
 # `ruby_family_runtime_files` do the swap, as for sidekiq_redis.rb).
 #
-#   ./app sidekiq [-c N] [-q queue[,weight]]... [-t seconds]
+#   ./app sidekiq [-c N] [-q queue[,weight]]... [-t seconds] [-g tag]
 #
 # PROCESS SHAPE. The main thread is the supervisor: it installs the
 # signal traps, starts N processor threads, and polls the signal flags
@@ -40,6 +40,12 @@
 # `schedule` sets back onto their queues, as Sidekiq's Poller does in
 # every server process: Sidekiq's Lua pop, byte for byte, then the push.
 #
+# THE HEARTBEAT. One more thread (`SidekiqHeartbeat`, below) writes what
+# a Sidekiq 8.1.7 process writes every 10 seconds to be seen by the Web
+# UI and `Sidekiq::ProcessSet`: the processed and failed counts, the
+# jobs running now, and the process itself, under `processes`. Its Quiet
+# and Stop buttons reach the worker through that beat.
+#
 # SIGNALS. TSTP sets QUIET: threads finish their job and stop fetching,
 # and a job popped after that is pushed straight back. TERM or INT also
 # waits up to `-t` seconds (25 by default) for running jobs, then for
@@ -47,11 +53,15 @@
 # then pushes the unfinished ones back with RPUSH, unchanged, and exits
 # at once.
 # TTIN logs what each thread is running. The trap blocks only store an
-# Integer: everything else happens in the supervisor's poll.
+# Integer: everything else happens in the supervisor's poll. The Web
+# UI's Quiet, Stop and thread-dump buttons send the same three signals
+# through Redis, and the heartbeat sets the same flags.
 #
 # All Redis traffic goes through `SidekiqRedis` (runtime/sidekiq_redis.rb),
 # whose real body is spinel-redis on spinel and redis-rb on ruby and
 # jruby, so tests can put a scripted one in its place.
+require "socket"
+
 module SidekiqWorker
   DEFAULT_CONCURRENCY = 5
   DEFAULT_TIMEOUT = 25
@@ -70,6 +80,11 @@ module SidekiqWorker
   # The fetch keys (`queue:<name>`), expanded by weight unless STRICT.
   QUEUES = [""]
   STRICT = [true]
+  # The queues as given, each name once with its weight (0 when none
+  # was given), and the process tag: the heartbeat's info.
+  QUEUE_NAMES = [""]
+  QUEUE_WEIGHTS = [0]
+  TAG = [""]
 
   # Set by the traps: [0] TERM or INT, [1] TSTP, [2] TTIN.
   SIGNALS = [0, 0, 0]
@@ -81,18 +96,27 @@ module SidekiqWorker
   INFLIGHT_QUEUE = [""]
   INFLIGHT_JOB = [""]
   INFLIGHT_SINCE = [0.0]
+  # When it started, in epoch seconds, and each thread's id (`tid`), as
+  # the heartbeat reports them.
+  INFLIGHT_RUN_AT = [0]
+  TIDS = [""]
   RUNNING = [0]
   THREADS = []
+  # Jobs run, and jobs that failed, since the heartbeat last flushed
+  # the counts. Under LOCK.
+  PROCESSED = [0]
+  FAILED = [0]
 
   # The control connection (requeue, retry and dead writes), opened
   # lazily and shared under CONTROL_LOCK.
   CONTROL = []
   CONTROL_LOCK = Mutex.new
 
-  USAGE = "usage: sidekiq [-c CONCURRENCY] [-q QUEUE[,WEIGHT]]... [-t TIMEOUT]\n" \
+  USAGE = "usage: sidekiq [-c CONCURRENCY] [-q QUEUE[,WEIGHT]]... [-t TIMEOUT] [-g TAG]\n" \
     "  -c, --concurrency INT   processor threads to use (default: config/sidekiq.yml, RAILS_MAX_THREADS or 5)\n" \
     "  -q, --queue QUEUE[,WEIGHT]  queues to process, with optional weights (default: config/sidekiq.yml or default)\n" \
-    "  -t, --timeout NUM       shutdown timeout in seconds (default: config/sidekiq.yml or 25)\n"
+    "  -t, --timeout NUM       shutdown timeout in seconds (default: config/sidekiq.yml or 25)\n" \
+    "  -g, --tag TAG           process tag for the Web UI (default: the current directory's name)\n"
 
   # ---- command line --------------------------------------------------
 
@@ -107,6 +131,7 @@ module SidekiqWorker
     CONCURRENCY[0] = JobRegistry.sidekiq_worker_concurrency if JobRegistry.sidekiq_worker_concurrency > 0
     TIMEOUT[0] = DEFAULT_TIMEOUT
     TIMEOUT[0] = JobRegistry.sidekiq_worker_timeout if JobRegistry.sidekiq_worker_timeout >= 0
+    TAG[0] = default_tag(Dir.pwd)
     names = []
     weights = []
     i = 0
@@ -129,6 +154,9 @@ module SidekiqWorker
         names.push(parts[0])
         weights.push(parts.length > 1 ? parts[1].to_i : 0)
         i += 2
+      elsif (arg == "-g" || arg == "--tag") && value.length > 0
+        TAG[0] = value
+        i += 2
       else
         return "unknown option " + arg
       end
@@ -148,9 +176,34 @@ module SidekiqWorker
     ""
   end
 
+  # Sidekiq's `default_tag`: the directory's name, or for a Capistrano
+  # release (`<app>/releases/<timestamp>`) the app's.
+  def self.default_tag(dir)
+    name = File.basename(dir)
+    prev = File.dirname(dir)
+    if name.to_i != 0 && File.basename(prev) == "releases"
+      return File.basename(File.dirname(prev))
+    end
+    name
+  end
+
   # Sidekiq's Capsule#queues=: each name once per weight (at least once),
-  # strict when no queue has a weight.
+  # strict when no queue has a weight. Each name's weight is kept too,
+  # the last one given for a name repeated, as Sidekiq's `weights` keeps it.
   def self.set_queues(names, weights)
+    QUEUE_NAMES.clear
+    QUEUE_WEIGHTS.clear
+    j = 0
+    while j < names.length
+      at = QUEUE_NAMES.index(names[j])
+      if at.nil?
+        QUEUE_NAMES.push(names[j])
+        QUEUE_WEIGHTS.push(weights[j])
+      else
+        QUEUE_WEIGHTS[at] = weights[j]
+      end
+      j += 1
+    end
     QUEUES.clear
     strict = true
     j = 0
@@ -172,6 +225,20 @@ module SidekiqWorker
       unique.each { |q| QUEUES.push(q) }
     end
     nil
+  end
+
+  # Sidekiq's capsule `mode`: strict when no queue has a weight, random
+  # when every weight is 1, else weighted.
+  def self.mode
+    all_zero = true
+    all_one = true
+    QUEUE_WEIGHTS.each do |w|
+      all_zero = false if w != 0
+      all_one = false if w != 1
+    end
+    return "strict" if all_zero
+    return "random" if all_one
+    "weighted"
   end
 
   # The keys for one BRPOP.
@@ -218,6 +285,7 @@ module SidekiqWorker
       ", Redis " + SidekiqPush.redacted_url(SidekiqPush.url))
     install_traps
     start(CONCURRENCY[0])
+    SidekiqHeartbeat.start
     SidekiqScheduler.start(JobRegistry.sidekiq_worker_poll_interval_average,
       JobRegistry.sidekiq_worker_scheduled_poll_interval)
     nil
@@ -237,18 +305,27 @@ module SidekiqWorker
     SIGNALS[0] = 0
     SIGNALS[1] = 0
     SIGNALS[2] = 0
+    pid = Process.pid
     LOCK.synchronize do
       INFLIGHT_QUEUE.clear
       INFLIGHT_JOB.clear
       INFLIGHT_SINCE.clear
+      INFLIGHT_RUN_AT.clear
+      TIDS.clear
       i = 0
       while i < n
         INFLIGHT_QUEUE.push("")
         INFLIGHT_JOB.push("")
         INFLIGHT_SINCE.push(0.0)
+        INFLIGHT_RUN_AT.push(0)
+        # Sidekiq's `tid` XORs the thread's object id with the pid; only
+        # its uniqueness within the process matters.
+        TIDS.push((i ^ pid).to_s(36))
         i += 1
       end
       RUNNING[0] = n
+      PROCESSED[0] = 0
+      FAILED[0] = 0
     end
     THREADS.clear
     i = 0
@@ -268,20 +345,34 @@ module SidekiqWorker
   def self.supervise
     while true
       sleep POLL_SECONDS
-      if SIGNALS[2] == 1
-        SIGNALS[2] = 0
+      signals = take_signals
+      if signals[2] == 1
         dump_running
       end
-      if SIGNALS[1] == 1 && !QUIET[0]
+      if signals[1] == 1 && !QUIET[0]
         log("INFO", "Received TSTP, no longer accepting new work")
         QUIET[0] = true
       end
-      if SIGNALS[0] == 1
+      if signals[0] == 1
         shutdown
         return nil
       end
     end
     nil
+  end
+
+  # The flags as a trap or the heartbeat left them, read under LOCK, with
+  # TTIN's taken. The heartbeat sets them under LOCK, so a Stop or Quiet
+  # from the Web UI is seen across threads. A trap handler can't take a
+  # lock (Ruby raises ThreadError in trap context), so a trap writes
+  # them bare. Read into a copy because dump_running and shutdown take
+  # LOCK themselves.
+  def self.take_signals
+    LOCK.synchronize do
+      seen = [SIGNALS[0], SIGNALS[1], SIGNALS[2]]
+      SIGNALS[2] = 0
+      seen
+    end
   end
 
   # TERM: stop fetching, give running jobs up to TIMEOUT seconds, then
@@ -326,6 +417,10 @@ module SidekiqWorker
         log("WARN", "Failed to requeue " + jobs.length.to_s + " jobs: " + e.message)
       end
     end
+    # Sidekiq's clear_heartbeat, after the requeue: the last counts, then
+    # out of `processes`, so the Web UI drops the process at once.
+    SidekiqHeartbeat.stop
+    SidekiqHeartbeat.clear
     log("INFO", "Bye!")
     nil
   end
@@ -340,6 +435,36 @@ module SidekiqWorker
       n = 0
       INFLIGHT_JOB.each { |job| n += 1 if job.length > 0 }
       n
+    end
+  end
+
+  # The jobs running now, as the heartbeat writes `<identity>:work`:
+  # tid => {"queue", "payload" (the job's text), "run_at"}.
+  def self.work_entries
+    work = {}
+    LOCK.synchronize do
+      i = 0
+      while i < INFLIGHT_JOB.length
+        if INFLIGHT_JOB[i].length > 0
+          queue = INFLIGHT_QUEUE[i]
+          work[TIDS[i]] = "{\"queue\":" + ActiveJob::Arguments.str(queue[6, queue.length - 6]) +
+            ",\"payload\":" + ActiveJob::Arguments.str(INFLIGHT_JOB[i]) +
+            ",\"run_at\":" + INFLIGHT_RUN_AT[i].to_s + "}"
+        end
+        i += 1
+      end
+    end
+    work
+  end
+
+  # The jobs run and failed since the last call, [processed, failed],
+  # and the counts back to 0, as Sidekiq's counters `reset`.
+  def self.take_counts
+    LOCK.synchronize do
+      counts = [PROCESSED[0], FAILED[0]]
+      PROCESSED[0] = 0
+      FAILED[0] = 0
+      counts
     end
   end
 
@@ -393,6 +518,7 @@ module SidekiqWorker
             INFLIGHT_QUEUE[index] = queue
             INFLIGHT_JOB[index] = raw
             INFLIGHT_SINCE[index] = clock
+            INFLIGHT_RUN_AT[index] = Time.now.to_i
           end
           run(queue[6, queue.length - 6], raw)
           LOCK.synchronize do
@@ -434,6 +560,15 @@ module SidekiqWorker
       write_dead(raw)
       return nil
     end
+    # Counted once it ends, as Sidekiq's `stats` counts it, whatever the
+    # outcome; a job that fails is counted as failed too (`fail_job`).
+    perform(env, raw, queue, started)
+    LOCK.synchronize { PROCESSED[0] = PROCESSED[0] + 1 }
+    nil
+  end
+
+  # Run one parsed job.
+  def self.perform(env, raw, queue, started)
     label = describe_env(env)
     unless SidekiqEnvelope.active_job?(env)
       fail_job(env, raw, queue, label, "NameError", "uninitialized constant " + SidekiqEnvelope.klass(env), started)
@@ -472,6 +607,7 @@ module SidekiqWorker
 
   # Sidekiq's retry rules for a job that failed (`JobRetry#process_retry`).
   def self.fail_job(env, raw, queue, label, error_class, message, started)
+    LOCK.synchronize { FAILED[0] = FAILED[0] + 1 }
     log("WARN", label + " fail: " + elapsed(started) + " sec: " + error_class + ": " + message)
     unless SidekiqEnvelope.retries?(env)
       log("INFO", label + " dropped: retry is off")
@@ -603,8 +739,12 @@ end
 # processes (SCARD processes, at least 1) times
 # `average_scheduled_poll_interval` (5 s), both from config/sidekiq.yml.
 # Under 10 processes each wait is uniform within 50% of it either way,
-# else between 0 and twice it. This worker doesn't heartbeat into
-# `processes` yet, so only Ruby Sidekiq processes are counted.
+# else between 0 and twice it. This worker heartbeats into `processes`
+# too (`SidekiqHeartbeat`), so a fleet mixing it with Ruby Sidekiq
+# spaces its polls as one.
+#
+# At the end of the initial wait it cleans up `processes` as Sidekiq's
+# Poller does: an identity whose heartbeat hash has expired is dropped.
 #
 # Waits are sliced, so QUIET stops it within half a second. A Redis
 # error ends the cycle with a log line (one per outage) and a fresh
@@ -645,6 +785,7 @@ module SidekiqScheduler
     conn = []
     down = [false]
     pause(initial_wait)
+    cleanup(conn) unless SidekiqWorker::QUIET[0]
     while !SidekiqWorker::QUIET[0]
       begin
         conn.push(SidekiqRedis.worker_open(SidekiqPush.url)) if conn.length == 0
@@ -665,6 +806,22 @@ module SidekiqScheduler
     end
     SidekiqRedis.close_quietly(conn[0]) if conn.length > 0
     RUNNING[0] = false
+    nil
+  end
+
+  # Sidekiq's `Poller#cleanup`. A Redis error is logged; the cycle that
+  # follows sees the outage for itself.
+  def self.cleanup(conn)
+    begin
+      conn.push(SidekiqRedis.worker_open(SidekiqPush.url)) if conn.length == 0
+      SidekiqRedis.cleanup_processes(conn[0])
+    rescue StandardError => e
+      SidekiqWorker.log("WARN", "Scheduler: process cleanup failed: " + e.message)
+      if conn.length > 0
+        SidekiqRedis.close_quietly(conn[0])
+        conn.clear
+      end
+    end
     nil
   end
 
@@ -749,6 +906,241 @@ module SidekiqScheduler
   def self.pause(seconds)
     left = seconds
     while left > 0.0 && !SidekiqWorker::QUIET[0]
+      step = left < SidekiqWorker::POLL_SECONDS ? left : SidekiqWorker::POLL_SECONDS
+      sleep step
+      left -= step
+    end
+    nil
+  end
+end
+
+# Sidekiq's heartbeat (`Launcher#❤`): one thread, started by the
+# worker's boot, that makes this process visible to Sidekiq's Web UI and
+# `Sidekiq::ProcessSet` as a Sidekiq 8.1.7 process is, every 10 seconds:
+#
+#   the counts since the last beat, if any:
+#     INCRBY stat:processed N, stat:processed:<date> N; EXPIRE; the same for failed
+#   MULTI: UNLINK <identity>:work; HSET it with the running jobs; EXPIRE 60
+#   PING, timed, for rtt_us
+#   MULTI: SADD processes <identity>; EXISTS; HSET <identity> info,
+#     concurrency, busy, beat, rtt_us, quiet, rss; EXPIRE 60;
+#     RPOP <identity>-signals
+#
+# `identity` is hostname:pid:nonce, as Sidekiq's. `info` is built once,
+# with Sidekiq's fields in its order; its `version` is "8.1.7", the
+# protocol written, and its `labels` hold "roundhouse", so the Web UI
+# shows which processes are Roundhouse builds. A signal the Web UI's
+# Quiet, Stop or thread-dump button left (TSTP, TERM, TTIN) sets the
+# flag the process's own trap sets, and the supervisor acts on it.
+#
+# The beat goes out on the worker's control connection. A Redis error
+# ends it with a log line, one per outage; counts it was flushing are
+# lost, as Sidekiq loses them. At shutdown, after the requeue, `clear`
+# flushes the last counts and takes the process out of `processes`.
+module SidekiqHeartbeat
+  BEAT_PAUSE = 10.0
+  VERSION = "8.1.7"
+  LABEL = "roundhouse"
+
+  IDENTITY = [""]
+  INFO = [""]
+  STOPPING = [false]
+  RUNNING = [false]
+  DOWN = [false]
+  THREAD = []
+
+  def self.start
+    setup(hostname, Process.pid, SecureRandom.hex(6), Time.now.to_f)
+    STOPPING[0] = false
+    DOWN[0] = false
+    RUNNING[0] = true
+    THREAD.clear
+    THREAD.push(Thread.new { run })
+    nil
+  end
+
+  # This process's identity and info, built once, as Sidekiq's
+  # `identity` and `to_json` are. The worker's options must be parsed.
+  def self.setup(host, pid, nonce, started_at)
+    IDENTITY[0] = host + ":" + pid.to_s + ":" + nonce
+    INFO[0] = info_json(host, pid, started_at)
+    nil
+  end
+
+  def self.identity
+    IDENTITY[0]
+  end
+
+  # Heroku's dyno name, else the host's, as Sidekiq's `hostname`.
+  def self.hostname
+    dyno = ENV["DYNO"].to_s
+    dyno.length > 0 ? dyno : Socket.gethostname
+  end
+
+  # Sidekiq's `to_data`, as `Sidekiq.dump_json` writes it: one capsule,
+  # `default`, holding the worker's threads and queues.
+  def self.info_json(host, pid, started_at)
+    weights = "{"
+    i = 0
+    while i < SidekiqWorker::QUEUE_NAMES.length
+      weights += "," if i > 0
+      weights += ActiveJob::Arguments.str(SidekiqWorker::QUEUE_NAMES[i]) + ":" + SidekiqWorker::QUEUE_WEIGHTS[i].to_s
+      i += 1
+    end
+    weights += "}"
+    queues = []
+    SidekiqWorker::QUEUE_NAMES.each { |q| queues.push(ActiveJob::Arguments.str(q)) }
+    "{\"hostname\":" + ActiveJob::Arguments.str(host) +
+      ",\"started_at\":" + ActiveJob::Arguments.float(started_at) +
+      ",\"pid\":" + pid.to_s +
+      ",\"tag\":" + ActiveJob::Arguments.str(SidekiqWorker::TAG[0]) +
+      ",\"capsules\":{\"default\":{\"concurrency\":" + SidekiqWorker::CONCURRENCY[0].to_s +
+      ",\"mode\":" + ActiveJob::Arguments.str(SidekiqWorker.mode) + ",\"weights\":" + weights + "}}" +
+      ",\"queues\":[" + queues.join(",") + "]" +
+      ",\"weights\":[" + weights + "]" +
+      ",\"labels\":[" + ActiveJob::Arguments.str(LABEL) + "]" +
+      ",\"identity\":" + ActiveJob::Arguments.str(IDENTITY[0]) +
+      ",\"version\":" + ActiveJob::Arguments.str(VERSION) +
+      ",\"embedded\":false}"
+  end
+
+  def self.run
+    while !STOPPING[0]
+      begin
+        SidekiqWorker.with_control { |conn| beat(conn, Time.now.to_f) }
+        if DOWN[0]
+          SidekiqWorker.log("INFO", "Heartbeat: Redis is back")
+          DOWN[0] = false
+        end
+      rescue StandardError => e
+        SidekiqWorker.log("WARN", "Heartbeat: " + e.message) unless DOWN[0]
+        DOWN[0] = true
+      end
+      pause(BEAT_PAUSE)
+    end
+    RUNNING[0] = false
+    nil
+  end
+
+  # One beat, `now` the epoch time it reports (a Float).
+  def self.beat(conn, now)
+    flush(conn, now)
+    work = SidekiqWorker.work_entries
+    SidekiqRedis.write_work(conn, IDENTITY[0] + ":work", work)
+    rtt = rtt_us(conn)
+    fields = {
+      "info" => INFO[0],
+      "concurrency" => SidekiqWorker::CONCURRENCY[0].to_s,
+      "busy" => work.length.to_s,
+      "beat" => now.to_s,
+      "rtt_us" => rtt.to_s,
+      "quiet" => SidekiqWorker::QUIET[0].to_s,
+      "rss" => rss_kb.to_s,
+    }
+    act(SidekiqRedis.beat(conn, IDENTITY[0], fields))
+    nil
+  end
+
+  # Sidekiq's `check_rtt`: one PING, in microseconds.
+  def self.rtt_us(conn)
+    a = Process.clock_gettime(Process::CLOCK_MONOTONIC, :microsecond)
+    SidekiqRedis.ping(conn)
+    Process.clock_gettime(Process::CLOCK_MONOTONIC, :microsecond) - a
+  end
+
+  # The resident set in kB, as Sidekiq's `memory_usage` reads it: from
+  # /proc/self/status on Linux, and from `ps` where there is no /proc
+  # (macOS, the BSDs).
+  def self.rss_kb
+    return proc_rss_kb if File.exist?("/proc/self/status")
+    ps_rss_kb(Process.pid)
+  end
+
+  def self.proc_rss_kb
+    File.read("/proc/self/status").each_line do |line|
+      if line.start_with?("VmRSS:")
+        return line.split(" ")[1].to_i
+      end
+    end
+    0
+  end
+
+  # `ps -o rss= -p PID`, in kB on Linux, macOS and the BSDs alike; 0 for
+  # a pid it doesn't list, or without `ps` (its complaint goes nowhere).
+  def self.ps_rss_kb(pid)
+    begin
+      `ps -o rss= -p #{pid} 2>/dev/null`.strip.to_i
+    rescue StandardError
+      0
+    end
+  end
+
+  # Sidekiq's `flush_stats`: the counts since the last flush, if any,
+  # dated by `now` in UTC. A Redis error loses them, logged, as Sidekiq
+  # loses them.
+  def self.flush(conn, now)
+    counts = SidekiqWorker.take_counts
+    return nil if counts[0] + counts[1] == 0
+    date = Time.at(now.to_i).utc.strftime("%Y-%m-%d")
+    begin
+      SidekiqRedis.flush_stats(conn, counts[0], counts[1], date)
+    rescue StandardError => e
+      SidekiqWorker.log("WARN", "Unable to flush stats: " + e.message)
+    end
+    nil
+  end
+
+  # A signal the Web UI left, as the flag its trap would set.
+  # Set under SidekiqWorker::LOCK, which the supervisor reads them under
+  # (`take_signals`).
+  def self.act(signal)
+    flag = -1
+    if signal == "TERM" || signal == "INT"
+      flag = 0
+    elsif signal == "TSTP"
+      flag = 1
+    elsif signal == "TTIN"
+      flag = 2
+    elsif signal.length > 0
+      SidekiqWorker.log("WARN", "Heartbeat: ignoring the signal " + signal)
+    end
+    if flag >= 0
+      SidekiqWorker::LOCK.synchronize { SidekiqWorker::SIGNALS[flag] = 1 }
+    end
+    nil
+  end
+
+  # Shutdown: no more beats, once one in progress (at most a few
+  # seconds) has finished.
+  def self.stop
+    STOPPING[0] = true
+    deadline = SidekiqWorker.clock + 5.0
+    while RUNNING[0] && SidekiqWorker.clock < deadline
+      sleep 0.05
+    end
+    nil
+  end
+
+  # Sidekiq's `clear_heartbeat`: the last counts, then out of
+  # `processes`, the work hash gone. Errors are ignored, as Sidekiq
+  # ignores them.
+  def self.clear
+    return nil if IDENTITY[0] == ""
+    begin
+      SidekiqWorker.with_control do |conn|
+        flush(conn, Time.now.to_f)
+        SidekiqRedis.clear_heartbeat(conn, IDENTITY[0])
+      end
+    rescue StandardError
+      nil
+    end
+    nil
+  end
+
+  # Sleep `seconds` in half-second slices, leaving early at shutdown.
+  def self.pause(seconds)
+    left = seconds
+    while left > 0.0 && !STOPPING[0]
       step = left < SidekiqWorker::POLL_SECONDS ? left : SidekiqWorker::POLL_SECONDS
       sleep step
       left -= step

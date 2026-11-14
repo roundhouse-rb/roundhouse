@@ -1,0 +1,1393 @@
+{
+  "versions": {
+    "sidekiq": "8.1.7",
+    "redis_client": "0.31.0",
+    "redis_server": "7.0.15"
+  },
+  "args": "-q default -q low,2 -c 2 -t 3 -g oracle (poll_interval_average 2)",
+  "identity_shape": "<hostname>:<pid>:<12 hex>",
+  "timeline": [
+    "beat 1: idle",
+    "beats 2-3: busy, ProcessSet busy=1",
+    "beat 4: after dump_threads",
+    "beats 5-6: after quiet!, ProcessSet quiet=true",
+    "exited; processes holds 0"
+  ],
+  "work_set_seen_by_api": [
+    "default class"
+  ],
+  "round_trips": [
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "unlink",
+            "<identity>:work"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        [
+          0
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "ping"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "sadd",
+            "processes",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "exists",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "hset",
+            "<identity>"
+          ],
+          "field_order": [
+            "info",
+            "concurrency",
+            "busy",
+            "beat",
+            "rtt_us",
+            "quiet",
+            "rss"
+          ],
+          "fields": {
+            "info": {
+              "hostname": "<hostname>",
+              "started_at": "<epoch Float>",
+              "pid": "<pid>",
+              "tag": "oracle",
+              "capsules": {
+                "default": {
+                  "concurrency": 2,
+                  "mode": "weighted",
+                  "weights": {
+                    "default": 0,
+                    "low": 2
+                  }
+                }
+              },
+              "queues": [
+                "default",
+                "low"
+              ],
+              "weights": [
+                {
+                  "default": 0,
+                  "low": 2
+                }
+              ],
+              "labels": [],
+              "identity": "<identity>",
+              "version": "8.1.7",
+              "embedded": false
+            },
+            "concurrency": "2",
+            "busy": "0",
+            "beat": "<epoch Float#to_s>",
+            "rtt_us": "<Integer µs>",
+            "quiet": "false",
+            "rss": "<Integer kB>"
+          }
+        },
+        {
+          "argv": [
+            "expire",
+            "<identity>",
+            "60"
+          ]
+        },
+        {
+          "argv": [
+            "rpop",
+            "<identity>-signals"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        [
+          1,
+          0,
+          7,
+          1,
+          null
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.scheduler",
+      "commands": [
+        {
+          "argv": [
+            "set",
+            "process_cleanup",
+            "1",
+            "NX",
+            "EX",
+            "60"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.scheduler",
+      "commands": [
+        {
+          "argv": [
+            "SSCAN",
+            "processes",
+            "0"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "pipelined",
+      "thread": "sidekiq.scheduler",
+      "commands": [
+        {
+          "argv": [
+            "hget",
+            "<identity>",
+            "info"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.scheduler",
+      "commands": [
+        {
+          "argv": [
+            "scard",
+            "processes"
+          ]
+        }
+      ],
+      "times": 5
+    },
+    {
+      "kind": "pipelined",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "incrby",
+            "stat:processed",
+            "4"
+          ]
+        },
+        {
+          "argv": [
+            "incrby",
+            "stat:processed:<YYYY-MM-DD>",
+            "4"
+          ]
+        },
+        {
+          "argv": [
+            "expire",
+            "stat:processed:<YYYY-MM-DD>",
+            "157680000"
+          ]
+        },
+        {
+          "argv": [
+            "incrby",
+            "stat:failed",
+            "2"
+          ]
+        },
+        {
+          "argv": [
+            "incrby",
+            "stat:failed:<YYYY-MM-DD>",
+            "2"
+          ]
+        },
+        {
+          "argv": [
+            "expire",
+            "stat:failed:<YYYY-MM-DD>",
+            "157680000"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "unlink",
+            "<identity>:work"
+          ]
+        },
+        {
+          "argv": [
+            "hset",
+            "<identity>:work"
+          ],
+          "entries": [
+            {
+              "tid": "<base-36 tid>",
+              "value": {
+                "keys": [
+                  "queue",
+                  "payload",
+                  "run_at"
+                ],
+                "queue": "default",
+                "payload_is_raw_job_text": true,
+                "payload": {
+                  "retry": false,
+                  "queue": "default",
+                  "args": [
+                    25
+                  ],
+                  "class": "NapWorker",
+                  "jid": "<jid>",
+                  "created_at": "<ms>",
+                  "enqueued_at": "<ms>"
+                },
+                "run_at": "<epoch seconds, Integer>"
+              }
+            }
+          ]
+        },
+        {
+          "argv": [
+            "expire",
+            "<identity>:work",
+            "60"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        [
+          0,
+          1,
+          1
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "ping"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "sadd",
+            "processes",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "exists",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "hset",
+            "<identity>"
+          ],
+          "field_order": [
+            "info",
+            "concurrency",
+            "busy",
+            "beat",
+            "rtt_us",
+            "quiet",
+            "rss"
+          ],
+          "fields": {
+            "info": {
+              "hostname": "<hostname>",
+              "started_at": "<epoch Float>",
+              "pid": "<pid>",
+              "tag": "oracle",
+              "capsules": {
+                "default": {
+                  "concurrency": 2,
+                  "mode": "weighted",
+                  "weights": {
+                    "default": 0,
+                    "low": 2
+                  }
+                }
+              },
+              "queues": [
+                "default",
+                "low"
+              ],
+              "weights": [
+                {
+                  "default": 0,
+                  "low": 2
+                }
+              ],
+              "labels": [],
+              "identity": "<identity>",
+              "version": "8.1.7",
+              "embedded": false
+            },
+            "concurrency": "2",
+            "busy": "1",
+            "beat": "<epoch Float#to_s>",
+            "rtt_us": "<Integer µs>",
+            "quiet": "false",
+            "rss": "<Integer kB>"
+          }
+        },
+        {
+          "argv": [
+            "expire",
+            "<identity>",
+            "60"
+          ]
+        },
+        {
+          "argv": [
+            "rpop",
+            "<identity>-signals"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        [
+          0,
+          1,
+          0,
+          1,
+          null
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.scheduler",
+      "commands": [
+        {
+          "argv": [
+            "scard",
+            "processes"
+          ]
+        }
+      ],
+      "times": 4
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "unlink",
+            "<identity>:work"
+          ]
+        },
+        {
+          "argv": [
+            "hset",
+            "<identity>:work"
+          ],
+          "entries": [
+            {
+              "tid": "<base-36 tid>",
+              "value": {
+                "keys": [
+                  "queue",
+                  "payload",
+                  "run_at"
+                ],
+                "queue": "default",
+                "payload_is_raw_job_text": true,
+                "payload": {
+                  "retry": false,
+                  "queue": "default",
+                  "args": [
+                    25
+                  ],
+                  "class": "NapWorker",
+                  "jid": "<jid>",
+                  "created_at": "<ms>",
+                  "enqueued_at": "<ms>"
+                },
+                "run_at": "<epoch seconds, Integer>"
+              }
+            }
+          ]
+        },
+        {
+          "argv": [
+            "expire",
+            "<identity>:work",
+            "60"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "ping"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "sadd",
+            "processes",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "exists",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "hset",
+            "<identity>"
+          ],
+          "field_order": [
+            "info",
+            "concurrency",
+            "busy",
+            "beat",
+            "rtt_us",
+            "quiet",
+            "rss"
+          ],
+          "fields": {
+            "info": {
+              "hostname": "<hostname>",
+              "started_at": "<epoch Float>",
+              "pid": "<pid>",
+              "tag": "oracle",
+              "capsules": {
+                "default": {
+                  "concurrency": 2,
+                  "mode": "weighted",
+                  "weights": {
+                    "default": 0,
+                    "low": 2
+                  }
+                }
+              },
+              "queues": [
+                "default",
+                "low"
+              ],
+              "weights": [
+                {
+                  "default": 0,
+                  "low": 2
+                }
+              ],
+              "labels": [],
+              "identity": "<identity>",
+              "version": "8.1.7",
+              "embedded": false
+            },
+            "concurrency": "2",
+            "busy": "1",
+            "beat": "<epoch Float#to_s>",
+            "rtt_us": "<Integer µs>",
+            "quiet": "false",
+            "rss": "<Integer kB>"
+          }
+        },
+        {
+          "argv": [
+            "expire",
+            "<identity>",
+            "60"
+          ]
+        },
+        {
+          "argv": [
+            "rpop",
+            "<identity>-signals"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        [
+          0,
+          1,
+          0,
+          1,
+          null
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.scheduler",
+      "commands": [
+        {
+          "argv": [
+            "scard",
+            "processes"
+          ]
+        }
+      ],
+      "times": 4
+    },
+    {
+      "kind": "pipelined",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "incrby",
+            "stat:processed",
+            "1"
+          ]
+        },
+        {
+          "argv": [
+            "incrby",
+            "stat:processed:<YYYY-MM-DD>",
+            "1"
+          ]
+        },
+        {
+          "argv": [
+            "expire",
+            "stat:processed:<YYYY-MM-DD>",
+            "157680000"
+          ]
+        },
+        {
+          "argv": [
+            "incrby",
+            "stat:failed",
+            "0"
+          ]
+        },
+        {
+          "argv": [
+            "incrby",
+            "stat:failed:<YYYY-MM-DD>",
+            "0"
+          ]
+        },
+        {
+          "argv": [
+            "expire",
+            "stat:failed:<YYYY-MM-DD>",
+            "157680000"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "unlink",
+            "<identity>:work"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        [
+          1
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "ping"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "sadd",
+            "processes",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "exists",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "hset",
+            "<identity>"
+          ],
+          "field_order": [
+            "info",
+            "concurrency",
+            "busy",
+            "beat",
+            "rtt_us",
+            "quiet",
+            "rss"
+          ],
+          "fields": {
+            "info": {
+              "hostname": "<hostname>",
+              "started_at": "<epoch Float>",
+              "pid": "<pid>",
+              "tag": "oracle",
+              "capsules": {
+                "default": {
+                  "concurrency": 2,
+                  "mode": "weighted",
+                  "weights": {
+                    "default": 0,
+                    "low": 2
+                  }
+                }
+              },
+              "queues": [
+                "default",
+                "low"
+              ],
+              "weights": [
+                {
+                  "default": 0,
+                  "low": 2
+                }
+              ],
+              "labels": [],
+              "identity": "<identity>",
+              "version": "8.1.7",
+              "embedded": false
+            },
+            "concurrency": "2",
+            "busy": "0",
+            "beat": "<epoch Float#to_s>",
+            "rtt_us": "<Integer µs>",
+            "quiet": "false",
+            "rss": "<Integer kB>"
+          }
+        },
+        {
+          "argv": [
+            "expire",
+            "<identity>",
+            "60"
+          ]
+        },
+        {
+          "argv": [
+            "rpop",
+            "<identity>-signals"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        [
+          0,
+          1,
+          0,
+          1,
+          "TTIN"
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.scheduler",
+      "commands": [
+        {
+          "argv": [
+            "scard",
+            "processes"
+          ]
+        }
+      ],
+      "times": 7
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "unlink",
+            "<identity>:work"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        [
+          0
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "ping"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "sadd",
+            "processes",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "exists",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "hset",
+            "<identity>"
+          ],
+          "field_order": [
+            "info",
+            "concurrency",
+            "busy",
+            "beat",
+            "rtt_us",
+            "quiet",
+            "rss"
+          ],
+          "fields": {
+            "info": {
+              "hostname": "<hostname>",
+              "started_at": "<epoch Float>",
+              "pid": "<pid>",
+              "tag": "oracle",
+              "capsules": {
+                "default": {
+                  "concurrency": 2,
+                  "mode": "weighted",
+                  "weights": {
+                    "default": 0,
+                    "low": 2
+                  }
+                }
+              },
+              "queues": [
+                "default",
+                "low"
+              ],
+              "weights": [
+                {
+                  "default": 0,
+                  "low": 2
+                }
+              ],
+              "labels": [],
+              "identity": "<identity>",
+              "version": "8.1.7",
+              "embedded": false
+            },
+            "concurrency": "2",
+            "busy": "0",
+            "beat": "<epoch Float#to_s>",
+            "rtt_us": "<Integer µs>",
+            "quiet": "false",
+            "rss": "<Integer kB>"
+          }
+        },
+        {
+          "argv": [
+            "expire",
+            "<identity>",
+            "60"
+          ]
+        },
+        {
+          "argv": [
+            "rpop",
+            "<identity>-signals"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        [
+          0,
+          1,
+          0,
+          1,
+          "TSTP"
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "unlink",
+            "<identity>:work"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        [
+          0
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "ping"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "sadd",
+            "processes",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "exists",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "hset",
+            "<identity>"
+          ],
+          "field_order": [
+            "info",
+            "concurrency",
+            "busy",
+            "beat",
+            "rtt_us",
+            "quiet",
+            "rss"
+          ],
+          "fields": {
+            "info": {
+              "hostname": "<hostname>",
+              "started_at": "<epoch Float>",
+              "pid": "<pid>",
+              "tag": "oracle",
+              "capsules": {
+                "default": {
+                  "concurrency": 2,
+                  "mode": "weighted",
+                  "weights": {
+                    "default": 0,
+                    "low": 2
+                  }
+                }
+              },
+              "queues": [
+                "default",
+                "low"
+              ],
+              "weights": [
+                {
+                  "default": 0,
+                  "low": 2
+                }
+              ],
+              "labels": [],
+              "identity": "<identity>",
+              "version": "8.1.7",
+              "embedded": false
+            },
+            "concurrency": "2",
+            "busy": "0",
+            "beat": "<epoch Float#to_s>",
+            "rtt_us": "<Integer µs>",
+            "quiet": "true",
+            "rss": "<Integer kB>"
+          }
+        },
+        {
+          "argv": [
+            "expire",
+            "<identity>",
+            "60"
+          ]
+        },
+        {
+          "argv": [
+            "rpop",
+            "<identity>-signals"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        [
+          0,
+          1,
+          0,
+          1,
+          null
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "unlink",
+            "<identity>:work"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        [
+          0
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "call",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "ping"
+          ]
+        }
+      ],
+      "times": 1
+    },
+    {
+      "kind": "multi",
+      "thread": "sidekiq.heartbeat",
+      "commands": [
+        {
+          "argv": [
+            "MULTI"
+          ]
+        },
+        {
+          "argv": [
+            "sadd",
+            "processes",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "exists",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "hset",
+            "<identity>"
+          ],
+          "field_order": [
+            "info",
+            "concurrency",
+            "busy",
+            "beat",
+            "rtt_us",
+            "quiet",
+            "rss"
+          ],
+          "fields": {
+            "info": {
+              "hostname": "<hostname>",
+              "started_at": "<epoch Float>",
+              "pid": "<pid>",
+              "tag": "oracle",
+              "capsules": {
+                "default": {
+                  "concurrency": 2,
+                  "mode": "weighted",
+                  "weights": {
+                    "default": 0,
+                    "low": 2
+                  }
+                }
+              },
+              "queues": [
+                "default",
+                "low"
+              ],
+              "weights": [
+                {
+                  "default": 0,
+                  "low": 2
+                }
+              ],
+              "labels": [],
+              "identity": "<identity>",
+              "version": "8.1.7",
+              "embedded": false
+            },
+            "concurrency": "2",
+            "busy": "0",
+            "beat": "<epoch Float#to_s>",
+            "rtt_us": "<Integer µs>",
+            "quiet": "true",
+            "rss": "<Integer kB>"
+          }
+        },
+        {
+          "argv": [
+            "expire",
+            "<identity>",
+            "60"
+          ]
+        },
+        {
+          "argv": [
+            "rpop",
+            "<identity>-signals"
+          ]
+        },
+        {
+          "argv": [
+            "EXEC"
+          ]
+        }
+      ],
+      "reply": [
+        "OK",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        "QUEUED",
+        [
+          0,
+          1,
+          0,
+          1,
+          "TERM"
+        ]
+      ],
+      "times": 1
+    },
+    {
+      "kind": "pipelined",
+      "thread": "",
+      "commands": [
+        {
+          "argv": [
+            "srem",
+            "processes",
+            "<identity>"
+          ]
+        },
+        {
+          "argv": [
+            "unlink",
+            "<identity>:work"
+          ]
+        }
+      ],
+      "times": 1
+    }
+  ]
+}

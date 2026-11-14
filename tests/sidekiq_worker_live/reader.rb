@@ -21,6 +21,30 @@ if ARGV[0] == "sizes"
   exit
 end
 
+# The heartbeat's modes. `process` prints what Sidekiq::ProcessSet (the
+# Web UI's Busy page) sees of the Roundhouse worker, the one whose
+# labels hold "roundhouse"; `quiet` and `stop` press the Web UI's
+# buttons for it.
+def roundhouse_process = Sidekiq::ProcessSet.new.find { |p| p["labels"].include?("roundhouse") }
+
+if ARGV[0] == "process"
+  p = roundhouse_process
+  puts(p ? "process pid=#{p["pid"]} tag=#{p["tag"]} labels=#{p["labels"].join(",")} version=#{p["version"]} " \
+    "concurrency=#{p["concurrency"]} busy=#{p["busy"]} quiet=#{p["quiet"]} queues=#{p["queues"].join(",")} " \
+    "rss=#{p["rss"].to_i > 0} beat=#{(Time.now.to_f - p["beat"].to_f) < 15} " \
+    "processed=#{Sidekiq::Stats.new.processed} " \
+    "work=#{Sidekiq::WorkSet.new.map { |_p, _t, w| w.queue + ":" + JSON.parse(w.payload.to_s)["wrapped"].to_s }.join(",")}" :
+    "process none of #{Sidekiq::ProcessSet.new.size}")
+  exit
+end
+
+if ARGV[0] == "quiet" || ARGV[0] == "stop"
+  p = roundhouse_process or abort "no Roundhouse process"
+  ARGV[0] == "quiet" ? p.quiet! : p.stop!
+  puts "sent #{ARGV[0]}"
+  exit
+end
+
 def check(name, ok, detail = "")
   puts (ok ? "ok   " : "FAIL ") + name + (ok ? "" : " (#{detail})")
 end

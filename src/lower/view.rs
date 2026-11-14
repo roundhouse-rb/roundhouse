@@ -438,6 +438,11 @@ fn classify_object_render_locals<'a>(
     }
 }
 
+/// A literal `nil` or `false`.
+pub fn is_falsy_lit(e: &Expr) -> bool {
+    matches!(&*e.node, ExprNode::Lit { value: Literal::Nil | Literal::Bool { value: false } })
+}
+
 /// A model's `to_partial_path`: its `model_name.collection` and its
 /// element, `Post` → `posts/post`, `Admin::Post` → `admin/posts/post`.
 fn model_partial_path(class_name: &str) -> String {
@@ -839,6 +844,12 @@ pub fn classify_view_helper<'a>(
             Some(ViewHelperKind::ContentTag { name: &args[0], content: &args[1], opts: Some(&args[2]) })
         }
         ("content_for", 1) => {
+            let slot = extract_sym_or_str(&args[0])?;
+            Some(ViewHelperKind::ContentForGetter { slot })
+        }
+        // No content reads the slot, as Rails' `content_for` does when
+        // its content is nil or false.
+        ("content_for", 2) if is_falsy_lit(&args[1]) => {
             let slot = extract_sym_or_str(&args[0])?;
             Some(ViewHelperKind::ContentForGetter { slot })
         }

@@ -2,7 +2,7 @@
 //! template's own does: Rails mixes the helper into the view whose
 //! `content_for` it calls. A value and a block deposit (the layout's
 //! `<title>` reads one), `content_for(:slot)` reads, and a slot nothing
-//! deposited reads nil. The emitted helper module called
+//! deposited reads nil. A nil value reads the slot, as Rails' `content_for` does when given no content. The emitted helper module called
 //! `content_for` bare: `undefined method 'content_for' for module
 //! ProbesHelper`.
 
@@ -32,13 +32,17 @@ end
     content_for(:probe_slot)
   end
 
+  def read_nil
+    content_for(:probe_slot, nil)
+  end
+
   def read_missing
     content_for(:probe_missing)
   end
 end
 "##)
         .write("app/views/probes/deposit.html.erb", r##"<%= put_slot "val" %><%= put_block_slot %><%= put_title "From a helper" %>
-<p id="r">[<%= read_slot %>|<%= content_for(:probe_block) %>|<%= read_missing.nil? %>]</p>
+<p id="r">[<%= read_slot %>|<%= content_for(:probe_block) %>|<%= read_missing.nil? %>|<%= read_nil %>|<%= content_for(:probe_slot, nil) %>]</p>
 "##)
         .write("config/routes.rb", r##"Rails.application.routes.draw do
   root "articles#index"
@@ -55,7 +59,7 @@ end
 class ProbesControllerTest < ActionDispatch::IntegrationTest
   test "a helper's content_for deposits into and reads the view's slots" do
     get "/probes/deposit"
-    assert_includes response.body, "[val|blk|true]"
+    assert_includes response.body, "[val|blk|true|val|val]"
     assert_includes response.body, "<title>From a helper</title>"
   end
 end
@@ -79,7 +83,7 @@ controller.request_method = "GET"
 controller.params = {}
 controller.process_action(:deposit)
 body = controller.body
-raise body unless body.include?("[val|blk|true]") && body.include?("<title>From a helper</title>")
+raise body unless body.include?("[val|blk|true|val|val]") && body.include?("<title>From a helper</title>")
 puts "probe passed"
 "##;
 

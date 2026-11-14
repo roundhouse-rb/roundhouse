@@ -4882,6 +4882,11 @@ fn helper_content_for(
     };
     let value = match (args.len(), block) {
         (1, None) => return Some(call("content_for_get", vec![slot.clone()], None)),
+        // No content reads the slot, as Rails' `content_for` does when
+        // its content is nil or false.
+        (2, None) if crate::lower::view::is_falsy_lit(&args[1]) => {
+            return Some(call("content_for_get", vec![slot.clone()], None));
+        }
         (2, None) => args[1].clone(),
         (1, Some(block)) => call("capture", vec![], Some(block.clone())),
         _ => return None,

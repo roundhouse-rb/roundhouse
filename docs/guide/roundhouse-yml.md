@@ -229,6 +229,10 @@ source_gems:
   in `.bundle/config`, then `GEM_HOME` and `GEM_PATH`), and takes only the
   files `require "<gem>"` loads from its `lib/`: literal `require`,
   `require_relative` and `autoload` calls, followed from `lib/<gem>.rb`.
+  A gem from a `GIT` source is read from Bundler's checkout of the locked
+  revision, `bundler/gems/<repo>-<revision>` under the same roots, in the
+  directory of the `<gem>.gemspec` that the source's `glob`
+  (`{,*,*/*}.gemspec` unless the lockfile names one) finds there.
   An autoloaded file is compiled whether or not the app names its
   constant. Generators and
   test helpers the entry file does not load stay out. What the code

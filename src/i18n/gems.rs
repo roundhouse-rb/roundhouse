@@ -97,6 +97,115 @@ pub(crate) fn installed_gem<V: Vfs + ?Sized>(vfs: &V, roots: &[PathBuf], name: &
     })
 }
 
+/// Bundler's gemspec glob for a `GIT` source whose lockfile entry names none.
+const DEFAULT_GEMSPEC_GLOB: &str = "{,*,*/*}.gemspec";
+
+/// A gem the lockfile takes from a `GIT` source, where Bundler checks it
+/// out: `<root>/bundler/gems/<repo>-<revision[..12]>`, at the directory of
+/// the gemspec the source's glob finds in it. Bundler loads every gemspec
+/// the glob finds and takes the one whose spec is `name`; with no Ruby to
+/// evaluate one, this takes the file named `<name>.gemspec`, the first in
+/// path order.
+pub(crate) fn installed_git_gem<V: Vfs + ?Sized>(vfs: &V, roots: &[PathBuf], source: &crate::gems::GitSource, name: &str) -> Option<PathBuf> {
+    let gemspec = format!("{name}.gemspec");
+    let glob = source.glob.as_deref().unwrap_or(DEFAULT_GEMSPEC_GLOB);
+    roots.iter().find_map(|root| {
+        let checkout = root.join("bundler").join("gems").join(source.checkout_dir());
+        if !vfs.is_dir(&checkout) {
+            return None;
+        }
+        let mut found: Vec<PathBuf> = Vec::new();
+        for pattern in brace_alternatives(glob) {
+            let segments: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
+            glob_files(vfs, &checkout, &segments, &mut found);
+        }
+        found.retain(|path| path.file_name().is_some_and(|n| n == gemspec.as_str()));
+        found.sort();
+        found.into_iter().next().and_then(|path| path.parent().map(Path::to_path_buf))
+    })
+}
+
+/// `{a,b}` alternatives expanded, as `Dir[]` does before it matches:
+/// `{,*,*/*}.gemspec` is `.gemspec`, `*.gemspec` and `*/*.gemspec`.
+fn brace_alternatives(pattern: &str) -> Vec<String> {
+    let Some(open) = pattern.find('{') else { return vec![pattern.to_string()] };
+    let mut depth = 0;
+    let mut cuts = vec![open];
+    let mut close = None;
+    for (at, c) in pattern[open..].char_indices().map(|(i, c)| (open + i, c)) {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(at);
+                    break;
+                }
+            }
+            ',' if depth == 1 => cuts.push(at),
+            _ => {}
+        }
+    }
+    // Not a group: an unclosed `{` is a literal character, as it is to `Dir[]`.
+    let Some(close) = close else { return vec![pattern.to_string()] };
+    cuts.push(close);
+    let (head, tail) = (&pattern[..open], &pattern[close + 1..]);
+    cuts.windows(2)
+        .flat_map(|w| brace_alternatives(&format!("{head}{}{tail}", &pattern[w[0] + 1..w[1]])))
+        .collect()
+}
+
+/// The files under `at` whose relative path matches `segments`: `*` and
+/// `?` within one segment, `**` for any number of directories. A
+/// directory reached through a symbolic link is not entered: it could lead
+/// outside the checkout.
+fn glob_files<V: Vfs + ?Sized>(vfs: &V, at: &Path, segments: &[&str], out: &mut Vec<PathBuf>) {
+    let Some((first, rest)) = segments.split_first() else { return };
+    let Ok(entries) = vfs.read_dir(at) else { return };
+    if *first == "**" {
+        glob_files(vfs, at, rest, out);
+        for entry in entries {
+            let hidden = entry.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with('.'));
+            if !hidden && vfs.is_dir(&entry) && !vfs.is_symlink(&entry) {
+                glob_files(vfs, &entry, segments, out);
+            }
+        }
+        return;
+    }
+    for entry in entries {
+        let Some(name) = entry.file_name().and_then(|n| n.to_str()) else { continue };
+        if !segment_matches(first, name) {
+            continue;
+        }
+        if rest.is_empty() {
+            if !vfs.is_dir(&entry) {
+                out.push(entry);
+            }
+        } else if vfs.is_dir(&entry) && !vfs.is_symlink(&entry) {
+            glob_files(vfs, &entry, rest, out);
+        }
+    }
+}
+
+/// One path segment against one glob segment. As `Dir[]` without
+/// `File::FNM_DOTMATCH`, a wildcard does not match a leading dot.
+fn segment_matches(pattern: &str, name: &str) -> bool {
+    fn matches(p: &[char], n: &[char]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some(('*', rest)) => (0..=n.len()).any(|i| matches(rest, &n[i..])),
+            Some(('?', rest)) => !n.is_empty() && matches(rest, &n[1..]),
+            Some((c, rest)) => n.first() == Some(c) && matches(rest, &n[1..]),
+        }
+    }
+    if name.starts_with('.') && !pattern.starts_with('.') {
+        return false;
+    }
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    matches(&p, &n)
+}
+
 /// A gem that defines a `Rails::Engine` subclass under `lib/`.
 fn is_engine<V: Vfs + ?Sized>(vfs: &V, gem: &Path) -> bool {
     expand(vfs, gem, "lib/**/*.rb").iter().any(|path| {
@@ -145,6 +254,17 @@ mod tests {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(file, text).unwrap();
+    }
+
+    #[test]
+    fn gemspec_globs_expand_and_match_as_dir_does() {
+        assert_eq!(brace_alternatives("{,*,*/*}.gemspec"), vec![".gemspec", "*.gemspec", "*/*.gemspec"]);
+        assert_eq!(brace_alternatives("{a,b{c,d}}/x"), vec!["a/x", "bc/x", "bd/x"]);
+        assert_eq!(brace_alternatives("odd{.gemspec"), vec!["odd{.gemspec"]);
+        assert!(segment_matches("*.gemspec", "widgets.gemspec"));
+        assert!(segment_matches("w?dgets.gemspec", "widgets.gemspec"));
+        assert!(!segment_matches("*.gemspec", "widgets.gemspec.bak"));
+        assert!(!segment_matches("*", ".git"));
     }
 
     #[test]

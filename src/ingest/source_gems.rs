@@ -49,10 +49,19 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
         if lock.is_in_repo(name) {
             return Err(format!("source_gems names {name:?}, which Gemfile.lock already takes from the app's tree"));
         }
-        let Some(installed) = crate::i18n::gems::installed_gem(vfs, &roots, name, version) else {
-            return Err(format!(
-                "source_gems names {name:?} {version}, which no gem root holds (BUNDLE_PATH, GEM_HOME, GEM_PATH): run bundle install"
-            ));
+        // Not under `gems/`: Bundler checks a Git source out under `bundler/gems/`.
+        let installed = match lock.git_source_of(name) {
+            Some(source) => crate::i18n::gems::installed_git_gem(vfs, &roots, source, name).ok_or_else(|| {
+                format!(
+                    "source_gems names {name:?} {version} from {} at {}, which no gem root holds as bundler/gems/{} with a {name}.gemspec (BUNDLE_PATH, GEM_HOME, GEM_PATH): run bundle install",
+                    source.remote,
+                    source.revision,
+                    source.checkout_dir()
+                )
+            })?,
+            None => crate::i18n::gems::installed_gem(vfs, &roots, name, version).ok_or_else(|| {
+                format!("source_gems names {name:?} {version}, which no gem root holds (BUNDLE_PATH, GEM_HOME, GEM_PATH): run bundle install")
+            })?,
         };
         // Not lexical first: a `..` after a linked app dir resolves through the link, as the OS reads it
         let installed = vfs.canonical(&installed).unwrap_or_else(|| normalize(&installed));

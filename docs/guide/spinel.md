@@ -200,9 +200,23 @@ PostgreSQL schema of its own, created when it starts and dropped when it
 exits; every connection of the pool takes it as its `search_path`, as
 Rails' `schema_search_path` setting does.
 
-Not carried yet: array columns (`array: true`), which are stored as
-JSON text; `db/structure.sql` loaded as written; and `lock: true` /
-`with_lock` row locks (`FOR UPDATE`).
+Not carried yet:
+
+- array columns (`array: true`), which are stored as JSON text;
+- `db/structure.sql` loaded as written, and the expression indexes the
+  generated DDL can't carry (left out with a warning);
+- serialized first boots: two servers that boot on an empty database at
+  the same time race to create its tables;
+- `lock: true` / `with_lock` row locks (`FOR UPDATE`);
+- quoting for a column named after a PostgreSQL reserved word in
+  inserts and updates (`user` goes out bare and is a syntax error);
+- fixtures advancing the key's sequence, as Rails' `reset_pk_sequence!`
+  does: fixtures insert explicit ids, so a test that then creates a row
+  in the same keyed table gets a duplicate key from the sequence's
+  first values;
+- the archive's README and Playwright suite seeding the PostgreSQL
+  database: they seed `storage/development.sqlite3`, so seed the
+  database `DATABASE_URL` names yourself before an end-to-end run.
 
 ## Deploying
 

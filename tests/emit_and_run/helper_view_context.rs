@@ -3,6 +3,8 @@
 //! Rails' view context answers them. Emitted, `self` is the helper module,
 //! which had neither: `undefined method 'request' for module ProbesHelper`.
 //! `request.path_info` is the runtime Request's too.
+//! `self` as a parameter's default (`def default_nav(path, view = self)`)
+//! and a helper that answers `self` itself hand the view on as well.
 
 use super::emit_and_run;
 
@@ -13,9 +15,21 @@ fn app() -> emit_and_run::Overlay {
   end
 end
 "##)
+        .write("app/helpers/nav_default_helper.rb", r##"module NavDefaultHelper
+  def default_nav(path, view = self)
+    NavItem.new(view, path)
+  end
+end
+"##)
         .write("app/helpers/probes_helper.rb", r##"module ProbesHelper
   def nav_item(path)
     NavItem.new(self, path)
+  end
+end
+"##)
+        .write("app/helpers/view_self_helper.rb", r##"module ViewSelfHelper
+  def current_view
+    self
   end
 end
 "##)
@@ -34,7 +48,7 @@ end
   end
 end
 "##)
-        .write("app/views/probes/nav.html.erb", r##"<p id="r">[<%= nav_item("/probes/nav").active? %>|<%= nav_item("/x").active? %>|<%= nav_item("/").controller_name %>]</p>
+        .write("app/views/probes/nav.html.erb", r##"<p id="r">[<%= nav_item("/probes/nav").active? %>|<%= nav_item("/x").active? %>|<%= nav_item("/").controller_name %>|<%= default_nav("/probes/nav").active? %>|<%= NavItem.new(current_view, "/probes/nav").active? %>]</p>
 "##)
         .write("config/routes.rb", r##"Rails.application.routes.draw do
   root "articles#index"
@@ -51,7 +65,7 @@ end
 class ProbesControllerTest < ActionDispatch::IntegrationTest
   test "an object a helper builds with self reads the request and controller through it" do
     get "/probes/nav"
-    assert_includes response.body, "[true|false|probes]"
+    assert_includes response.body, "[true|false|probes|true|true]"
   end
 end
 "##)
@@ -74,7 +88,7 @@ controller.request_method = "GET"
 controller.params = {}
 controller.process_action(:nav)
 body = controller.body
-raise body unless body.include?("[true|false|probes]")
+raise body unless body.include?("[true|false|probes|true|true]")
 puts "probe passed"
 "##;
 

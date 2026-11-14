@@ -4068,7 +4068,7 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
         // Here `self` is the module, so it answers them with the
         // dispatch's, as the view's own readers do. A module that
         // defines either keeps its own.
-        if is_helper_module && lc.methods.iter().any(|m| hands_self_on(&m.body)) {
+        if is_helper_module && lc.methods.iter().any(method_hands_self_on) {
             for name in ["request", "controller"] {
                 push_view_context_reader(&mut lc.methods, name, &lc.name);
             }
@@ -4094,8 +4094,18 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
     hoist_pure_helper_constants(lcs);
 }
 
-/// Does this body use `self` as a value (an argument, an assignment, an
-/// element), rather than only as a call's receiver?
+/// Does this method use `self` as a value, in its body (answered
+/// itself, or as an argument, an assignment, an element) or as a
+/// parameter's default (`view = self`), rather than only as a call's
+/// receiver?
+fn method_hands_self_on(m: &MethodDef) -> bool {
+    std::iter::once(&m.body)
+        .chain(m.params.iter().filter_map(|p| p.default.as_ref()))
+        .any(|e| matches!(&*e.node, ExprNode::SelfRef) || hands_self_on(e))
+}
+
+/// Does a child of `e`, or of its descendants, use `self` other than as
+/// a call's receiver?
 fn hands_self_on(e: &Expr) -> bool {
     let recv = match &*e.node {
         ExprNode::Send { recv: Some(r), .. } => Some(r as *const Expr),

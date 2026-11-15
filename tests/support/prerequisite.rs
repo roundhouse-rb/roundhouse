@@ -44,3 +44,21 @@ pub fn missing(what: &str) {
     );
     eprintln!("skipping {test}: {what}");
 }
+
+/// `command`'s output, or `None` once `missing(...)` has said that its
+/// program is not on `PATH`: the caller returns. Any other error starting
+/// it fails the test, and what the program answered is the caller's to judge.
+pub fn output_of(command: &mut std::process::Command) -> Option<std::process::Output> {
+    match command.output() {
+        Ok(output) => Some(output),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A working directory that is not there fails the same way, and is no missing program.
+            if let Some(dir) = command.get_current_dir() {
+                assert!(dir.is_dir(), "{command:?}: its directory {} is not there", dir.display());
+            }
+            missing(&format!("{} not available on PATH", command.get_program().to_string_lossy()));
+            None
+        }
+        Err(error) => panic!("{command:?}: {error}"),
+    }
+}

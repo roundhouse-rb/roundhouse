@@ -17,8 +17,11 @@ require "json"
 module ActiveSupport
   module JSON
     class << self
+      # The generated document is fresh and unfrozen, as `gsub`'s copy of it
+      # would be: with none of the three characters in it, it is the answer.
       def encode(value)
-        JsonBuilder.escape_html_entities(encode_without_escape(value))
+        json = encode_without_escape(value)
+        json.match?(JsonBuilder::JSON_HTML_ESCAPE_PATTERN) ? JsonBuilder.escape_html_entities(json) : json
       end
 
       def encode_without_escape(value)

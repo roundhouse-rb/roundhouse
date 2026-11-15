@@ -4246,6 +4246,9 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         // `[]` below keeps Str: the readers index inside `bytesize` (the
         // verifier's constant-time `secure_compare`).
         "getbyte" => Ty::Int,
+        // `setbyte(i, byte)` → the byte written (the CSRF token's XOR
+        // writes over a copy, a byte at a time).
+        "setbyte" => Ty::Int,
         // `byteslice(start, length)` — the bytes in that range, or nil
         // when `start` lies past the end. campfire truncates a SHA-256
         // hex digest to its first 32 bytes for a weak ETag.

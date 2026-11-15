@@ -11,6 +11,7 @@ module ActionController
     def self.mint: () -> String
     def self.unmask: (String encoded) -> String
     def self.decode: (String encoded) -> String
+    def self.secret_bytes: (String encoded) -> String
     def self.xor: (String a, String b) -> String
     def self.hmac_global: (String raw) -> String
   end

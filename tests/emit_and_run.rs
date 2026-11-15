@@ -4026,6 +4026,66 @@ fn class_configuration_shares_a_name_with_an_instance_method() {
     assert!(run.stdout.contains("class and instance configuration names passed"));
 }
 
+/// Under the Rack stack the session is committed above the gems'
+/// middleware (`Main.commit_session`), so the dispatch below it has
+/// nothing to encode: a request encodes its session when it is restored
+/// and when it is committed, twice, and sets the cookie it set before: on
+/// a first visit that mints a CSRF token, and not when the browser sends
+/// the session back unchanged. The CGI entry, with no commit above it,
+/// still encodes after the action and sets the cookie itself.
+#[test]
+fn a_request_through_the_rack_stack_encodes_its_session_twice() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+encoded = 0
+ActionDispatch::Session.prepend(Module.new { define_method(:to_cookie) { encoded += 1; super() } })
+name = Rails.application.session_cookie_key
+session_cookie = lambda do |response|
+  Array(response.headers["set-cookie"]).flat_map { |line| line.split("\n") }.find { |line| line.start_with?("#{name}=") }
+end
+
+# A first visit to a page with a form: the session gains a CSRF token and is set.
+first = client.get("/articles/new")
+check.(first.status == 200, "GET /articles/new answers #{first.status}")
+set = session_cookie.(first)
+check.(!set.nil? && set.include?("HttpOnly"), "a first visit sets the session cookie: #{first.headers["set-cookie"].inspect}")
+check.(encoded == 2, "a first visit encodes the session #{encoded} times, want 2 (restored, committed)")
+
+# The browser sends it back: nothing changes, nothing is set.
+encoded = 0
+again = client.get("/articles/new", "HTTP_COOKIE" => set.split(";").first)
+check.(again.status == 200, "the second GET answers #{again.status}")
+check.(session_cookie.(again).nil?, "an unchanged session is not set again: #{again.headers["set-cookie"].inspect}")
+check.(encoded == 2, "an unchanged session is encoded #{encoded} times, want 2")
+
+# A response that does not touch the session, with no cookie: none is set.
+encoded = 0
+missing = client.get("/no-such-page")
+check.(missing.status == 404 && session_cookie.(missing).nil?, "a 404 sets no session: #{missing.status} #{missing.headers["set-cookie"].inspect}")
+check.(encoded == 2, "a 404 encodes the session #{encoded} times, want 2")
+
+# The CGI entry has no commit above it: there the dispatch still encodes
+# the session after the action and sets the cookie itself.
+encoded = 0
+out = StringIO.new
+Main.run({ "REQUEST_METHOD" => "GET", "PATH_INFO" => "/articles/new", "QUERY_STRING" => "" }, StringIO.new(""), out)
+check.(out.string.start_with?("Status: 200"), "the CGI entry answers #{out.string[0, 60].inspect}")
+check.(out.string.include?("Set-Cookie: #{name}="), "the CGI entry sets the session cookie: #{out.string[0, 400].inspect}")
+check.(encoded == 2, "the CGI entry encodes the session #{encoded} times, want 2 (restored, after the action)")
+puts "session encodings contract passed"
+"##)
+        .assert_passes();
+}
+
 #[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
     for (overlay, assertions) in [
@@ -4036,6 +4096,48 @@ fn finite_concern_class_configuration_runs_without_replaying_rails() {
         run.assert_passes();
         assert!(run.stdout.contains("finite class configuration contract passed"));
     }
+}
+
+/// The headers of a response reach Rack from the controller's header store
+/// itself, not through a Hash filled from it entry by entry: the store is
+/// not walked by index, and the response carries the names and values it
+/// carried, in the order they were written.
+#[test]
+fn the_dispatcher_hands_on_the_header_store_without_copying_it() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+client = Rack::MockRequest.new(builder.to_app)
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+walked = 0
+ActionController::HeaderStore.prepend(Module.new {
+  define_method(:key_at) { |i|
+    walked += 1 if caller_locations(1, 1).first.path.end_with?("/main.rb")
+    super(i)
+  }
+})
+defaults = { "x-frame-options" => "SAMEORIGIN", "x-xss-protection" => "0", "x-content-type-options" => "nosniff",
+             "x-permitted-cross-domain-policies" => "none", "referrer-policy" => "strict-origin-when-cross-origin" }
+["/articles/new", "/no-such-page"].each do |path|
+  walked = 0
+  response = client.get(path)
+  check.(response.status == (path == "/articles/new" ? 200 : 404), "#{path} answers #{response.status}")
+  next unless response.status == 200
+  defaults.each { |name, value| check.(response.headers[name] == value, "#{path}: #{name} is #{response.headers[name].inspect}") }
+  names = response.headers.keys
+  check.(names.first == "content-type", "#{path}: the first header is #{names.first.inspect}")
+  check.((names & defaults.keys) == defaults.keys, "#{path}: the default headers come in the order #{(names & defaults.keys).inspect}")
+  check.(walked == 0, "#{path}: the dispatcher walked the header store by index #{walked} times")
+end
+puts "header store contract passed"
+"##)
+        .assert_passes();
 }
 
 /// `Dry::Struct` classes construct, coerce and refuse as dry-struct does,
@@ -4052,6 +4154,59 @@ fn dry_struct_classes_run_lowered() {
     assert!(run.stdout.contains("dry-struct contract passed"));
     assert!(run.stdout.contains("dry-struct stamp contract passed"));
     assert!(run.stdout.contains("dry-struct clock contract passed"));
+}
+
+/// A cookie the response sets carries `Secure` when the request came over
+/// https (`HTTPS`, or the first `X-Forwarded-Proto`), and that is all the
+/// Rack response reads the scheme for: a response that sets no cookie does
+/// not ask the env for it.
+#[test]
+fn the_rack_response_reads_the_scheme_only_to_flag_a_cookie() {
+    emit_and_run::real_blog()
+        .run_ruby(r##"
+require "rack"
+require "rack/mock"
+%w[nio websocket/driver].each { |feature| $LOADED_FEATURES << "#{feature}.rb" }
+module NIO; end
+module WebSocket; end
+builder = Rack::Builder.new
+builder.instance_eval(File.read("config.ru"), "config.ru")
+check = ->(cond, what) { raise "FAILED: #{what}" unless cond }
+asked = Hash.new(0)
+spy = Class.new(Hash) {
+  define_method(:[]) { |key| asked[key] += 1 if key == "HTTPS"; super(key) }
+  define_method(:fetch) { |key, *rest, &blk| asked[key] += 1 if key == "HTTP_X_FORWARDED_PROTO"; super(key, *rest, &blk) }
+}
+env_of = ->(pairs) { spy.new.merge!({ "REQUEST_METHOD" => "GET" }).merge!(pairs) }
+answer = ->(cookies, secure = {}, samesite = {}) { [200, "body", "text/html; charset=utf-8", nil, cookies, { "X-Test" => "1" }, secure, samesite, {}, {}] }
+
+# No cookie to set: the answer is the same response, and the scheme is not read.
+status, headers, body = Main.rack_response(env_of.({ "HTTP_X_FORWARDED_PROTO" => "https" }), answer.({}))
+check.(status == 200 && body == ["body"] && headers["x-test"] == "1" && headers["content-type"] == "text/html; charset=utf-8", "the response is #{[status, headers, body].inspect}")
+check.(!headers.key?("set-cookie"), "no cookie is set: #{headers.inspect}")
+check.(asked.empty?, "a response that sets no cookie asked the env for #{asked.keys.inspect}")
+
+# A cookie to set: Secure exactly when the request is https, as before.
+line = ->(pairs, *flags) { Main.rack_response(env_of.(pairs), answer.({ "k" => "v" }, *flags))[1]["set-cookie"] }
+plain = ["k=v; Path=/; HttpOnly; SameSite=Lax"]
+secure = ["k=v; Path=/; HttpOnly; SameSite=Lax; Secure"]
+{ {} => plain, { "HTTPS" => "on" } => secure, { "HTTPS" => "off" } => plain, { "HTTPS" => "ON" } => plain,
+  { "HTTP_X_FORWARDED_PROTO" => "https" } => secure, { "HTTP_X_FORWARDED_PROTO" => "HTTPS, http" } => secure,
+  { "HTTP_X_FORWARDED_PROTO" => " https ,http" } => secure, { "HTTP_X_FORWARDED_PROTO" => "http, https" } => plain,
+  { "HTTP_X_FORWARDED_PROTO" => "" } => plain, { "HTTP_X_FORWARDED_PROTO" => "http" } => plain,
+  { "HTTPS" => "on", "HTTP_X_FORWARDED_PROTO" => "http" } => secure }.each do |pairs, want|
+  asked.clear
+  check.(line.(pairs) == want, "#{pairs.inspect} sets #{line.(pairs).inspect}, want #{want.inspect}")
+  check.(asked["HTTPS"] > 0, "#{pairs.inspect}: a response that sets a cookie reads the scheme")
+end
+# The flags that do not depend on the scheme still hold without it.
+check.(line.({}, { "k" => true }) == secure, "a cookie the app flagged secure: #{line.({}, { "k" => true }).inspect}")
+check.(line.({}, {}, { "k" => "None" }) == ["k=v; Path=/; HttpOnly; SameSite=None; Secure"], "SameSite=None is Secure: #{line.({}, {}, { "k" => "None" }).inspect}")
+cleared = Main.rack_response(env_of.({ "HTTPS" => "on" }), answer.({ "gone" => nil }))[1]["set-cookie"]
+check.(cleared == ["gone=; Path=/; Max-Age=0"], "a cleared cookie: #{cleared.inspect}")
+puts "cookie scheme contract passed"
+"##)
+        .assert_passes();
 }
 
 /// Oj under `Oj.mimic_JSON` + `Oj.optimize_rails` (the initializer a Rails

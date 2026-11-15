@@ -609,9 +609,23 @@ module GzipCache
     headers[name] || headers[name.split("-").map(&:capitalize).join("-")]
   end
 
+  # Read on every response. A header that starts with a bare gzip (every
+  # browser's) accepts it whatever follows, and one that never spells
+  # gzip cannot: both are answered without splitting the header. The
+  # answers are the full parse's for the binary Strings a server hands
+  # over and for any valid String in an ASCII-compatible encoding.
+  #
+  # In the full parse the coding is taken with `shift`, not `coding,
+  # *params = …`: YJIT does not compile a splat destructure and left its
+  # code there, once per entry read, so the rest of the request's way
+  # back to the server ran in the interpreter.
   def self.accepts_gzip?(accept)
-    accept.to_s.downcase.split(",").any? { |part|
-      coding, *params = part.strip.split(";")
+    accept = accept.to_s
+    return true if accept == "gzip" || accept.start_with?("gzip,")
+    return false unless accept.match?(/gzip/i)
+    accept.downcase.split(",").any? { |part|
+      params = part.strip.split(";")
+      coding = params.shift
       next false unless coding == "gzip" || coding == "x-gzip"
       q = "1"
       params.each { |p|

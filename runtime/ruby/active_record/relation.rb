@@ -3571,7 +3571,11 @@ module ActiveRecord
     # other value, and a column of another table, binds as given. The
     # boolean test comes first: `schema_column_types` builds its hash on
     # each call, and every `where(id: ids)` element passes through here.
+    # An Integer, the usual value, returns before it: it is never `true`
+    # or `false`, and comparing it with them is a YJIT side exit per
+    # value (`Integer#==` is compiled only for two fixnums).
     def column_bound_value(col, val)
+      return val if val.is_a?(Integer)
       return 1 if val == true && integer_column?(col)
       return 0 if val == false && integer_column?(col)
       val

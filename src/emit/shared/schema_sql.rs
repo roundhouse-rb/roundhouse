@@ -17,7 +17,9 @@
 
 use std::fmt::Write;
 
-use crate::schema::{Column, ColumnType, GeneratedColumnStorage, Index, Schema, Table};
+use crate::schema::{
+    Column, ColumnType, ForeignKey, GeneratedColumnStorage, Index, MigrationStep, ReferentialAction, Schema, Table,
+};
 
 /// The SQL engine a schema renders for: how it spells identifiers,
 /// column types and key columns, and which partial-index predicates it
@@ -264,130 +266,170 @@ pub fn render_schema_statements_for(schema: &Schema, dialect: Dialect) -> Result
     validate_schema_for_dialect(schema, dialect)?;
     let mut out: Vec<String> = Vec::new();
     for (_name, table) in &schema.tables {
-        // A virtual table is built by its MODULE, not from a column
-        // list: no types, no NOT NULL, no AUTOINCREMENT key, and the
-        // argument list is the module's own DSL rendered back verbatim
-        // (fts5 mixes column names and `tokenize=…` options in one
-        // list). Rendering it through the branch below produced DDL
-        // sqlite rejects.
-        if let Some(vm) = &table.virtual_module {
-            if dialect != Dialect::Sqlite {
-                return Err(format!(
-                    "table `{}` is an SQLite virtual table (`USING {}`), which {dialect:?} has no DDL for",
-                    table.name.as_str(),
-                    vm.module
-                ));
-            }
-            out.push(format!(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING {}({})",
-                dialect.ident(table.name.as_str()),
-                vm.module,
-                vm.args.join(", ")
-            ));
-            continue;
-        }
-        let mut s = String::new();
-        writeln!(s, "CREATE TABLE IF NOT EXISTS {} (", dialect.ident(table.name.as_str())).unwrap();
-        let mut lines: Vec<String> = Vec::new();
-        for col in &table.columns {
-            if col.primary_key && table.primary_key_columns.is_empty() {
-                lines.push(dialect.key_column(col));
-                continue;
-            }
-            // A stored array column (`lower::array_columns`) holds the
-            // Array as JSON text in SQLite, and in PostgreSQL as an array
-            // of its element (`text[]`, `integer[]`).
-            let col_type = if col.array_stored {
-                match dialect {
-                    Dialect::Sqlite => dialect.column_type(&ColumnType::Text),
-                    Dialect::Postgres => format!("{}[]", dialect.column_type(&col.col_type)),
-                }
-            } else {
-                dialect.column_type(&col.col_type)
-            };
-            let mut line = format!("  {} {}", dialect.ident(col.name.as_str()), col_type);
-            if let Some(generated) = &col.generated {
-                line.push_str(" GENERATED ALWAYS AS (");
-                line.push_str(&generated.expression);
-                line.push_str(") ");
-                line.push_str(match generated.storage {
-                    GeneratedColumnStorage::Stored => "STORED",
-                    GeneratedColumnStorage::Virtual => "VIRTUAL",
-                });
-            }
-            if !col.nullable {
-                line.push_str(" NOT NULL");
-            }
-            if let Some(default) = dialect.column_default(col) {
-                line.push_str(" DEFAULT ");
-                line.push_str(&default);
-            }
-            lines.push(line);
-        }
-        if !table.primary_key_columns.is_empty() {
-            let keys = table.primary_key_columns.iter().map(|c| dialect.ident(c.as_str())).collect::<Vec<_>>().join(", ");
-            lines.push(format!("  PRIMARY KEY ({keys})"));
-        }
-        // Not on PostgreSQL yet: Rails adds its constraints with ALTER TABLE, and the fixture loader there must disable triggers to load out of order.
-        if dialect == Dialect::Sqlite {
-            for fk in &table.foreign_keys {
-                if !schema.tables.contains_key(&fk.to_table.0) {
-                    continue;
-                }
-                if fk.from_columns.is_empty() || fk.from_columns.len() != fk.to_columns.len() {
-                    return Err(format!("foreign key on {} requires equally sized nonempty column lists", table.name));
-                }
-                let mut line = format!(
-                    "  FOREIGN KEY ({}) REFERENCES {} ({})",
-                    fk.from_columns.iter().map(|c| dialect.ident(c.as_str())).collect::<Vec<_>>().join(", "),
-                    dialect.ident(fk.to_table.0.as_str()),
-                    fk.to_columns.iter().map(|c| dialect.ident(c.as_str())).collect::<Vec<_>>().join(", ")
-                );
-                for (verb, action) in [("DELETE", &fk.on_delete), ("UPDATE", &fk.on_update)] {
-                    if let Some(sql) = referential_action_sql(action) {
-                        line.push_str(&format!(" ON {verb} {sql}"));
-                    }
-                }
-                if let Some(timing) = fk.deferrable {
-                    line.push_str(match timing {
-                        crate::schema::Deferrable::Immediate => " DEFERRABLE INITIALLY IMMEDIATE",
-                        crate::schema::Deferrable::Deferred => " DEFERRABLE INITIALLY DEFERRED",
-                    });
-                }
-                lines.push(line);
-            }
-        }
-        for check in &table.check_constraints {
-            let name = check.name.as_ref().map(|n| format!("CONSTRAINT {} ", dialect.ident(n))).unwrap_or_default();
-            lines.push(format!("  {name}CHECK ({})", check.expression));
-        }
-        writeln!(s, "{}", lines.join(",\n")).unwrap();
-        s.push(')');
-        out.push(s);
+        out.push(create_table_sql(table, dialect, true, &|to| schema.tables.contains_key(to))?);
     }
     for (_name, table) in &schema.tables {
         for idx in &table.indexes {
-            let cols = idx.expression.clone().unwrap_or_else(|| {
-                idx.columns.iter().map(|c| dialect.ident(c.as_str())).collect::<Vec<_>>().join(", ")
-            });
-            let unique = if idx.unique { "UNIQUE " } else { "" };
-            let using = match (dialect, idx.using.as_deref()) {
-                (Dialect::Postgres, Some(method)) => format!(" USING {}", dialect.ident(method)),
-                _ => String::new(),
-            };
-            let predicate = dialect
-                .index_predicate(table, idx, schema.expression_dialect)
-                .map(|p| format!(" WHERE {p}"))
-                .unwrap_or_default();
-            out.push(format!(
-                "CREATE {unique}INDEX IF NOT EXISTS {} ON {}{using} ({}){predicate}",
-                dialect.ident(idx.name.as_str()),
-                dialect.ident(table.name.as_str()),
-                cols,
-            ));
+            out.push(create_index_sql(table, idx, dialect, true, schema.expression_dialect));
         }
     }
     Ok(out)
+}
+
+/// One table's CREATE statement. `if_not_exists` for loading a schema
+/// (idempotent at boot); a migration's `create_table` leaves it off, so
+/// creating a table that exists fails as it does under Rails.
+/// `references_known` says which tables a FOREIGN KEY clause may name:
+/// loading a schema writes the keys to its own tables, a migration every
+/// key it declares, as Rails' SQLite adapter creates them.
+pub fn create_table_sql(
+    table: &Table,
+    dialect: Dialect,
+    if_not_exists: bool,
+    references_known: &dyn Fn(&crate::ident::Symbol) -> bool,
+) -> Result<String, String> {
+    let ine = if if_not_exists { "IF NOT EXISTS " } else { "" };
+    // A virtual table is built by its MODULE, not from a column
+    // list: no types, no NOT NULL, no AUTOINCREMENT key, and the
+    // argument list is the module's own DSL rendered back verbatim
+    // (fts5 mixes column names and `tokenize=…` options in one
+    // list). Rendering it through the branch below produced DDL
+    // sqlite rejects.
+    if let Some(vm) = &table.virtual_module {
+        if dialect != Dialect::Sqlite {
+            return Err(format!(
+                "table `{}` is an SQLite virtual table (`USING {}`), which {dialect:?} has no DDL for",
+                table.name.as_str(),
+                vm.module
+            ));
+        }
+        return Ok(format!(
+            "CREATE VIRTUAL TABLE {ine}{} USING {}({})",
+            dialect.ident(table.name.as_str()),
+            vm.module,
+            vm.args.join(", ")
+        ));
+    }
+    let mut s = String::new();
+    writeln!(s, "CREATE TABLE {ine}{} (", dialect.ident(table.name.as_str())).unwrap();
+    let mut lines: Vec<String> = Vec::new();
+    for col in &table.columns {
+        if col.primary_key && table.primary_key_columns.is_empty() {
+            lines.push(dialect.key_column(col));
+            continue;
+        }
+        lines.push(format!("  {}", column_definition_sql(col, dialect)));
+    }
+    if !table.primary_key_columns.is_empty() {
+        let keys = table.primary_key_columns.iter().map(|c| dialect.ident(c.as_str())).collect::<Vec<_>>().join(", ");
+        lines.push(format!("  PRIMARY KEY ({keys})"));
+    }
+    // Not on PostgreSQL yet: Rails adds its constraints with ALTER TABLE, and the fixture loader there must disable triggers to load out of order.
+    if dialect == Dialect::Sqlite {
+        for fk in &table.foreign_keys {
+            if !references_known(&fk.to_table.0) {
+                continue;
+            }
+            if fk.from_columns.is_empty() || fk.from_columns.len() != fk.to_columns.len() {
+                return Err(format!("foreign key on {} requires equally sized nonempty column lists", table.name));
+            }
+            lines.push(format!("  {}", foreign_key_sql(fk, dialect)));
+        }
+    }
+    for check in &table.check_constraints {
+        let name = check.name.as_ref().map(|n| format!("CONSTRAINT {} ", dialect.ident(n))).unwrap_or_default();
+        lines.push(format!("  {name}CHECK ({})", check.expression));
+    }
+    writeln!(s, "{}", lines.join(",\n")).unwrap();
+    s.push(')');
+    Ok(s)
+}
+
+/// A non-key column as it appears in CREATE TABLE and `ADD COLUMN`.
+pub fn column_definition_sql(col: &Column, dialect: Dialect) -> String {
+    // A stored array column (`lower::array_columns`) holds the
+    // Array as JSON text in SQLite, and in PostgreSQL as an array
+    // of its element (`text[]`, `integer[]`).
+    let col_type = if col.array_stored {
+        match dialect {
+            Dialect::Sqlite => dialect.column_type(&ColumnType::Text),
+            Dialect::Postgres => format!("{}[]", dialect.column_type(&col.col_type)),
+        }
+    } else {
+        dialect.column_type(&col.col_type)
+    };
+    let mut line = format!("{} {}", dialect.ident(col.name.as_str()), col_type);
+    if let Some(generated) = &col.generated {
+        line.push_str(" GENERATED ALWAYS AS (");
+        line.push_str(&generated.expression);
+        line.push_str(") ");
+        line.push_str(match generated.storage {
+            GeneratedColumnStorage::Stored => "STORED",
+            GeneratedColumnStorage::Virtual => "VIRTUAL",
+        });
+    }
+    if !col.nullable {
+        line.push_str(" NOT NULL");
+    }
+    if let Some(default) = dialect.column_default(col) {
+        line.push_str(" DEFAULT ");
+        line.push_str(&default);
+    }
+    line
+}
+
+/// `FOREIGN KEY ("article_id") REFERENCES "articles" ("id")`, with the
+/// referential actions and deferral Rails writes.
+fn foreign_key_sql(fk: &ForeignKey, dialect: Dialect) -> String {
+    let mut line = format!(
+        "FOREIGN KEY ({}) REFERENCES {} ({})",
+        fk.from_columns.iter().map(|c| dialect.ident(c.as_str())).collect::<Vec<_>>().join(", "),
+        dialect.ident(fk.to_table.0.as_str()),
+        fk.to_columns.iter().map(|c| dialect.ident(c.as_str())).collect::<Vec<_>>().join(", ")
+    );
+    for (verb, action) in [("DELETE", &fk.on_delete), ("UPDATE", &fk.on_update)] {
+        if let Some(sql) = referential_action_sql(action) {
+            line.push_str(&format!(" ON {verb} {sql}"));
+        }
+    }
+    if let Some(timing) = fk.deferrable {
+        line.push_str(match timing {
+            crate::schema::Deferrable::Immediate => " DEFERRABLE INITIALLY IMMEDIATE",
+            crate::schema::Deferrable::Deferred => " DEFERRABLE INITIALLY DEFERRED",
+        });
+    }
+    line
+}
+
+/// One index's CREATE statement. `source` is the schema's expression
+/// dialect, which decides whether SQLite keeps a partial index's
+/// predicate ([`Dialect::index_predicate`]).
+pub fn create_index_sql(
+    table: &Table,
+    idx: &Index,
+    dialect: Dialect,
+    if_not_exists: bool,
+    source: crate::schema::generated::GeneratedExpressionDialect,
+) -> String {
+    let ine = if if_not_exists { "IF NOT EXISTS " } else { "" };
+    let cols = idx.expression.clone().unwrap_or_else(|| {
+        idx.columns.iter().map(|c| dialect.ident(c.as_str())).collect::<Vec<_>>().join(", ")
+    });
+    let unique = if idx.unique { "UNIQUE " } else { "" };
+    let using = match (dialect, idx.using.as_deref()) {
+        (Dialect::Postgres, Some(method)) => format!(" USING {}", dialect.ident(method)),
+        _ => String::new(),
+    };
+    let predicate = dialect
+        .index_predicate(table, idx, source)
+        .map(|p| format!(" WHERE {p}"))
+        .unwrap_or_default();
+    format!(
+        "CREATE {unique}INDEX {ine}{} ON {}{using} ({}){predicate}",
+        dialect.ident(idx.name.as_str()),
+        dialect.ident(table.name.as_str()),
+        cols,
+    )
 }
 
 fn referential_action_sql(action: &crate::schema::ReferentialAction) -> Option<&'static str> {
@@ -399,6 +441,74 @@ fn referential_action_sql(action: &crate::schema::ReferentialAction) -> Option<&
         SetNull => Some("SET NULL"),
         SetDefault => Some("SET DEFAULT"),
     }
+}
+
+/// The SQLite statements `rails db:migrate` issues for one migration
+/// step, as Rails' SQLite adapter makes the change: ADD COLUMN, RENAME
+/// COLUMN and RENAME TO in place; any other change to a table's columns or
+/// foreign keys by rebuilding it (SQLite's documented procedure, which
+/// `alter_table` follows: the new definition is created, the rows copied,
+/// the old table dropped and the new one renamed into place, with foreign
+/// key checks deferred to the migration's commit); an index rename as a
+/// drop and a create. `source` is the app schema's expression dialect.
+pub fn render_migration_step(
+    step: &MigrationStep,
+    source: crate::schema::generated::GeneratedExpressionDialect,
+) -> Result<Vec<String>, String> {
+    let d = Dialect::Sqlite;
+    let every_table = |_: &crate::ident::Symbol| true;
+    Ok(match step {
+        MigrationStep::CreateTable { table } => {
+            let mut out = vec![create_table_sql(table, d, false, &every_table)?];
+            out.extend(table.indexes.iter().map(|i| create_index_sql(table, i, d, false, source)));
+            out
+        }
+        MigrationStep::DropTable { name } => vec![format!("DROP TABLE {}", d.ident(name.as_str()))],
+        MigrationStep::RenameTable { from, to } => {
+            vec![format!("ALTER TABLE {} RENAME TO {}", d.ident(from.as_str()), d.ident(to.as_str()))]
+        }
+        MigrationStep::AddColumns { table, columns } => columns
+            .iter()
+            .map(|c| format!("ALTER TABLE {} ADD COLUMN {}", d.ident(table.as_str()), column_definition_sql(c, d)))
+            .collect(),
+        MigrationStep::RenameColumn { table, from, to } => vec![format!(
+            "ALTER TABLE {} RENAME COLUMN {} TO {}",
+            d.ident(table.as_str()),
+            d.ident(from.as_str()),
+            d.ident(to.as_str())
+        )],
+        MigrationStep::RebuildTable { before, after } => {
+            let name = after.name.as_str();
+            let temp = format!("{name}__rh_alter");
+            let mut moved = after.clone();
+            moved.name = crate::ident::Symbol::from(temp.as_str());
+            // the rows' values carry over for every column the table keeps;
+            // a generated column is computed again, never inserted
+            let kept: Vec<String> = after
+                .columns
+                .iter()
+                .filter(|c| c.generated.is_none())
+                .filter(|c| before.columns.iter().any(|b| b.name == c.name && b.generated.is_none()))
+                .map(|c| d.ident(c.name.as_str()))
+                .collect();
+            let mut out = vec!["PRAGMA defer_foreign_keys = ON".to_string(), create_table_sql(&moved, d, false, &every_table)?];
+            if !kept.is_empty() {
+                out.push(format!(
+                    "INSERT INTO {} ({cols}) SELECT {cols} FROM {}",
+                    d.ident(&temp),
+                    d.ident(name),
+                    cols = kept.join(", ")
+                ));
+            }
+            out.push(format!("DROP TABLE {}", d.ident(name)));
+            out.push(format!("ALTER TABLE {} RENAME TO {}", d.ident(&temp), d.ident(name)));
+            out.extend(after.indexes.iter().map(|i| create_index_sql(after, i, d, false, source)));
+            out
+        }
+        MigrationStep::AddIndex { table, index } => vec![create_index_sql(table, index, d, false, source)],
+        MigrationStep::RemoveIndex { name } => vec![format!("DROP INDEX {}", d.ident(name.as_str()))],
+        MigrationStep::Execute { sql } => vec![sql.clone()],
+    })
 }
 
 /// Reject a schema that a target dialect cannot represent. Current

@@ -190,6 +190,8 @@ mod controller_layouts;
 mod response_headers;
 #[path = "spinel_toolchain/action_dispatch_request_put.rs"]
 mod action_dispatch_request_put;
+#[path = "spinel_toolchain/db_migrate.rs"]
+mod db_migrate;
 #[path = "spinel_toolchain/strong_params.rs"]
 mod strong_params;
 #[path = "spinel_toolchain/params_wrapper.rs"]

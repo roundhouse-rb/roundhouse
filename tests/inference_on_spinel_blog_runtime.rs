@@ -659,7 +659,13 @@ fn untyped_subexpressions_baseline() {
     // them for the RBS-paired gate, which stays at 0.
     // MEASURED 1433 on merging #2176 and #2177 (1427): restore_attributes's
     // +1 and the association relation inverses' +5, which add up.
-    const CEILING: usize = 1433;
+    // MEASURED 1469 on db:migrate (1433): `ActiveRecord::Migrator` runs
+    // `db:migrate` / `db:prepare` over the adapter seam. Its parameters and
+    // the rows it reads back are vars on this RBS-less probe: +36 (`boot`
+    // +11, `load_schema` +9, `prepare` +7, `pending` +5, `migrate` +2,
+    // `record_environment` +1, `postgresql?` +1), every other method's
+    // count unchanged, and migrator.rbs types all 36.
+    const CEILING: usize = 1469;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

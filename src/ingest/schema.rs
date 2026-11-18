@@ -522,6 +522,14 @@ fn apply_table_verb(
             if let (Some(old), Some(new)) = (arg_name(0), arg_name(1)) {
                 if let Some(mut table) = schema.tables.shift_remove(&Symbol::from(old.as_str())) {
                     table.name = Symbol::from(new.clone());
+                    // an index carrying the generated name follows the table's
+                    // (Rails' rename_table_indexes)
+                    for idx in &mut table.indexes {
+                        let cols: Vec<&str> = idx.columns.iter().map(|c| c.as_str()).collect();
+                        if idx.name.as_str() == default_index_name(&old, &cols) {
+                            idx.name = Symbol::from(default_index_name(&new, &cols));
+                        }
+                    }
                     schema.tables.insert(Symbol::from(new.clone()), table);
                     // Foreign keys follow the table: SQLite and PostgreSQL both retarget them.
                     for fk in schema.tables.values_mut().flat_map(|t| t.foreign_keys.iter_mut()).filter(|fk| fk.to_table.0.as_str() == old) {
@@ -574,6 +582,47 @@ fn apply_table_verb(
                     for col in &mut table.columns {
                         if col.name.as_str() == old {
                             col.name = Symbol::from(new.clone());
+                        }
+                    }
+                    // the indexes and foreign keys over it follow the column,
+                    // as SQLite's RENAME COLUMN carries them: left on the old
+                    // name, the schema's CREATE INDEX named a column that no
+                    // longer exists
+                    for idx in &mut table.indexes {
+                        for c in &mut idx.columns {
+                            if c.as_str() == old {
+                                *c = Symbol::from(new.clone());
+                            }
+                        }
+                    }
+                    for key in table.foreign_keys.iter_mut().flat_map(|fk| fk.from_columns.iter_mut()) {
+                        if key.as_str() == old {
+                            *key = Symbol::from(new.clone());
+                        }
+                    }
+                    // an index over it carrying the generated name is
+                    // renamed for the new column (Rails'
+                    // rename_column_indexes)
+                    for idx in &mut table.indexes {
+                        let cols: Vec<&str> = idx.columns.iter().map(|c| c.as_str()).collect();
+                        if !cols.contains(&new.as_str()) {
+                            continue;
+                        }
+                        let old_cols: Vec<&str> =
+                            cols.iter().map(|c| if *c == new.as_str() { old.as_str() } else { c }).collect();
+                        if idx.name.as_str() == default_index_name(&t, &old_cols) {
+                            idx.name = Symbol::from(default_index_name(&t, &cols));
+                        }
+                    }
+                }
+                // keys in any table that point at the column follow it too, as
+                // SQLite's RENAME COLUMN rewrites their REFERENCES (self-references included)
+                for fk in schema.tables.values_mut().flat_map(|table| table.foreign_keys.iter_mut()) {
+                    if fk.to_table.0.as_str() == t {
+                        for key in &mut fk.to_columns {
+                            if key.as_str() == old {
+                                *key = Symbol::from(new.clone());
+                            }
                         }
                     }
                 }
@@ -664,26 +713,53 @@ fn apply_table_verb(
         }
         "add_reference" | "add_belongs_to" => {
             if let (Some(t), Some(name)) = (arg_name(0), arg_name(1)) {
-                if let Some(table) = schema.tables.get_mut(&Symbol::from(t)) {
-                    table.columns.retain(|x| x.name.as_str() != name);
-                    table.columns.push(reference_column(&name));
+                // `add_reference :comments, :article` adds what Rails'
+                // ReferenceDefinition does: `article_id` (with `null:`), its
+                // index and, below, its foreign key
+                let options = &args[2.min(args.len())..];
+                let mut id = reference_column(&name);
+                id.nullable = parse_column_opts(options.iter()).nullable.unwrap_or(true);
+                let (cols, idxs) = reference_definition(&t, id, options, file)?;
+                if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
+                    // A column under the logical name goes only when it is a reference an
+                    // earlier fold stored that way; an ordinary `author` stays, as in Rails.
+                    table.columns.retain(|x| {
+                        !(x.name.as_str() == name && matches!(x.col_type, ColumnType::Reference { .. }))
+                            && !cols.iter().any(|c| c.name == x.name)
+                    });
+                    table.columns.extend(cols);
+                    table.indexes.retain(|i| !idxs.iter().any(|n| n.name == i.name));
+                    table.indexes.extend(idxs);
                     apply_reference_foreign_key(&args[1..], table, file)?;
                 }
             }
         }
         "remove_reference" | "remove_belongs_to" => {
             if let (Some(t), Some(name)) = (arg_name(0), arg_name(1)) {
-                // Rails removes `<name>_id` and its foreign key. The fold keeps a
-                // reference under its logical name until a foreign key renames it.
+                // Rails removes `<name>_id` (and `<name>_type` with
+                // `polymorphic: true`), the indexes over them and the foreign
+                // key from them. A schema folded before references were
+                // named `_id` may still hold one under its logical name.
                 let physical = format!("{name}_id");
+                let polymorphic = kwarg_value(args.iter().skip(2), "polymorphic")
+                    .is_some_and(|v| v.as_nil_node().is_none() && bool_value(&v) != Some(false));
+                let type_column = format!("{name}_type");
                 let removed = |column: &Column| column.name.as_str() == physical
-                    || (column.name.as_str() == name && matches!(column.col_type, ColumnType::Reference { .. }));
+                    || (column.name.as_str() == name && matches!(column.col_type, ColumnType::Reference { .. }))
+                    || (polymorphic && column.name.as_str() == type_column);
                 if let Some(table) = schema.tables.get(&Symbol::from(t.as_str())) {
                     let no_id = !table.columns.iter().any(|column| column.name.as_str() == physical);
                     for column in table.columns.iter().filter(|column| removed(column)) {
                         refuse_composite_primary_key_mutation(verb, table, column.name.as_str(), file)?;
                     }
-                    refuse_composite_foreign_key_mutation(verb, table, &[physical.as_str()], file)?;
+                    let mut dropped = vec![physical.as_str()];
+                    if polymorphic {
+                        dropped.push(type_column.as_str());
+                    }
+                    refuse_composite_foreign_key_mutation(verb, table, &dropped, file)?;
+                    for column in &dropped {
+                        refuse_predicate_column(verb, table, column, file)?;
+                    }
                     if no_id && table.columns.iter().any(|column| {
                         column.name.as_str() == name && column.generated.is_some()
                     }) {
@@ -705,7 +781,10 @@ fn apply_table_verb(
                 }
                 if let Some(table) = schema.tables.get_mut(&Symbol::from(t.as_str())) {
                     table.columns.retain(|x| !removed(x));
-                    table.foreign_keys.retain(|fk| !matches!(fk.from_columns.as_slice(), [key] if key.as_str() == physical));
+                    table.foreign_keys.retain(|fk| {
+                        !matches!(fk.from_columns.as_slice(), [key] if key.as_str() == physical
+                            || (polymorphic && key.as_str() == type_column))
+                    });
                     // Indexes over the removed column go too, as `remove_named_column` drops them.
                     let columns = &table.columns;
                     table.indexes.retain(|idx| idx.columns.iter().all(|name| columns.iter().any(|col| col.name == *name)));
@@ -2202,6 +2281,31 @@ fn table_from_create_table(
                             // Migration macro; schema.rb has these
                             // already materialized as two datetimes.
                             columns.extend(timestamp_columns());
+                        } else if call_name == "references" || call_name == "belongs_to" {
+                            // The column as any `t.<type>` reads it, then
+                            // what Rails' ReferenceDefinition makes of it:
+                            // `<name>_id`, `<name>_type` and the index. The
+                            // foreign key follows below, once every column
+                            // is in place. `t.references :author, :editor`
+                            // makes each, with every option.
+                            let rargs = call_arguments(&call);
+                            let names: Vec<String> = rargs.iter().filter_map(name_value).collect();
+                            match column_from_call(&call, &table_name, file, dialect) {
+                                Ok(Some(col)) => {
+                                    for name in &names {
+                                        let col = Column { name: Symbol::from(name.as_str()), ..col.clone() };
+                                        match reference_definition(&table_name, col, &rargs[1.min(rargs.len())..], file) {
+                                            Ok((cols, idxs)) => {
+                                                columns.extend(cols);
+                                                indexes.extend(idxs);
+                                            }
+                                            Err(gap) => gaps.push(gap),
+                                        }
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(gap) => gaps.push(gap),
+                            }
                         } else {
                             match column_from_call(&call, &table_name, file, dialect) {
                                 Ok(Some(col)) => columns.push(col),
@@ -2248,7 +2352,19 @@ fn table_from_create_table(
             }
             let result = match method {
                 "foreign_key" => apply_table_foreign_key(&args, &mut table, file, line),
-                "references" | "belongs_to" => apply_reference_foreign_key(&args, &mut table, file),
+                "references" | "belongs_to" => {
+                    // once per name, each with every option, as above
+                    let positions: Vec<usize> = args.iter().enumerate().filter(|(_, a)| name_value(a).is_some()).map(|(at, _)| at).collect();
+                    positions.into_iter().try_for_each(|at| {
+                        let one: Vec<Node<'_>> = call_arguments(&inner)
+                            .into_iter()
+                            .enumerate()
+                            .filter(|(i, a)| *i == at || name_value(a).is_none())
+                            .map(|(_, a)| a)
+                            .collect();
+                        apply_reference_foreign_key(&one, &mut table, file)
+                    })
+                }
                 _ => Ok(()),
             };
             if let Err(gap) = result { gaps.push(gap); }
@@ -2550,9 +2666,68 @@ fn timestamp_columns_with(nullable: bool) -> [Column; 2] {
     [col("created_at"), col("updated_at")]
 }
 
-/// A `references`/`belongs_to` column keeps the logical name (the
-/// Reference type carries the target table) — same convention as the
-/// schema.rb `t.references` path.
+/// What Rails' ReferenceDefinition makes of `t.references :article` /
+/// `add_reference :comments, :article`, given the column read under the
+/// reference's own name: the column is `article_id`, with `article_type`
+/// beside it when `polymorphic: true`, and an index unless `index: false`
+/// (`index_<table>_on_article_id`, or `index_<table>_on_article` over both
+/// columns of a polymorphic one; `index: { unique: true, name: ... }` is
+/// honored). The foreign key `foreign_key:` asks for is
+/// apply_reference_foreign_key's, once the columns are in place.
+fn reference_definition(
+    table: &str,
+    mut id: Column,
+    options: &[Node<'_>],
+    file: &str,
+) -> IngestResult<(Vec<Column>, Vec<Index>)> {
+    let truthy = |n: &Node<'_>| n.as_nil_node().is_none() && bool_value(n) != Some(false);
+    let name = id.name.as_str().to_string();
+    let polymorphic = foreign_key_option(options, "polymorphic").is_some_and(|n| truthy(&n));
+    let id_name = format!("{name}_id");
+    id.name = Symbol::from(id_name.as_str());
+    let mut index_columns = vec![Symbol::from(id_name.as_str())];
+    let mut columns = Vec::new();
+    if polymorphic {
+        let type_name = format!("{name}_type");
+        columns.push(Column {
+            name: Symbol::from(type_name.as_str()),
+            col_type: ColumnType::String { limit: None },
+            nullable: id.nullable,
+            ..reference_column(&type_name)
+        });
+        index_columns.insert(0, Symbol::from(type_name.as_str()));
+    }
+    columns.insert(0, id);
+    let indexes = match foreign_key_option(options, "index") {
+        Some(value) if !truthy(&value) => vec![],
+        Some(value) => {
+            let mut index = build_index(table, index_columns, None, std::iter::once(&value), file)?;
+            if polymorphic && foreign_key_option(std::slice::from_ref(&value), "name").is_none() {
+                index.name = Symbol::from(format!("index_{table}_on_{name}"));
+            }
+            vec![index]
+        }
+        None => {
+            let index_name = if polymorphic {
+                format!("index_{table}_on_{name}")
+            } else {
+                default_index_name(table, &[id_name.as_str()])
+            };
+            vec![Index { name: Symbol::from(index_name), columns: index_columns, expression: None, unique: false, using: None, predicate: None }]
+        }
+    };
+    Ok((columns, indexes))
+}
+
+/// The name Rails gives an index it names itself:
+/// `index_<table>_on_<column>_and_<column>`.
+fn default_index_name(table: &str, columns: &[&str]) -> String {
+    format!("index_{table}_on_{}", columns.join("_and_"))
+}
+
+/// A `references`/`belongs_to` column under the reference's own name (the
+/// Reference type carries the target table), as `t.references` reads
+/// it; reference_definition then names it `<name>_id`, as Rails does.
 fn reference_column(name: &str) -> Column {
     Column {
         name: Symbol::from(name),
@@ -3204,6 +3379,325 @@ fn index_from_call(
     build_index(table_name, columns, expression, args.iter().skip(1), file).map(Some)
 }
 
+/// Read one migration as `rails db:migrate` runs it: its version and the
+/// schema changes it makes, in order, folding them into `schema` (the
+/// scratch state the migrations before it left). Never fails: anything
+/// the steps cannot express (a verb the fold does not model, Ruby beside
+/// the verbs) is recorded as [`Migration::not_renderable`], and the verbs
+/// inside such a statement still fold, so later migrations see the state
+/// the fold would have. A table such a migration changed without the fold
+/// following it is not known from then on, and a later migration that
+/// would rebuild it is not renderable either: the rebuild would drop what
+/// the database has and the fold does not.
+pub fn record_migration(source: &[u8], file: &str, fold: &mut MigrationFold) -> crate::schema::Migration {
+    use crate::schema::Migration;
+    let MigrationFold { schema, unknown } = fold;
+    let stem = std::path::Path::new(file).file_name().and_then(|n| n.to_str()).unwrap_or(file);
+    let version: String = stem.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let mut migration = Migration { version, file: file.into(), steps: Vec::new(), not_renderable: None, in_schema: false };
+    super::sources::register(file, &String::from_utf8_lossy(source));
+    let result = super::prism::parse(source, file);
+    let root = result.node();
+    let Some(class) = find_first_class(&root) else {
+        migration.not_renderable = Some("no migration class".into());
+        return migration;
+    };
+    let mut change_body: Option<Node<'_>> = None;
+    let mut up_body: Option<Node<'_>> = None;
+    if let Some(body) = class.body() {
+        for stmt in flatten_statements(body) {
+            if let Some(def) = stmt.as_def_node() {
+                match constant_id_str(&def.name()) {
+                    "change" => change_body = def.body(),
+                    "up" => up_body = def.body(),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let Some(body) = change_body.or(up_body) else { return migration };
+    let gap = |m: &mut Migration, why: String| {
+        if m.not_renderable.is_none() {
+            m.not_renderable = Some(why);
+        }
+    };
+    for stmt in flatten_statements(body) {
+        let call = stmt.as_call_node().filter(|c| c.receiver().is_none());
+        let verb = call.as_ref().map(|c| constant_id_str(&c.name()).to_string());
+        match (call, verb.as_deref()) {
+            // `say "..."` prints and changes nothing
+            (Some(c), Some("say")) if c.block().is_none() => {}
+            (Some(c), Some(v)) if is_schema_verb(v) => {
+                let table = first_table(&c);
+                if v == "execute" {
+                    match data_only_sql(&c) {
+                        Some(sql) => migration.steps.push(crate::schema::MigrationStep::Execute { sql }),
+                        None => {
+                            gap(&mut migration, "`execute` with SQL that is not a literal data change (UPDATE / INSERT / DELETE)".into());
+                            // folded as `ingest_migration` folds it: what the
+                            // fold follows (a table's charset or collation)
+                            // changes no column it models; any other DDL can
+                            // change any table
+                            if apply_migration_verb(v, &c, file, schema, GeneratedExpressionDialect::Portable).is_err() {
+                                unknown.push((None, file.to_string()));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if v == "change_table" {
+                    // The fold follows it (apply_change_table), so later
+                    // migrations see its changes; its own statements are
+                    // not rendered yet.
+                    gap(&mut migration, "`change_table` is not a change roundhouse renders as SQL yet".into());
+                    if apply_migration_verb(v, &c, file, schema, GeneratedExpressionDialect::Portable).is_err() {
+                        unknown.push((table, file.to_string()));
+                    }
+                    continue;
+                }
+                if UNSUPPORTED_VERBS.contains(&v) {
+                    gap(&mut migration, format!("`{v}` is not a change roundhouse renders as SQL"));
+                    // a block (`reversible`, `up_only`, `revert`) can change
+                    // any table
+                    if !matches!(v, "create_join_table" | "drop_join_table") {
+                        unknown.push((None, file.to_string()));
+                    }
+                    continue;
+                }
+                match record_verb(v, &c, file, schema) {
+                    Ok(steps) => {
+                        for step in &steps {
+                            match step {
+                                crate::schema::MigrationStep::RebuildTable { before, .. } => {
+                                    let name = before.name.as_str();
+                                    if let Some((_, by)) = unknown.iter().find(|(t, _)| t.as_deref().is_none_or(|t| t == name)) {
+                                        gap(&mut migration, format!("the state of `{name}` before this migration is not known (`{by}` changed it in a way the migration fold does not follow), so rebuilding it could drop columns"));
+                                    }
+                                }
+                                crate::schema::MigrationStep::RenameTable { from, to } => {
+                                    let by = unknown.iter().find(|(t, _)| t.as_deref() == Some(from.as_str())).map(|(_, b)| b.clone());
+                                    if let Some(by) = by {
+                                        unknown.push((Some(to.as_str().to_string()), by));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        migration.steps.extend(steps);
+                    }
+                    Err(e) => {
+                        gap(&mut migration, match e {
+                            IngestError::Unsupported { message, .. } => message,
+                            e => e.to_string(),
+                        });
+                        unknown.push((table, file.to_string()));
+                    }
+                }
+            }
+            _ => {
+                let text = String::from_utf8_lossy(stmt.location().as_slice());
+                let first = text.lines().next().unwrap_or("").trim();
+                gap(&mut migration, format!("`{first}` is not a schema change the migration fold models"));
+                // its verbs still fold, as `ingest_migration` would fold them
+                walk_calls(&stmt, &mut |inner| {
+                    if inner.receiver().is_none() {
+                        let v = constant_id_str(&inner.name()).to_string();
+                        if apply_migration_verb(&v, inner, file, schema, GeneratedExpressionDialect::Portable).is_err() && is_schema_verb(&v) {
+                            unknown.push((first_table(inner), file.to_string()));
+                        }
+                    }
+                });
+            }
+        }
+    }
+    migration
+}
+
+/// The scratch schema [`record_migration`] folds the migrations into, in
+/// order, and the tables whose state there is not known: a migration
+/// changed them in a way the fold does not follow (DDL through `execute`,
+/// a `reversible` block, a `change_table` it refused), with that
+/// migration's file. `None` is any table.
+#[derive(Clone, Debug, Default)]
+pub struct MigrationFold {
+    pub schema: Schema,
+    unknown: Vec<(Option<String>, String)>,
+}
+
+/// The table a migration verb names first (`change_table :posts`).
+fn first_table(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    call.arguments().and_then(|a| a.arguments().iter().next()).and_then(|n| table_name_value(&n))
+}
+
+/// The SQL of `execute "..."` when it is a literal that changes data only
+/// (UPDATE, INSERT, DELETE): the schema the fold follows stays as it is.
+/// Anything else (DDL, interpolation) the fold could not follow.
+fn data_only_sql(call: &ruby_prism::CallNode<'_>) -> Option<String> {
+    let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    if args.len() != 1 {
+        return None;
+    }
+    let sql = string_value(&args[0])?;
+    let head = sql.trim_start().split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+    matches!(head.as_str(), "UPDATE" | "INSERT" | "DELETE").then_some(sql)
+}
+
+/// The verbs [`apply_migration_verb`] folds (and [`UNSUPPORTED_VERBS`],
+/// which it refuses with a message).
+fn is_schema_verb(verb: &str) -> bool {
+    UNSUPPORTED_VERBS.contains(&verb)
+        || matches!(
+            verb,
+            "execute" | "change_table" | "create_table" | "drop_table" | "rename_table" | "add_column" | "change_column"
+                | "remove_column" | "rename_column" | "change_column_null" | "change_column_default"
+                | "add_timestamps" | "add_reference" | "add_belongs_to" | "remove_reference"
+                | "remove_belongs_to" | "add_index" | "remove_index" | "add_foreign_key"
+                | "remove_foreign_key" | "enable_extension" | "disable_extension"
+        )
+}
+
+/// Fold one verb and say what it did to the database, from the touched
+/// tables before and after.
+fn record_verb(
+    verb: &str,
+    call: &ruby_prism::CallNode<'_>,
+    file: &str,
+    schema: &mut Schema,
+) -> Result<Vec<crate::schema::MigrationStep>, IngestError> {
+    use crate::schema::MigrationStep as S;
+    let args: Vec<Node<'_>> = call.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+    let name = |i: usize| args.get(i).and_then(table_name_value);
+    let table = name(0).unwrap_or_default();
+    let before = schema.tables.get(&Symbol::from(table.as_str())).cloned();
+    // A change to a table the fold does not hold (made by `execute`, say)
+    // has nothing to render; recorded as run, it would claim an effect it
+    // never had
+    if before.is_none() && !matches!(verb, "create_table" | "drop_table") {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!("`{verb}` changes `{table}`, a table the migration fold does not hold"),
+        });
+    }
+    // `change_column_null :posts, :title, false, "untitled"`: Rails'
+    // SQLite adapter first sets the NULLs to the value, then rebuilds
+    let mut steps = Vec::new();
+    if verb == "change_column_null" && args.get(2).and_then(bool_value) == Some(false) {
+        if let (Some(column), Some(value)) = (name(1), args.get(3)) {
+            let literal = if let Some(n) = integer_value(value) {
+                n.to_string()
+            } else if let Some(f) = value.as_float_node().map(|n| n.value()).filter(|f| f.is_finite()) {
+                f.to_string()
+            } else if let Some(b) = bool_value(value) {
+                if b { "1" } else { "0" }.to_string()
+            } else if let Some(text) = string_value(value) {
+                format!("'{}'", text.replace('\'', "''"))
+            } else {
+                return Err(IngestError::Unsupported {
+                    file: file.into(),
+                    message: format!("`change_column_null` on {table}.{column} replaces NULLs with a value that is not a literal"),
+                });
+            };
+            let q = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+            steps.push(S::Execute { sql: format!("UPDATE {} SET {} = {literal} WHERE {} IS NULL", q(&table), q(&column), q(&column)) });
+        }
+    }
+    apply_migration_verb(verb, call, file, schema, GeneratedExpressionDialect::Portable)?;
+    match verb {
+        "create_table" => {
+            if let Some(t) = schema.tables.get(&Symbol::from(table.as_str())) {
+                steps.push(S::CreateTable { table: t.clone() });
+            }
+        }
+        "drop_table" => steps.push(S::DropTable { name: Symbol::from(table.as_str()) }),
+        "rename_table" => {
+            let to = name(1).unwrap_or_default();
+            steps.push(S::RenameTable { from: Symbol::from(table.as_str()), to: Symbol::from(to.as_str()) });
+            // the fold renamed the indexes carrying the generated name
+            let after = schema.tables.get(&Symbol::from(to.as_str())).cloned();
+            steps.extend(index_changes(before.as_ref(), after.as_ref()));
+        }
+        "add_column" | "add_timestamps" | "add_reference" | "add_belongs_to" => {
+            let after = schema.tables.get(&Symbol::from(table.as_str())).cloned();
+            // `foreign_key: true`: SQLite cannot add a constraint in place,
+            // so Rails' adapter rebuilds the table (alter_table), which also
+            // recreates its indexes
+            if let (Some(b), Some(a)) = (&before, &after) {
+                if b.foreign_keys != a.foreign_keys {
+                    steps.push(S::RebuildTable { before: b.clone(), after: a.clone() });
+                    return Ok(steps);
+                }
+            }
+            if let (Some(b), Some(a)) = (&before, &after) {
+                let added: Vec<Column> =
+                    a.columns.iter().filter(|c| !b.columns.iter().any(|o| o.name == c.name)).cloned().collect();
+                // what SQLite cannot add in place, Rails' adapter adds by a
+                // rebuild (`invalid_alter_table_type?`): a stored generated
+                // column, or NOT NULL with no default
+                if added.iter().any(|c| {
+                    c.generated.as_ref().is_some_and(|g| matches!(g.storage, GeneratedColumnStorage::Stored))
+                        || (!c.nullable && c.generated.is_none() && c.default.is_none() && c.default_expression.is_none())
+                }) {
+                    steps.push(S::RebuildTable { before: b.clone(), after: a.clone() });
+                    return Ok(steps);
+                }
+                if !added.is_empty() {
+                    steps.push(S::AddColumns { table: Symbol::from(table.as_str()), columns: added });
+                }
+            }
+            steps.extend(index_changes(before.as_ref(), after.as_ref()));
+        }
+        "rename_column" => {
+            let (from, to) = (name(1).unwrap_or_default(), name(2).unwrap_or_default());
+            steps.push(S::RenameColumn {
+                table: Symbol::from(table.as_str()),
+                from: Symbol::from(from.as_str()),
+                to: Symbol::from(to.as_str()),
+            });
+            // the fold renamed an index over it carrying the generated name
+            let after = schema.tables.get(&Symbol::from(table.as_str())).cloned();
+            steps.extend(index_changes(before.as_ref(), after.as_ref()));
+        }
+        "remove_column" | "remove_reference" | "remove_belongs_to" | "change_column" | "change_column_null"
+        | "change_column_default" | "add_foreign_key" | "remove_foreign_key" => {
+            let after = schema.tables.get(&Symbol::from(table.as_str())).cloned();
+            if let (Some(b), Some(a)) = (before, after) {
+                if b != a {
+                    steps.push(S::RebuildTable { before: b, after: a });
+                }
+            }
+        }
+        "add_index" | "remove_index" => {
+            let after = schema.tables.get(&Symbol::from(table.as_str())).cloned();
+            steps.extend(index_changes(before.as_ref(), after.as_ref()));
+        }
+        _ => {}
+    }
+    Ok(steps)
+}
+
+/// The index changes between two states of one table: removed (or
+/// redefined) ones dropped, then new ones created.
+fn index_changes(before: Option<&Table>, after: Option<&Table>) -> Vec<crate::schema::MigrationStep> {
+    use crate::schema::MigrationStep as S;
+    let empty: Vec<Index> = Vec::new();
+    let old = before.map(|t| &t.indexes).unwrap_or(&empty);
+    let new = after.map(|t| &t.indexes).unwrap_or(&empty);
+    let mut steps = Vec::new();
+    for i in old {
+        if !new.iter().any(|n| n == i) {
+            steps.push(S::RemoveIndex { name: i.name.clone() });
+        }
+    }
+    if let Some(t) = after {
+        for n in new {
+            if !old.iter().any(|i| i == n) {
+                steps.push(S::AddIndex { table: t.clone(), index: n.clone() });
+            }
+        }
+    }
+    steps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3347,7 +3841,7 @@ mod tests {
             col_names(&schema, "posts"),
             [
                 "id", "title", "content", "views", "slug", "subtitle", "author_id", "score",
-                "editor", "reviewer", "created_at", "updated_at",
+                "editor_id", "reviewer_id", "created_at", "updated_at",
             ]
         );
         assert!(!col(&schema, "posts", "slug").nullable && !col(&schema, "posts", "subtitle").nullable);
@@ -3358,8 +3852,10 @@ mod tests {
         assert!(matches!(score.col_type, ColumnType::Decimal { .. }));
         assert!(!score.nullable, "change_null :score, false");
         assert_eq!(col(&schema, "posts", "views").default.as_deref(), Some("0"));
-        assert!(matches!(col(&schema, "posts", "editor").col_type, ColumnType::Reference { .. }));
-        assert!(matches!(col(&schema, "posts", "reviewer").col_type, ColumnType::Reference { .. }));
+        // `t.references :editor` delegates to add_reference: an `editor_id`
+        // column with its index, as Rails creates it
+        assert!(matches!(col(&schema, "posts", "editor_id").col_type, ColumnType::Reference { .. }));
+        assert!(matches!(col(&schema, "posts", "reviewer_id").col_type, ColumnType::Reference { .. }));
         assert!(col(&schema, "posts", "created_at").nullable, "timestamps null: true");
         let indexes: Vec<(&str, Vec<&str>, bool)> = schema.tables[&Symbol::from("posts")]
             .indexes
@@ -3372,6 +3868,8 @@ mod tests {
                 ("index_posts_on_slug", vec!["slug"], true),
                 ("index_posts_on_subtitle", vec!["subtitle"], true),
                 ("index_posts_on_score", vec!["score"], false),
+                ("index_posts_on_editor_id", vec!["editor_id"], false),
+                ("index_posts_on_reviewer_id", vec!["reviewer_id"], false),
                 ("posts_by_views", vec!["views"], false),
             ]
         );
@@ -3438,8 +3936,8 @@ mod tests {
         assert_eq!(index_names(&schema), ["by_views"]);
     }
 
-    /// A reference is stored under its logical name (`author`), so removing
-    /// Rails' `author_id` column, top-level or in a `change_table`, removes it.
+    /// A reference is Rails' `author_id` column, so removing that column,
+    /// top-level or in a `change_table`, removes it.
     #[test]
     fn removing_a_references_id_column_removes_the_reference() {
         let schema = fold(&[
@@ -3777,9 +4275,314 @@ mod tests {
             end
             "#,
         ]);
-        assert_eq!(col_names(&schema, "posts"), ["id", "title", "body", "author"]);
+        // `add_reference :posts, :author` is an `author_id` column with an
+        // index, as Rails creates it
+        assert_eq!(col_names(&schema, "posts"), ["id", "title", "body", "author_id"]);
         let posts = &schema.tables[&Symbol::from("posts")];
         assert!(matches!(posts.columns[3].col_type, ColumnType::Reference { .. }));
+        assert_eq!(posts.indexes[0].name.as_str(), "index_posts_on_author_id");
+    }
+
+    #[test]
+    fn references_in_create_table_are_id_columns_with_index_and_foreign_key() {
+        let schema = fold(&[r#"
+            class CreateComments < ActiveRecord::Migration[8.0]
+              def change
+                create_table :comments do |t|
+                  t.references :article, null: false, foreign_key: true
+                  t.references :commentable, polymorphic: true
+                  t.belongs_to :editor, index: false, foreign_key: { to_table: :users }
+                end
+              end
+            end
+            "#]);
+        assert_eq!(
+            col_names(&schema, "comments"),
+            ["id", "article_id", "commentable_id", "commentable_type", "editor_id"]
+        );
+        let comments = &schema.tables[&Symbol::from("comments")];
+        assert!(!comments.columns[1].nullable);
+        let indexes: Vec<(&str, Vec<&str>)> = comments
+            .indexes
+            .iter()
+            .map(|i| (i.name.as_str(), i.columns.iter().map(|c| c.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            indexes,
+            [
+                ("index_comments_on_article_id", vec!["article_id"]),
+                ("index_comments_on_commentable", vec!["commentable_type", "commentable_id"]),
+            ]
+        );
+        let fks: Vec<(&str, &str)> =
+            comments.foreign_keys.iter().map(|f| (f.from_columns[0].as_str(), f.to_table.0.as_str())).collect();
+        assert_eq!(fks, [("article_id", "articles"), ("editor_id", "users")]);
+    }
+
+    #[test]
+    fn references_in_change_table_are_id_columns_with_index_and_foreign_key() {
+        let schema = fold(&[
+            r#"
+            class CreateComments < ActiveRecord::Migration[8.0]
+              def change
+                create_table :comments do |t|
+                  t.text :body
+                end
+              end
+            end
+            "#,
+            r#"
+            class LinkComments < ActiveRecord::Migration[8.0]
+              def change
+                change_table :comments do |t|
+                  t.references :article, null: false, foreign_key: true
+                  t.references :commentable, polymorphic: true
+                  t.belongs_to :editor, index: { unique: true }, foreign_key: { to_table: :users }
+                end
+              end
+            end
+            "#,
+        ]);
+        assert_eq!(
+            col_names(&schema, "comments"),
+            ["id", "body", "article_id", "commentable_id", "commentable_type", "editor_id"]
+        );
+        let comments = &schema.tables[&Symbol::from("comments")];
+        assert!(!comments.columns[2].nullable);
+        assert!(matches!(comments.columns[2].col_type, ColumnType::Reference { .. }));
+        let indexes: Vec<(&str, Vec<&str>, bool)> = comments
+            .indexes
+            .iter()
+            .map(|i| (i.name.as_str(), i.columns.iter().map(|c| c.as_str()).collect(), i.unique))
+            .collect();
+        assert_eq!(
+            indexes,
+            [
+                ("index_comments_on_article_id", vec!["article_id"], false),
+                ("index_comments_on_commentable", vec!["commentable_type", "commentable_id"], false),
+                ("index_comments_on_editor_id", vec!["editor_id"], true),
+            ]
+        );
+        let fks: Vec<(&str, &str)> =
+            comments.foreign_keys.iter().map(|f| (f.from_columns[0].as_str(), f.to_table.0.as_str())).collect();
+        assert_eq!(fks, [("article_id", "articles"), ("editor_id", "users")]);
+
+        // `t.remove_references` takes back what `t.references` added: the
+        // columns (both of a polymorphic one), their indexes and keys
+        let schema = fold(&[
+            r#"
+            class CreateComments < ActiveRecord::Migration[8.0]
+              def change
+                create_table :comments do |t|
+                  t.text :body
+                  t.references :article, foreign_key: true
+                  t.references :commentable, polymorphic: true
+                end
+              end
+            end
+            "#,
+            r#"
+            class UnlinkComments < ActiveRecord::Migration[8.0]
+              def change
+                change_table :comments do |t|
+                  t.remove_references :article
+                  t.remove_references :commentable, polymorphic: true
+                end
+              end
+            end
+            "#,
+        ]);
+        assert_eq!(col_names(&schema, "comments"), ["id", "body"]);
+        let comments = &schema.tables[&Symbol::from("comments")];
+        assert!(comments.indexes.is_empty());
+        assert!(comments.foreign_keys.is_empty());
+    }
+
+    #[test]
+    fn references_with_several_names_in_create_table_make_each() {
+        let schema = fold(&[r#"
+            class CreatePosts < ActiveRecord::Migration[8.0]
+              def change
+                create_table :posts do |t|
+                  t.references :author, :editor, null: false, foreign_key: { to_table: :users }
+                end
+              end
+            end
+            "#]);
+        assert_eq!(col_names(&schema, "posts"), ["id", "author_id", "editor_id"]);
+        let posts = &schema.tables[&Symbol::from("posts")];
+        assert!(posts.columns[1..].iter().all(|c| !c.nullable));
+        let names: Vec<&str> = posts.indexes.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["index_posts_on_author_id", "index_posts_on_editor_id"]);
+        let fks: Vec<&str> = posts.foreign_keys.iter().map(|f| f.from_columns[0].as_str()).collect();
+        assert_eq!(fks, ["author_id", "editor_id"]);
+    }
+
+    #[test]
+    fn add_reference_keeps_an_ordinary_column_with_the_logical_name() {
+        // Rails adds `author_id` beside a string `author`; neither the column
+        // nor its index goes
+        let schema = fold(&[
+            r#"
+            class CreatePosts < ActiveRecord::Migration[8.0]
+              def change
+                create_table :posts do |t|
+                  t.string :author
+                  t.index :author
+                end
+              end
+            end
+            "#,
+            r#"
+            class AddAuthorToPosts < ActiveRecord::Migration[8.0]
+              def change
+                add_reference :posts, :author
+              end
+            end
+            "#,
+        ]);
+        assert_eq!(col_names(&schema, "posts"), ["id", "author", "author_id"]);
+        let names: Vec<&str> =
+            schema.tables[&Symbol::from("posts")].indexes.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["index_posts_on_author", "index_posts_on_author_id"]);
+    }
+
+    #[test]
+    fn remove_polymorphic_reference_takes_the_type_columns_key_and_refuses_its_predicate() {
+        let create = r#"
+            class CreateEvents < ActiveRecord::Migration[8.0]
+              def change
+                create_table :kinds do |t|
+                  t.string :name
+                end
+                create_table :events do |t|
+                  t.references :subject, polymorphic: true, index: false
+                end
+                add_foreign_key :events, :kinds, column: :subject_type, primary_key: :name
+              end
+            end
+            "#;
+        let remove = r#"
+            class RemoveSubject < ActiveRecord::Migration[8.0]
+              def change
+                remove_reference :events, :subject, polymorphic: true, index: false
+              end
+            end
+            "#;
+        let schema = fold(&[create, remove]);
+        let events = &schema.tables[&Symbol::from("events")];
+        assert_eq!(col_names(&schema, "events"), ["id"]);
+        assert!(events.foreign_keys.is_empty());
+
+        // An index whose `where:` names `subject_type` would be left naming a
+        // column that is gone, so the fold refuses, as `remove_column` does
+        let partial = r#"
+            class IndexEvents < ActiveRecord::Migration[8.0]
+              def change
+                add_index :events, :id, name: "index_typed_events", where: "subject_type IS NOT NULL"
+              end
+            end
+            "#;
+        let mut schema = Schema::default();
+        for (i, src) in [create, partial].iter().enumerate() {
+            ingest_migration(src.as_bytes(), &format!("{i}_migration.rb"), &mut schema).expect("fold");
+        }
+        let err = ingest_migration(remove.as_bytes(), "2_remove.rb", &mut schema).unwrap_err();
+        assert!(err.to_string().contains("index_typed_events"), "{err}");
+    }
+
+    #[test]
+    fn rename_column_carries_its_indexes_and_foreign_keys() {
+        let schema = fold(&[
+            r#"
+            class CreatePosts < ActiveRecord::Migration[8.0]
+              def change
+                create_table :posts do |t|
+                  t.string :titel
+                  t.references :writer, foreign_key: { to_table: :users }
+                  t.index [:titel, :writer_id]
+                end
+              end
+            end
+            "#,
+            r#"
+            class Fix < ActiveRecord::Migration[8.0]
+              def change
+                rename_column :posts, :titel, :title
+                rename_column :posts, :writer_id, :author_id
+              end
+            end
+            "#,
+        ]);
+        let posts = &schema.tables[&Symbol::from("posts")];
+        let columns: Vec<Vec<&str>> =
+            posts.indexes.iter().map(|i| i.columns.iter().map(|c| c.as_str()).collect()).collect();
+        assert_eq!(columns, [vec!["author_id"], vec!["title", "author_id"]]);
+        assert_eq!(posts.foreign_keys[0].from_columns[0].as_str(), "author_id");
+        // the generated names follow, as Rails' rename_column_indexes
+        let names: Vec<&str> = posts.indexes.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["index_posts_on_author_id", "index_posts_on_title_and_author_id"]);
+    }
+
+    #[test]
+    fn rename_column_retargets_the_keys_that_reference_it() {
+        // `posts.author_id REFERENCES authors(id)`: renaming `authors.id`
+        // rewrites the reference, as SQLite's RENAME COLUMN does
+        let schema = fold(&[
+            r#"
+            class Create < ActiveRecord::Migration[8.0]
+              def change
+                create_table :authors do |t|
+                  t.references :mentor, foreign_key: { to_table: :authors }
+                end
+                create_table :posts do |t|
+                  t.references :author, foreign_key: true
+                end
+              end
+            end
+            "#,
+            r#"
+            class Rekey < ActiveRecord::Migration[8.0]
+              def change
+                rename_column :authors, :id, :author_key
+              end
+            end
+            "#,
+        ]);
+        for table in ["posts", "authors"] {
+            let fk = &schema.tables[&Symbol::from(table)].foreign_keys[0];
+            assert_eq!(fk.to_table.0.as_str(), "authors");
+            let to: Vec<&str> = fk.to_columns.iter().map(|c| c.as_str()).collect();
+            assert_eq!(to, ["author_key"], "{table}");
+        }
+    }
+
+    #[test]
+    fn rename_table_renames_the_indexes_carrying_the_generated_name() {
+        let schema = fold(&[
+            r#"
+            class CreatePosts < ActiveRecord::Migration[8.0]
+              def change
+                create_table :posts do |t|
+                  t.string :title
+                  t.string :slug
+                  t.index :title
+                  t.index :slug, name: "by_slug"
+                end
+              end
+            end
+            "#,
+            r#"
+            class Rename < ActiveRecord::Migration[8.0]
+              def change
+                rename_table :posts, :articles
+              end
+            end
+            "#,
+        ]);
+        let articles = &schema.tables[&Symbol::from("articles")];
+        let names: Vec<&str> = articles.indexes.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["index_articles_on_title", "by_slug"]);
     }
 
     #[test]

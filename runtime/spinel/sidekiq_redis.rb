@@ -14,6 +14,10 @@ module SidekiqRedis
     raise "queue_adapter :sidekiq: this tree has no Redis client, so the job for queue " + queue + " can't be pushed"
   end
 
+  def self.push_many(url, queue, jsons)
+    raise "queue_adapter :sidekiq: this tree has no Redis client, so the jobs for queue " + queue + " can't be pushed"
+  end
+
   def self.schedule(url, at, json)
     raise "queue_adapter :sidekiq: this tree has no Redis client, so a scheduled job can't be pushed"
   end

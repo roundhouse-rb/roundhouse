@@ -92,14 +92,53 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
         .filter(|lc| jobs.contains(lc.name.0.as_str()))
         .map(|lc| (lc.name.0.as_str().to_string(), super::job_payload::queue_name(app, lc)))
         .collect();
+    // Under `:sidekiq` a native worker's literal `sidekiq_options` go
+    // into its envelope (`lower::sidekiq_native`). Read before the loop
+    // below strips them from the classes.
+    // A worker with a class-side `perform_async` of its own isn't folded,
+    // so its calls keep dispatching to it; enqueueing one under `:sidekiq`
+    // is an error (found by folding a copy of each body, below).
+    let own_async =
+        if sidekiq { super::sidekiq_native::own_perform_async(app, &wrapped) } else { std::collections::BTreeMap::new() };
+    let refused: BTreeSet<String> = own_async.keys().cloned().collect();
+    let refused_delay: BTreeSet<String> = delay_folds.intersection(&refused).cloned().collect();
+    let native_wrapped: BTreeSet<String> = wrapped.difference(&refused).cloned().collect();
+    let native_delay: BTreeSet<String> = delay_folds.difference(&refused).cloned().collect();
+    let mut native_options: std::collections::BTreeMap<String, Vec<(String, String)>> = std::collections::BTreeMap::new();
+    if sidekiq {
+        for lc in app.library_classes.iter().filter(|lc| native_wrapped.contains(lc.name.0.as_str())) {
+            let (opts, warnings) = super::sidekiq_native::options(app, lc);
+            native_options.insert(lc.name.0.as_str().to_string(), opts);
+            diags.extend(warnings);
+        }
+    }
     let mut unfolded: BTreeSet<String> = BTreeSet::new();
     let mut folded: Vec<crate::span::Span> = Vec::new();
     let mut delayed: Vec<crate::span::Span> = Vec::new();
     let mut scheduled = SetFolds::default();
+    let mut native = super::sidekiq_native::NativeFolds::default();
+    let mut refused_folds = super::sidekiq_native::NativeFolds::default();
+    let native_models = super::sidekiq_native::native_models(app);
     super::for_each_hook_body(app, &mut |body| {
         fold_set_chains(body, &jobs, &mut unfolded, &mut folded, (sidekiq || solid_queue).then_some(&mut scheduled));
+        // Under `:sidekiq` a worker's enqueues keep their delay, queue
+        // and retry, folded to `perform_async_with`; what's left (a
+        // splat) drops its delay below, as before.
+        if sidekiq {
+            if !refused.is_empty() {
+                let mut probe = body.clone();
+                super::sidekiq_native::fold_sites(&mut probe, &refused, &refused_delay, &mut refused_folds, &native_models);
+            }
+            super::sidekiq_native::fold_sites(body, &native_wrapped, &native_delay, &mut native, &native_models);
+        }
         fold_delayed_enqueues(body, &delay_folds, &mut delayed);
     });
+    diags.extend(super::sidekiq_native::rejected_diagnostics(&native));
+    for worker in &refused_folds.workers {
+        if let Some(own) = own_async.get(worker) {
+            diags.push(super::sidekiq_native::own_perform_async_error(worker, own));
+        }
+    }
     for span in scheduled.waits.iter().filter(|_| !sidekiq) {
         diags.push(crate::lower::residue_diagnostic(
             "job_class_side",
@@ -172,6 +211,18 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
     // Jobs refused a wrapper: their `perform_later` / `perform_now`
     // call sites call nothing, so each is an error below.
     let mut refused: std::collections::BTreeMap<String, BTreeSet<String>> = std::collections::BTreeMap::new();
+    // The workers given a `perform_async` under `:sidekiq`, which
+    // `sidekiq_native` plans a push for.
+    let mut native_workers: BTreeSet<String> = BTreeSet::new();
+    let inherited_performs: crate::det::HashMap<String, crate::dialect::MethodDef> = if sidekiq {
+        app.library_classes
+            .iter()
+            .filter(|lc| wrapped.contains(lc.name.0.as_str()))
+            .filter_map(|lc| super::sidekiq_native::inherited_perform(app, lc).map(|m| (lc.name.0.as_str().to_string(), m)))
+            .collect()
+    } else {
+        Default::default()
+    };
     for lc in app.library_classes.iter_mut() {
         let is_worker = workers.contains(lc.name.0.as_str());
         if !is_worker && !jobs.contains(lc.name.0.as_str()) {
@@ -206,11 +257,31 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
             }
             lc.includes.retain(|inc| !SIDEKIQ_MODULES.contains(&inc.0.as_str()));
             let before = lc.unknown_calls.len();
+            let retry_blocks = lc.unknown_calls.iter().any(|call| {
+                matches!(&*call.node, ExprNode::Send { recv: None, method, .. }
+                    if matches!(method.as_str(), "sidekiq_retry_in" | "sidekiq_retries_exhausted"))
+            });
             lc.unknown_calls.retain(|call| {
                 !matches!(&*call.node, ExprNode::Send { recv: None, method, .. }
                     if SIDEKIQ_CLASS_MACROS.contains(&method.as_str()))
             });
-            if lc.unknown_calls.len() != before {
+            // Under `:sidekiq` the literal options are carried into the
+            // envelope (`sidekiq_native::options` warns for the rest);
+            // only the retry blocks are still dropped.
+            if sidekiq {
+                if retry_blocks {
+                    diags.push(crate::lower::residue_diagnostic(
+                        "job_class_side",
+                        "worker-options",
+                        crate::span::Span::synthetic(),
+                        "retry blocks not lowered",
+                        format!(
+                            "job_class_side: `{}` — sidekiq_retry_in / sidekiq_retries_exhausted blocks are dropped; a failed job takes Sidekiq's default retry schedule",
+                            lc.name.0.as_str()
+                        ),
+                    ));
+                }
+            } else if lc.unknown_calls.len() != before {
                 diags.push(crate::lower::residue_diagnostic(
                     "job_class_side",
                     "worker-options",
@@ -226,15 +297,22 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
         let entries: &[&str] = if is_worker { &["perform_async"] } else { &["perform_later", "perform_now"] };
         let class_side = &own_entries[lc.name.0.as_str()];
         let adapter = adapters.get(lc.name.0.as_str()).and_then(|a| a.as_deref());
-        let Some(perform) = lc
+        let own_perform = lc
             .methods
             .iter()
             .find(|m| {
                 m.receiver == crate::dialect::MethodReceiver::Instance
                     && m.name.as_str() == "perform"
             })
-            .cloned()
-        else {
+            .cloned();
+        // Under `:sidekiq` a worker that inherits `perform` gets its own
+        // wrappers too: its pushes name its own class, with its own
+        // options (`ChildWorker < OptionsWorker`).
+        let own_perform = match own_perform {
+            None if sidekiq && is_worker => inherited_performs.get(lc.name.0.as_str()).cloned(),
+            found => found,
+        };
+        let Some(perform) = own_perform else {
             continue;
         };
         // The entries a refused job is left without (one it defines
@@ -620,9 +698,29 @@ pub fn apply_job_class_side(app: &mut App) -> Vec<Diagnostic> {
                 wrappers.push(perform_later_with(later));
             }
         }
+        // `perform_async_with(at, queue, retry, shape, argc, args)`,
+        // for a worker an enqueue was folded into under `:sidekiq`.
+        if is_worker && sidekiq {
+            if let Some(async_) = wrappers.iter().find(|w| w.name.as_str() == "perform_async") {
+                native_workers.insert(lc.name.0.as_str().to_string());
+                let mut extra = Vec::new();
+                if native.workers.contains(lc.name.0.as_str()) && !class_side.contains("perform_async_with") {
+                    extra.push(super::sidekiq_native::perform_async_with(async_));
+                }
+                if native.bulk.contains(lc.name.0.as_str()) && !class_side.contains("push_bulk_begin") {
+                    extra.extend(super::sidekiq_native::bulk_wrappers(async_));
+                }
+                wrappers.extend(extra);
+            }
+        }
         lc.methods.extend(wrappers);
     }
     app.job_plans = super::job_payload::plan_jobs(app, &jobs, &payload_jobs);
+    app.native_plans = if sidekiq {
+        super::sidekiq_native::plan_workers(app, &native_workers, &native_options)
+    } else {
+        Vec::new()
+    };
     if !refused.is_empty() {
         crate::lower::for_each_hook_body_ref(app, &mut |body| refused_call_sites(body, &refused, &mut diags));
     }

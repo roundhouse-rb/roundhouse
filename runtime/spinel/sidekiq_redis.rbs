@@ -2,5 +2,6 @@
 # Dropped with the façade when a tree on :sidekiq gets the real client.
 module SidekiqRedis
   def self.push: (String url, String queue, String json) -> nil
+  def self.push_many: (String url, String queue, Array[String] jsons) -> nil
   def self.schedule: (String url, Float at, String json) -> nil
 end

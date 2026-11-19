@@ -124,6 +124,8 @@ fn a_tree_on_sidekiq_gets_the_worker_role() {
     assert!(errors.is_empty(), "{errors:#?}");
     let worker = read(&emitted, "runtime/sidekiq_worker.rb");
     assert!(worker.contains("def self.processor(index)"), "{worker}");
+    assert!(worker.contains("module SidekiqHeartbeat") && worker.contains("SidekiqHeartbeat.start"), "the worker heartbeats");
+    assert!(read(&emitted, "runtime/sidekiq_redis.rb").contains("def self.beat(conn, identity, fields)"));
     assert!(!emitted.join("runtime/sidekiq_worker.rbs").exists(), "the façade's sidecar must drop");
     assert!(read(&emitted, "main.rb").contains("SidekiqWorker.cli(ARGV)"));
     assert!(read(&emitted, "runtime/sidekiq_envelope.rbs").contains("def self.with_error"));
@@ -161,12 +163,21 @@ raise "no outcome" unless ActiveJob.perform_parsed(JSON.parse(json)) == ActiveJo
 article.destroy
 raise "gone" unless ActiveJob.perform_parsed(JSON.parse(json)) == ActiveJob::PERFORM_FAILED
 raise ActiveJob.failure_class unless ActiveJob.failure_class == "ActiveJob::DeserializationError"
+raise "tag" unless SidekiqWorker.parse(["sidekiq", "-q", "critical,3", "-q", "default", "-c", "4", "-g", "blog"]) == "" && SidekiqWorker::TAG[0] == "blog"
+SidekiqHeartbeat.setup(SidekiqHeartbeat.hostname, Process.pid, "0123456789ab", 1792632700.25)
+info = JSON.parse(SidekiqHeartbeat::INFO[0])
+want = { "concurrency" => 4, "mode" => "weighted", "weights" => { "critical" => 3, "default" => 0 } }
+raise "info #{info.inspect}" unless info["labels"] == ["roundhouse"] && info["version"] == "8.1.7" &&
+  info["tag"] == "blog" && info["capsules"]["default"] == want && info["queues"] == ["critical", "default"] &&
+  info["identity"] == SidekiqHeartbeat.identity && info["hostname"] == Socket.gethostname
 puts "worker role passed"
 "##;
 
 /// The emitted ruby tree's worker parses Sidekiq's options, sizes the
 /// database pool, and runs the app's own payload job through
-/// `perform_parsed`, a gone record failing as DeserializationError.
+/// `perform_parsed`, a gone record failing as DeserializationError. Its
+/// heartbeat's info is Sidekiq's, with the `-g` tag and the roundhouse
+/// label (`tests/sidekiq_heartbeat.rs` holds the beats to Sidekiq's).
 #[test]
 fn the_worker_role_runs_the_apps_jobs() {
     let run = on_sidekiq().run_ruby(WORKER_SCRIPT);

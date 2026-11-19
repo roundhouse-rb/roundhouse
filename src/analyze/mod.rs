@@ -1211,6 +1211,7 @@ impl Analyzer {
         // Library classes (route-helper/Singleton includes, superclass links),
         // ActionMailer classes, ActiveJob classes, and Sidekiq workers —
         // see `registry::library`.
+        let catalog_classes: HashSet<ClassId> = classes.keys().cloned().collect();
         registry::library::register(&mut classes, app, &route_helper_names);
         for (class, readers) in crate::ingest::method_missing_readers() {
             let Some(cls) = classes.get_mut(&ClassId(Symbol::from(*class))) else { continue };
@@ -1326,6 +1327,8 @@ impl Analyzer {
                 }
             }
         }
+
+        registry::class_side::mark(&mut classes, app, &catalog_classes);
 
         for (id, method) in app.models.iter()
             .flat_map(|model| model.methods().map(move |method| (&model.name, method)))

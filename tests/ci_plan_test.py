@@ -302,6 +302,7 @@ class Routing(unittest.TestCase):
                 "compare-ruby",
                 "compare-ruby-next",
                 "campfire-conformance",
+                "writebook-conformance",
                 "campfire-compare",
             ],
         )
@@ -542,6 +543,7 @@ class Routing(unittest.TestCase):
             "compare-ruby": {"result": "success"},
             "compare-ruby-next": {"result": "success"},
             "campfire-conformance": {"result": "success"},
+            "writebook-conformance": {"result": "success"},
             "campfire-compare": {"result": "success"},
             "compare": {"result": "skipped"},
             "browser-smoke-typescript": {"result": "skipped"},

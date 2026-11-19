@@ -422,6 +422,14 @@ fn host_libvips_dev_jobs_share_cached_apt_deb_install() {
             "Install libvips (ruby-vips binds it through FFI) and ffmpeg",
             "libvips42 ffmpeg",
         ),
+        // The shared app-suite apt step: both pinned apps' Rails boots (and
+        // their emitted ruby-vips processors) need libvips from the same
+        // cache key, so the second lane reuses the first's step.
+        (
+            "writebook-conformance",
+            "Install libvips (ruby-vips binds it through FFI) and ffmpeg",
+            "libvips42 ffmpeg",
+        ),
     ] {
         let step = workflow["jobs"][job_name]["steps"]
             .as_sequence()
@@ -808,7 +816,7 @@ fn shared_debug_roundhouse_reaches_campfire_consumers_via_roundhouse_bin() {
     let marker = root.join("invoked.txt");
     let fake = root.join("fake-roundhouse");
     // Staged producer stand-in: records argv and, when given -o, writes a
-    // minimal emit tree so campfire-suite can finish its emit branch.
+    // minimal emit tree so app-suite can finish its emit branch.
     fs::write(
         &fake,
         format!(
@@ -920,14 +928,14 @@ echo fake-ok
     );
 
     // End-to-end (#317): a Campfire consumer emit branch must call the
-    // supplied executable. campfire-suite is what campfire-conformance runs;
+    // supplied executable. app-suite is what campfire-conformance runs;
     // bypassing roundhouse_run for cargo run would miss the marker file.
     let app = root.join("mini-app");
     fs::create_dir_all(&app).unwrap();
     let out = root.join("suite-out");
     let tally = root.join("tally.txt");
     let _ = fs::remove_file(&marker);
-    let suite = Command::new(repo.join("scripts/campfire-suite"))
+    let suite = Command::new(repo.join("scripts/app-suite"))
         .args([
             "--no-stubs",
             "--out",
@@ -947,17 +955,17 @@ echo fake-ok
     let suite_err = String::from_utf8_lossy(&suite.stderr);
     assert!(
         suite.status.success(),
-        "campfire-suite emit branch failed: status={:?}\nstdout={suite_out}\nstderr={suite_err}",
+        "app-suite emit branch failed: status={:?}\nstdout={suite_out}\nstderr={suite_err}",
         suite.status
     );
     let invoked = fs::read_to_string(&marker).unwrap_or_default();
     assert!(
         invoked.contains("fake-roundhouse") && invoked.contains("--target"),
-        "campfire-suite must exec ROUNDHOUSE_BIN on the emit branch: {invoked}\nstderr={suite_err}"
+        "app-suite must exec ROUNDHOUSE_BIN on the emit branch: {invoked}\nstderr={suite_err}"
     );
     assert!(
         !suite_err.contains("cargo run") && !invoked.contains("cargo"),
-        "campfire-suite must not rebuild via cargo: stderr={suite_err} invoked={invoked}"
+        "app-suite must not rebuild via cargo: stderr={suite_err} invoked={invoked}"
     );
 
     let _ = fs::remove_dir_all(&root);

@@ -34,6 +34,11 @@
 #   --json PATH    write the machine-readable report
 #                  (default build/lobsters-specs/summary.json, or
 #                  build/lobsters-specs-spinel/summary.json for spinel)
+#   --no-rails     skip the Rails run and the row join against it (the
+#                  summary then records why rows are null; the default is
+#                  to run it)
+#   --bundle DIR   BUNDLE_PATH for the Rails run, passed through to
+#                  scripts/app-suite-baseline (default: that script's own)
 #   --target T     ruby (default) or spinel. The spinel lane is the same
 #                  question asked of the AOT target, and today it stops at
 #                  its first stage — emit, `spin build`, and a report of
@@ -55,6 +60,7 @@ require "time"
 ROOT = File.expand_path("..", __dir__)
 SHIM = File.join(ROOT, "bench", "lobsters", "spec-shim")
 CAUSES_FILE = File.join(ROOT, "bench", "lobsters", "spec-causes.json")
+require_relative "lib/lobsters_join"
 
 opts = {
   src: ENV["LOBSTERS_SRC"] || File.expand_path("~/git/lobsters"),
@@ -62,6 +68,8 @@ opts = {
   emit: nil,
   json: nil,
   target: "ruby",
+  rails: true,
+  bundle: nil,
   quiet: false,
 }
 args = ARGV.dup
@@ -72,6 +80,8 @@ until args.empty?
   when "--emit"  then opts[:emit] = File.expand_path(args.shift.to_s)
   when "--json"  then opts[:json] = File.expand_path(args.shift.to_s)
   when "--target" then opts[:target] = args.shift.to_s
+  when "--no-rails" then opts[:rails] = false
+  when "--bundle" then opts[:bundle] = File.expand_path(args.shift.to_s)
   when "--quiet" then opts[:quiet] = true
   when "-h", "--help"
     puts File.readlines(__FILE__).drop(1).take_while { |l| l.start_with?("#") }.map { |l| l.sub(/^# ?/, "") }
@@ -244,8 +254,12 @@ else
   emit_info["by_kind"] = diags.group_by { |_, k| k }.transform_values(&:size)
                               .sort_by { |_, n| -n }.to_h
   emit_info["files"] = err[/(?:wrote|emitted) (\d+) files/, 1]&.to_i
+  # The tree's own record of the commit it was built from, so a later
+  # --emit reuse can be joined only against that commit.
+  File.write(File.join(emit_tree, ".lobsters-source-sha"), "#{lob["sha"]}\n") if lob["sha"] && !lob["dirty"]
 end
 emit_info["path"] = emit_tree
+emit_sha = File.read(File.join(emit_tree, ".lobsters-source-sha")).strip rescue nil
 
 # ── Ruby selection ───────────────────────────────────────────────────
 # The checkout pins a version; a shadowing system Ruby is a known trap.
@@ -356,9 +370,80 @@ abort "lobsters-specs: the suite produced no report\n#{rerr}" unless File.exist?
 report = JSON.parse(File.read(rspec_json))
 examples = report["examples"] || []
 
+# ── The row join against Rails' own run ─────────────────────────────
+# TWO THINGS ARE INVISIBLE IN THE FAILURE LIST ALONE. A spec that fails
+# on stock Rails too is the environment, not the compiler — lobsters'
+# own suite has order-dependent failures at 28bc8d6 — and a spec whose
+# file never loads against the emit has no failure to count at all, so
+# it silently leaves the denominator. Only Rails' own run of the same
+# suite can name either, so it is recorded here and the two are joined
+# by example id (scripts/lib/lobsters_join.rb, which also says what each
+# row status means). The summary carries `rows`, `dropped` and `env`.
+#
+# The join gates on nothing: `--no-rails` turns it off for an iteration
+# loop, and the summary then records no rows rather than a fabricated set.
+# Rails runs on the SAME suite paths the emit run was given, or the join
+# reads every example outside them as withdrawn.
+rows = nil
+dropped = []
+env_rows = []
+env_ids = {}
+baseline_meta = opts[:rails] ? nil : { "note" => "Not joined: --no-rails skipped Rails' own run." }
+if opts[:rails]
+  # Beside its report and named after it, so two reports in one directory
+  # never read each other's baseline.
+  baseline_path = File.join(File.dirname(opts[:json]), "#{File.basename(opts[:json], ".json")}-rails-baseline.json")
+  rcmd = [*runner, "ruby", File.join(ROOT, "scripts", "app-suite-baseline"),
+          "--app", "lobsters", "--out", baseline_path,
+          *opts[:suites].flat_map { |s| ["--suite", s] }]
+  rcmd += ["--bundle", opts[:bundle]] if opts[:bundle]
+  rcmd << opts[:src]
+  log.("recording Rails' own run of #{opts[:suites].join(", ")} → #{baseline_path}")
+  _, rerr_b, rst_b = sh(rcmd, chdir: ROOT)
+  # A Rails run that fails costs the join, not the emit's report.
+  baseline = rst_b.success? ? JSON.parse(File.read(baseline_path)) : nil
+end
+if opts[:rails] && baseline.nil?
+  baseline_meta = { "note" => "Not joined: Rails' own run failed (exit #{rst_b.exitstatus})." }
+  log.("#{baseline_meta["note"]}\n#{rerr_b.lines.last(20).join}")
+elsif opts[:rails]
+  short = ->(s) { s.to_s.empty? ? "an unknown commit" : s.to_s[0, 12] }
+  baseline_meta = {
+    "file" => File.basename(baseline_path),
+    "sha" => baseline["sha"], "rails" => baseline["rails"],
+    "ruby" => baseline["ruby"], "suites" => baseline["suites"],
+    "generated_at" => baseline["generated_at"],
+  }
+  if baseline["dirty"]
+    baseline_meta["note"] = "Not joined: Rails' run was recorded from a checkout with uncommitted changes."
+    log.(baseline_meta["note"])
+  elsif emit_sha.to_s.empty? || emit_sha != lob["sha"].to_s
+    # A reused tree with no record, or one built from another commit, did
+    # not run the code the baseline ran.
+    baseline_meta["note"] = "Not joined: the emit tree was built from #{short.(emit_sha)}, " \
+                            "the checkout is at #{short.(lob["sha"])}."
+    log.(baseline_meta["note"])
+  elsif baseline["sha"].to_s.empty? || baseline["sha"].to_s != lob["sha"].to_s
+    # A join across two commits is a fabricated number: upstream's own
+    # moves would read as ours.
+    baseline_meta["note"] = "Not joined: the baseline is Rails' run at #{short.(baseline["sha"])}, " \
+                            "this run is #{short.(lob["sha"])}."
+    log.(baseline_meta["note"])
+  else
+    joined = LobstersJoin.rows(emit_examples: examples, baseline: baseline, root: opts[:src])
+    rows = joined["rows"]
+    dropped = joined["dropped"]
+    env_rows = joined["env"]
+    env_ids = joined["env_ids"]
+  end
+end
+
 # ── Cluster failures into named causes ───────────────────────────────
 rules = JSON.parse(File.read(CAUSES_FILE))["causes"]
-failed = examples.select { |e| e["status"] == "failed" }
+emit_failed = examples.select { |e| e["status"] == "failed" }
+# SET ASIDE, not charged. An example that fails on stock Rails says
+# nothing about the emit, so it must not claim a cause's share either.
+failed = emit_failed.reject { |e| env_ids[LobstersJoin.example_id(e["id"], opts[:src])] }
 buckets = Hash.new { |h, k| h[k] = [] }
 unclassified = []
 
@@ -435,10 +520,18 @@ out = {
     "total" => summary["example_count"],
     "passed" => examples.count { |e| e["status"] == "passed" },
     "failed" => summary["failure_count"],
+    "set_aside_on_rails" => emit_failed.size - failed.size,
     "pending" => summary["pending_count"],
     "errors_outside_examples" => summary["errors_outside_of_examples_count"],
     "duration_s" => summary["duration"]&.round(1),
   },
+  # The join. `rows` is null unless Rails' run was recorded AND describes
+  # the same commit as the checkout the emit came from; `baseline` says
+  # which of those it was.
+  "rows" => rows,
+  "baseline" => baseline_meta,
+  "dropped" => dropped,
+  "env" => env_rows,
   "errors_outside_examples" => report["messages"],
   "harness_compensations" => [
     { "what" => "require \"net/http\" in the shim", "kind" => "gap",
@@ -462,6 +555,17 @@ puts "#{opts[:suites].join(", ")}: #{pass}/#{total} examples pass" \
      "  ·  #{ran_spec_files} of #{all_spec_files} spec files in the suite"
 if (eo = out["examples"]["errors_outside_examples"].to_i) > 0
   puts "#{eo} error(s) outside examples — a spec file or hook failed to run at all"
+end
+if rows
+  puts "of #{rows.values.sum} examples Rails runs: #{rows["match"]} match, #{rows["gap"]} gap, " \
+       "#{rows["dropped"]} dropped, #{rows["env"]} env (set aside), #{rows["skip"]} skip"
+  if rows["dropped"] > 0
+    puts "\ndropped — Rails runs these, the emit has no example of that id (a file that failed to load):"
+    dropped.first(10).each { |x| puts "  #{x["id"]}" }
+    puts "  … #{rows["dropped"] - 10} more" if rows["dropped"] > 10
+  end
+elsif baseline_meta && baseline_meta["note"]
+  puts "no row join: #{baseline_meta["note"]}"
 end
 puts
 puts "todos, by failures cleared:"

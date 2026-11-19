@@ -75,6 +75,13 @@
       the suite a worklist generator. That page publishes the ranked list of what
       fails and why, including what it excludes and what the harness papers over.
     </p>
+    <p>
+      Rails runs the same suite at the same commit beside it, so the two are
+      joined example by example: a spec that fails on stock Rails too is set
+      aside as the environment rather than charged to the compiler, and one the
+      emit never produced — its file did not load — is listed as dropped
+      instead of quietly leaving the denominator.
+    </p>
 
     <h2>The honest ledger</h2>
     <p>

@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "Curated root causes for scripts/campfire-suite. Unpassed tests are clustered",
+    "Curated root causes for scripts/app-suite --app campfire. Unpassed tests are clustered",
     "mechanically by failure message; this file is what turns a cluster into a",
     "named todo with an owner. Rules are tried in order; FIRST MATCH WINS, so the",
     "specific ones sit above the general ones.",
@@ -11,7 +11,7 @@
     "",
     "The unit is an UNPASSED TEST, not a FAIL line: a file that dies at load",
     "contributes its whole count against its load error. See the header of",
-    "scripts/campfire-suite-summary.",
+    "scripts/app-suite-summary.",
     "",
     "Counts churn — 130 unpassed is a shadow. Causes are the worklist, so they",
     "carry stable slugs you can still discuss forty commits later.",

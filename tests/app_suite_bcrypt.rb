@@ -3,8 +3,8 @@ require "tmpdir"
 require "open3"
 require "rbconfig"
 
-suite = File.expand_path("../scripts/campfire-suite", __dir__)
-Dir.mktmpdir("roundhouse-campfire-suite-bcrypt") do |emit|
+suite = File.expand_path("../scripts/app-suite", __dir__)
+Dir.mktmpdir("roundhouse-app-suite-bcrypt") do |emit|
   Dir.mkdir(File.join(emit, "test"))
   File.write(File.join(emit, "Makefile"), "SPINEL_TESTS := test/bcrypt_test\n\n")
   File.write(File.join(emit, "test/bcrypt_test.rb"), <<~RUBY)
@@ -53,4 +53,4 @@ _, stderr, status = Open3.capture3(
   "raise 'ordinary process changed' unless BCrypt::Engine.cost == BCrypt::Engine::DEFAULT_COST"
 )
 raise stderr unless status.success?
-puts "campfire-suite bcrypt regression: hashing, launcher and pass/failure tallies OK"
+puts "app-suite bcrypt regression: hashing, launcher and pass/failure tallies OK"

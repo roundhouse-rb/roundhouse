@@ -133,7 +133,9 @@ module RoundhouseStatus
     problems << "the example counts are missing" unless counts.all? { |n| n.is_a?(Integer) && n >= 0 } && ex["total"].positive?
     problems << "a failure group has no count" unless s.fetch("causes").all? { |c| c["failures"].is_a?(Integer) && c["failures"] >= 0 }
     problems << "the example counts don't add up" unless ex.values_at("passed", "failed", "pending").sum(&:to_i) == ex["total"].to_i
-    problems << "the failure groups don't add up to the failures" unless causes.sum { |c| c["failures"] } == ex["failed"].to_i
+    # lobsters-specs sets aside the failures that also fail on Rails.
+    charged = ex["failed"].to_i - ex["set_aside_on_rails"].to_i
+    problems << "the failure groups don't add up to the failures" unless causes.sum { |c| c["failures"] } == charged
     problems << "a rule with no matches has failures" if causes.any? { |c| c["stale_rule"] && c["failures"].positive? }
     {
       "observed_at" => time_or_nil(s["generated_at"]), "sources" => [url, "#{site}/bench/lobsters-specs/"],
@@ -146,8 +148,10 @@ module RoundhouseStatus
         "consistent" => problems.empty?, "problems" => problems,
         "causes" => causes, "by_file" => by_file, "harness_compensations" => compensations,
         "warnings" => { "total" => s.dig("emit", "warnings"), "by_kind" => s.dig("emit", "by_kind").to_h },
-        # Same app revision, Ruby, spec selection and harness: results under one key compare.
-        "scope_key" => digest(s.dig("lobsters", "sha"), s.dig("ruby", "pinned"), s["scope"], by_file.map { |f| [f["file"], f["examples"]] }.sort, compensations)
+        # Same app revision, Ruby, spec selection, harness and Rails join (whether it ran, and which
+        # failures it set aside): results under one key compare.
+        "scope_key" => digest(s.dig("lobsters", "sha"), s.dig("ruby", "pinned"), s["scope"], by_file.map { |f| [f["file"], f["examples"]] }.sort, compensations,
+                              s["rows"].nil?, s["env"].to_a.map { |e| e["id"] }.sort)
       }
     }
   end

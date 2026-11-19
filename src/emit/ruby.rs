@@ -1044,11 +1044,19 @@ pub fn emit_spinel(app: &App) -> Vec<EmittedFile> {
     emit_spinel_with_param_binds(
         app,
         crate::build_target::BuildTarget::Spinel.param_binds_enabled(None),
+        false,
     )
 }
 
 /// Ruby-family emit with the build target's resolved bind policy.
-pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<EmittedFile> {
+///
+/// `cruby` says the tree runs on a real Ruby VM (the ruby and jruby
+/// trees) rather than being compiled by spinel AOT. It reaches exactly
+/// one place — the per-test driver's `FAIL` report, which names the
+/// exception class and raise site only where `Exception#backtrace`
+/// exists (`render_autorun_shim`). The rest of the tree is the same
+/// text for both, which is why this is a flag and not a second emit.
+pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool, cruby: bool) -> Vec<EmittedFile> {
     let _indexes = library::install_lookup_indexes(app);
     let mut files = Vec::new();
     files.extend(emit_lowered_schema_pair(app));
@@ -1542,7 +1550,7 @@ pub(crate) fn emit_spinel_with_param_binds(app: &App, param_binds: bool) -> Vec<
             let is_bare_base = test_parents.contains(class_name)
                 && lowered.test_class.methods.iter().all(|m| !m.name.as_str().starts_with("test_"));
             if !is_bare_base {
-                emitted.content.push_str(&render_autorun_shim(&lc_for_emit, &reset_lines));
+                emitted.content.push_str(&render_autorun_shim(&lc_for_emit, &reset_lines, cruby));
             }
             let rbs_path = emitted.path.clone();
             files.push(emitted);
@@ -1643,7 +1651,7 @@ fn rbs_only_from_funcs(
 /// against the test); `teardown` runs outside it so it fires whether
 /// or not the body raised, and a raise from teardown itself still
 /// aborts the file rather than being swallowed.
-fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
+fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String], cruby: bool) -> String {
     let class_name = lc.name.0.as_str();
     let test_methods: Vec<&str> = lc
         .methods
@@ -1737,7 +1745,7 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         // 17 and a Linux runner's to 15, for the same emit), and
         // counting it passed claims a check that never ran. So it is
         // reported on its own line and taken out of BOTH sides of the
-        // tally by `scripts/campfire-suite`.
+        // tally by `scripts/app-suite`.
         // One `rescue Exception`. `TestSkipped < Exception`, and a
         // framework file never loads the helper that defines that
         // class — naming it in its own rescue arm raised
@@ -1752,6 +1760,9 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         writeln!(s, "    __ok = false").unwrap();
         writeln!(s, "    __failed = __failed + 1").unwrap();
         writeln!(s, "    puts {:?} + __e.message", format!("FAIL {class_name}#{tm}: ")).unwrap();
+        if cruby {
+            write_failure_origin(&mut s);
+        }
         writeln!(s, "  end").unwrap();
         writeln!(s, "end").unwrap();
         // Teardown gets a guard of its OWN, for the reason the comment
@@ -1778,6 +1789,9 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
             format!("FAIL {class_name}#{tm}: ")
         )
         .unwrap();
+        if cruby {
+            write_failure_origin(&mut s);
+        }
         writeln!(s, "  end").unwrap();
         writeln!(s, "end").unwrap();
     }
@@ -1820,6 +1834,36 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
     )
     .unwrap();
     s
+}
+
+/// The line the ruby and jruby trees add under each `FAIL`: the
+/// exception's class and the frame it was raised in, with the emit
+/// root stripped, so a clustered failure reads
+/// `  at NameError app/models/leaf.rb:12:in 'Leaf#leaf'`.
+///
+/// The `FAIL` line itself carries the MESSAGE only, and a suite ranks
+/// its walls by message, so "undefined method 'book' for an instance
+/// of Integer" cannot be grouped by where it happened. This line
+/// says where — and stays a SECOND line because parsers split the
+/// `FAIL` line on its first `: `.
+///
+/// Written only for `cruby`: spinel AOT compiles this same shim text,
+/// has no `Exception#backtrace`, and its tree stays byte-identical.
+/// `Dir.pwd` is the emit root in every lane that runs these files —
+/// `scripts/app-suite` cds into the tree first. Indentation is
+/// the shim's 4-space one: both call sites are a rescue arm.
+fn write_failure_origin(s: &mut String) {
+    // `?` for a nil or empty backtrace: an exception built but never
+    // raised has none.
+    writeln!(s, "    __backtrace = __e.backtrace").unwrap();
+    writeln!(s, "    __frame = \"?\"").unwrap();
+    writeln!(s, "    if !__backtrace.nil? && !__backtrace.empty?").unwrap();
+    writeln!(s, "      __frame = __backtrace[0]").unwrap();
+    writeln!(s, "    end").unwrap();
+    writeln!(s, "    __frame = __frame.delete_prefix(Dir.pwd + \"/\")").unwrap();
+    // `.to_s`: a nameless exception class must not raise HERE, while a
+    // raise is already being handled.
+    writeln!(s, "    puts \"  at \" + __e.class.name.to_s + \" \" + __frame").unwrap();
 }
 
 /// Drop the leading `require_relative "..."` lines from an emitted

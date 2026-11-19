@@ -37,6 +37,9 @@ supported minimum, with its runtime gates repeated on `MRI_RUBY_NEXT` in
 conformance/comparison. Campfire conformance is pinned (`CAMPFIRE_SHA`)
 and blocking. Tip drift against basecamp/once-campfire `main` is not a
 standing CI job; survey tip only when deliberately bumping that pin.
+Writebook conformance (`WRITEBOOK_SHA`, the second pinned app) runs on the
+same floor with its own test and green-file floors, so the claim does not
+rest on one app's codebase.
 `unit-build` compiles one archive of all library, binary, and integration
 tests. Four unit shards partition the active cases; ignored integrations
 still need selected toolchain lanes. Framework and toolchain suites also

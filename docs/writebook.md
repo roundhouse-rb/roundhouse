@@ -6,6 +6,12 @@ it collects ingest, analysis, lowering and Ruby/Spinel emission diagnostics,
 but neither writes an emitted project nor runs Writebook. A passing inventory
 does not claim runtime, native-compilation or UI parity.
 
+That is a different question from the `writebook-conformance` CI lane, which
+does run Writebook's own tests against the emit (`scripts/app-suite --app
+writebook`, joined to Rails' own run in `bench/writebook/rails-baseline.json`)
+at its own pin, `WRITEBOOK_SHA` in `.github/workflows/ci.yml`. The two pins move
+independently.
+
 The reviewed source pin is `f3fadd21907ad9b18cb23800d971c2cc25045e2a`.
 Download it without installing Rails or gems, retaining Writebook's MIT
 license in the source:

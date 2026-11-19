@@ -79,6 +79,7 @@ fn speculative_fanout_retains_selection_and_real_prerequisites() {
             "build-roundhouse",
             "campfire-conformance",
             "campfire-compare",
+            "writebook-conformance",
         ] {
             assert!(
                 needs.iter().any(|v| v.as_str() == Some(required)),
@@ -157,6 +158,7 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
     for job_name in [
         "campfire-compare",
         "campfire-conformance",
+        "writebook-conformance",
         "campfire-spinel-build",
         "campfire-spinel-db",
     ] {
@@ -272,6 +274,79 @@ fn campfire_consumers_require_shared_debug_binary_and_do_not_rebuild() {
     );
 }
 
+/// Writebook is the second app on the conformance floor. The pin, the
+/// tarball it fetches, the suite invocation, the floor and the page built
+/// from its summary are what make the lane a measurement rather than a
+/// run; each one is a way for it to quietly stop measuring, so each is
+/// pinned here.
+#[test]
+fn writebook_conformance_pins_its_app_its_floor_and_its_page() {
+    let ci: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
+    // The pin is the SHA bench/writebook/rails-baseline.json records Rails'
+    // own run at: moving one without re-recording the other makes the row
+    // join refuse, so both live in the same change.
+    assert_eq!(
+        ci["env"]["WRITEBOOK_SHA"].as_str(),
+        Some("b31aa0d7885ba156ff1edff1af6b6b57f2e46f0b")
+    );
+    let job = &ci["jobs"]["writebook-conformance"];
+    let steps = job["steps"].as_sequence().unwrap();
+    let find = |name: &str| {
+        steps
+            .iter()
+            .find(|step| step["name"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("writebook-conformance: missing {name}"))
+    };
+    let fetch = find("Fetch Writebook at the pinned SHA")["run"].as_str().unwrap();
+    assert!(fetch.contains("codeload.github.com/basecamp/writebook/tar.gz/${WRITEBOOK_SHA}"));
+    assert!(fetch.contains("/tmp/writebook"));
+    let suite = find("Run writebook's suite against the emit")["run"]
+        .as_str()
+        .unwrap();
+    assert!(suite.contains("scripts/app-suite"));
+    assert!(suite.contains("--app writebook"));
+    // --sha is the pin: the tarball has no .git.
+    assert!(suite.contains("--sha \"$WRITEBOOK_SHA\""));
+    assert!(suite.contains("--json /tmp/writebook-suite/summary.json"));
+    let floor = find("Enforce the floor");
+    assert_eq!(floor["env"]["FLOOR_TESTS"].as_u64(), Some(104));
+    assert_eq!(floor["env"]["FLOOR_FILES"].as_u64(), Some(8));
+    // Both artifacts upload even when the floor trips: that run's tally and
+    // summary are the ones someone needs to read.
+    let tally = find("Upload the tally");
+    assert_eq!(tally["if"].as_str(), Some("always()"));
+    assert_eq!(tally["with"]["path"].as_str(), Some("/tmp/writebook-tally.txt"));
+    let summary = find("Upload the conformance summary");
+    assert_eq!(summary["if"].as_str(), Some("always()"));
+    assert_eq!(
+        summary["with"]["name"].as_str(),
+        Some("writebook-conformance-summary")
+    );
+    // The page is rendered in assemble-site, under the Campfire suite
+    // page's convention, from the summary this job uploaded.
+    let assemble = &ci["jobs"]["assemble-site"];
+    assert!(
+        assemble["needs"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|need| need.as_str() == Some("writebook-conformance")),
+        "assemble-site must wait for the summary it renders"
+    );
+    let render = assemble["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|step| step["name"].as_str() == Some("Render writebook conformance page"))
+        .and_then(|step| step["run"].as_str())
+        .expect("assemble-site renders the writebook conformance page");
+    assert!(
+        render.contains("scripts/app-suite-report _site/bench/writebook-suite"),
+        "{render}"
+    );
+}
+
 /// compare-ruby and compare-ruby-next once spent most of their minutes
 /// compiling Roundhouse twice (the test profile for the CRuby gates, release
 /// for `bin/rh transpile`) to run a few seconds of tests. They now run those
@@ -343,49 +418,91 @@ fn cruby_compare_jobs_run_archived_gates_and_do_not_rebuild_roundhouse() {
 
 /// The strict-emit ceiling counts `error[` lines. An ingest abort prints
 /// none and exits nonzero, so the step must fail on the exit status too;
-/// a clean emit inside the ceiling must still pass.
+/// a clean emit inside the ceiling must still pass. Both pinned app lanes
+/// carry one, at their own ceiling, and the ceiling is the pin: Campfire
+/// has cleared its gaps, Writebook still has 49 (16 unsupported/syntax +
+/// 33 type errors at b31aa0d).
 #[test]
 #[cfg(unix)]
 fn strict_emit_ceiling_fails_an_ingest_abort_that_prints_no_error_line() {
     use std::os::unix::fs::PermissionsExt;
     let ci: serde_yaml_ng::Value =
         serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/ci.yml").unwrap()).unwrap();
-    let run = ci["jobs"]["campfire-conformance"]["steps"]
-        .as_sequence()
-        .unwrap()
-        .iter()
-        .find(|step| step["name"].as_str() == Some("Enforce the strict-emit ceiling"))
-        .and_then(|step| step["run"].as_str())
-        .expect("strict-emit ceiling")
-        .to_owned();
     let dir = scratch::dir("roundhouse-ceiling");
-    let step = |bin_body: &str, ceiling: &str| {
-        let bin = dir.join("roundhouse");
-        fs::write(&bin, format!("#!/bin/sh\n{bin_body}\n")).unwrap();
-        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-        std::process::Command::new("bash")
-            .args(["-c", &run])
-            .env("ROUNDHOUSE_BIN", &bin)
-            .env("CEILING_ERRORS", ceiling)
-            .output()
+    for (job_name, pinned_ceiling) in [
+        ("campfire-conformance", 0u64),
+        ("writebook-conformance", 49),
+    ] {
+        let step = ci["jobs"][job_name]["steps"]
+            .as_sequence()
             .unwrap()
-    };
-    let aborted = step(
-        "echo 'roundhouse: ingest app: unsupported construct in app/models/x.rb'; exit 1",
-        "0",
-    );
-    assert!(!aborted.status.success(), "an ingest abort passed the ceiling");
-    assert!(String::from_utf8_lossy(&aborted.stdout).contains("ingest stopped before analysis"));
-    let clean = step("echo 'roundhouse: emitted 3 files'; exit 0", "0");
-    assert!(clean.status.success(), "{}", String::from_utf8_lossy(&clean.stdout));
-    let at_ceiling = step("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1", "2");
-    assert!(
-        at_ceiling.status.success(),
-        "a counted error at the ceiling must pass: {}",
-        String::from_utf8_lossy(&at_ceiling.stdout)
-    );
-    let over = step("echo 'x.rb:1:1: error[unsupported]: nope'; exit 1", "0");
-    assert!(!over.status.success(), "an error over the ceiling passed");
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Enforce the strict-emit ceiling"))
+            .unwrap_or_else(|| panic!("{job_name}: missing strict-emit ceiling"));
+        assert_eq!(
+            step["env"]["CEILING_ERRORS"].as_u64(),
+            Some(pinned_ceiling),
+            "{job_name}: the ceiling is the pin; raising it silently accepts a regression"
+        );
+        let ceiling = pinned_ceiling.to_string();
+        let run = step["run"].as_str().unwrap().to_owned();
+        let step = |bin_body: &str, ceiling: &str| {
+            let bin = dir.join("roundhouse");
+            fs::write(&bin, format!("#!/bin/sh\n{bin_body}\n")).unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+            std::process::Command::new("bash")
+                .args(["-c", &run])
+                .env("ROUNDHOUSE_BIN", &bin)
+                .env("CEILING_ERRORS", ceiling)
+                .output()
+                .unwrap()
+        };
+        // A body that prints `n` counted errors and exits nonzero, the way
+        // an emit with findings does.
+        let errors = |n: u64| {
+            let lines: Vec<String> = (0..n)
+                .map(|i| format!("echo 'x{i}.rb:1:1: error[unsupported]: nope';"))
+                .collect();
+            format!("{} exit 1", lines.join(" "))
+        };
+        let aborted = step(
+            "echo 'roundhouse: ingest app: unsupported construct in app/models/x.rb'; exit 1",
+            &ceiling,
+        );
+        assert!(
+            !aborted.status.success(),
+            "{job_name}: an ingest abort passed the ceiling"
+        );
+        assert!(String::from_utf8_lossy(&aborted.stdout).contains("ingest stopped before analysis"));
+        let clean = step("echo 'roundhouse: emitted 3 files'; exit 0", &ceiling);
+        assert!(
+            clean.status.success(),
+            "{job_name}: {}",
+            String::from_utf8_lossy(&clean.stdout)
+        );
+        // Exactly at the ceiling passes, one over fails. With a zero
+        // ceiling those are the clean case above and a single error.
+        if pinned_ceiling == 0 {
+            let over = step(&errors(1), &ceiling);
+            assert!(
+                !over.status.success(),
+                "{job_name}: an error over the ceiling passed"
+            );
+        } else {
+            let at_ceiling = step(&errors(pinned_ceiling), &ceiling);
+            assert!(
+                at_ceiling.status.success(),
+                "{job_name}: {pinned_ceiling} errors at the ceiling must pass: {}",
+                String::from_utf8_lossy(&at_ceiling.stdout)
+            );
+            let over = step(&errors(pinned_ceiling + 1), &ceiling);
+            assert!(
+                !over.status.success(),
+                "{job_name}: {} errors over the ceiling passed",
+                pinned_ceiling + 1
+            );
+        }
+    }
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -438,6 +555,8 @@ fn resource_and_harness_helpers_preserve_failures_and_contracts() {
         "tests/ci_unit_tests_test.py",
         "tests/ci_apt_install_test.py",
         "tests/ci_campfire_optimization_test.py",
+        "tests/app_suite_join_test.py",
+        "tests/lobsters_join_test.py",
         "tests/ci_smoke_test.py",
     ] {
         let result = std::process::Command::new("python3")

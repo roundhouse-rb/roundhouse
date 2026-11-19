@@ -5326,7 +5326,9 @@ fn ruby_family_runtime_files(
     let _body_names = crate::lower::model_to_library::schema::share_model_body_names(&app.models, &Default::default());
     let _registry = crate::lower::model_to_library::share_request_finder_registry(&app.models, &app.schema);
     let _writers = crate::lower::model_to_library::share_module_writers(app);
-    let (mut files, test_stems) = spinel_files(app, fixture, param_binds)?;
+    // `cruby`: this tree runs the shim on a real VM, so the driver may
+    // name the exception class and raise site (see `spinel_files`).
+    let (mut files, test_stems) = spinel_files(app, fixture, param_binds, true)?;
     // Not loaded up front on the CRuby tree: a gem file's stub is there for a path the gem builds, which CRuby loads
     // when the gem asks, after the file programs and autoloads that load its classes in order.
     let stub_require = format!("require_relative \"../{}/", crate::ingest::source_gems_mount());
@@ -10791,7 +10793,7 @@ fn spinel_files_with_source_markers(
     param_binds: bool,
 ) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     let (mut files, stems) =
-        emit::ruby::source_markers::with_source_markers(app, || spinel_files(app, fixture, param_binds))?;
+        emit::ruby::source_markers::with_source_markers(app, || spinel_files(app, fixture, param_binds, false))?;
     apply_gem_packages(&mut files, app)?;
     for (path, content) in files.iter_mut() {
         if path.ends_with(".rb") {
@@ -11076,7 +11078,12 @@ end
     )
 }
 
-fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(String, String)>, Vec<String>), String> {
+/// The base for all three ruby-family trees (spinel, ruby, jruby):
+/// scaffold, runtime, lowered app. `cruby` says the tree runs on a real
+/// VM rather than under spinel AOT, which reaches only the test
+/// driver's failure report — see
+/// `emit::ruby::emit_spinel_with_param_binds`.
+fn spinel_files(app: &App, fixture: &Path, param_binds: bool, cruby: bool) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     // Each controller lowering and the tests type against the models'
     // request-finder registry; one model lowering serves them all.
     let _registry = crate::lower::model_to_library::share_request_finder_registry(&app.models, &app.schema);
@@ -11679,7 +11686,7 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         }
     }
 
-    let app_files = emit::ruby::emit_spinel_with_param_binds(app, param_binds);
+    let app_files = emit::ruby::emit_spinel_with_param_binds(app, param_binds, cruby);
     let test_stems = app_test_stems(&app_files);
     files.extend(sort_files(app_files));
 

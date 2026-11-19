@@ -4568,7 +4568,7 @@ rescue ran.
 
 **Why no existing gate sees it.** The ruby lane holds jobs
 (`enqueue_without_running`) and runs under Puma, so neither
-`campfire-suite` nor `scripts/campfire-e2e` ever drains a raising job on
+`app-suite` nor `scripts/campfire-e2e` ever drains a raising job on
 this server. `scripts/smoke campfire` DOES hit it, and stays green,
 because the only spec that posts a message is `test.fixme`.
 

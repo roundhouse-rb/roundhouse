@@ -133,6 +133,16 @@ scope    = d["scope"] || {}
 canary   = d["canary"] || {}
 causes   = d["causes"] || []
 by_file  = d["by_file"] || []
+rows     = d["rows"]
+dropped  = Array(d["dropped"])
+env_rows = Array(d["env"])
+baseline = d["baseline"] || {}
+
+# How many examples the suite HAS, as Rails ran it. `rows` is present
+# only when the join ran; its set-aside and dropped rows are still
+# examples Rails runs, so they belong in the denominator this page
+# reports against.
+rails_total = rows ? %w[match gap dropped env skip].sum { |k| rows[k].to_i } : nil
 
 total  = ex["total"].to_i
 passed = ex["passed"].to_i
@@ -255,6 +265,7 @@ end
 # ── Headline ─────────────────────────────────────────────────────────
 html << %(<div class="badges">)
 html << %(<span class="badge #{passed == total && total > 0 ? "pass" : "fail"}">#{fmt_int(passed)}/#{fmt_int(total)} examples pass</span>)
+html << %(<span class="badge info">of #{fmt_int(rails_total)} examples Rails runs</span>) if rails_total
 html << %(<span class="badge info">#{scope["spec_files_run"]} of #{scope["spec_files_in_suite"]} spec files</span>)
 if emit["files"]
   html << %(<span class="badge #{emit["errors"].to_i.zero? ? "pass" : "fail"}">emit #{fmt_int(emit["files"])} files, #{fmt_int(emit["errors"])} errors</span>)
@@ -267,6 +278,7 @@ if total > 0
   html << %(<span class="f" style="width:#{pct(failed, total).round(2)}%"></span>)
   html << "</div>\n"
   html << %(<div class="meta">#{fmt_int(passed)} passing · #{fmt_int(failed)} failing)
+  html << " · of #{fmt_int(rails_total)} examples Rails runs" if rails_total
   html << " · #{fmt_int(outside)} error(s) outside examples" if outside > 0
   html << "</div>\n"
 end
@@ -288,6 +300,7 @@ html << <<~METHOD
     <p class="caveat">Each run stands alone. There is no history here and no comparison to previous
     runs: numbers move when their code moves as well as when ours does, so a delta would attribute
     upstream's changes to us.</p>
+    #{rails_total ? "<p><strong>Rails runs the same suite</strong> at the same SHA, and the two runs are joined example by example. That is what makes a number here attributable: an example that fails on stock Rails too is set aside below rather than counted as a cause, and one Rails runs that the emit never produced is listed as dropped instead of quietly shrinking the denominator.</p>" : ""}
   </div>
 METHOD
 
@@ -384,6 +397,41 @@ if outside > 0 && (msgs = d["errors_outside_examples"]) && Array(msgs).any?
   html << "<h2>Errors outside examples</h2>\n"
   html << %(<p>A spec file or hook that failed to run at all. These are not counted as failures above, so the denominator understates by however many examples they would have contributed.</p>\n)
   Array(msgs).each { |m| html << "<pre style='background:#f7f7f7;padding:0.6em;overflow-x:auto;font-size:0.85em'>#{esc(m)}</pre>\n" }
+end
+
+# ── What Rails runs that the emit never ran ──────────────────────────
+# The join's headline finding, and the quietest gap this lane has. A
+# spec whose file fails to load against the emit stops existing rather
+# than failing: no example, no exception, just a smaller denominator.
+if dropped.any?
+  html << "<h2>Examples Rails runs that the emit never ran</h2>\n"
+  html << %(<p>These are not failures: the emit produced no example with that id, which is usually a spec file that failed to load (its error is under “Errors outside examples” above). Grouped by file, because a file that does not load is one decision.</p>\n)
+  html << "<table>\n<tr><th>File</th><th class=num>Examples</th></tr>\n"
+  dropped.group_by { |r| r["id"].to_s.sub(/\[.*\z/, "") }
+         .sort_by { |file, list| [-list.size, file] }
+         .each do |file, list|
+    html << %(<tr><td><code>#{esc(file)}</code></td><td class=num>#{list.size}</td></tr>\n)
+  end
+  html << "</table>\n"
+end
+
+# ── Set aside: fails on Rails too ────────────────────────────────────
+if env_rows.any?
+  html << "<h2>Set aside: fails on Rails too</h2>\n"
+  html << %(<p>These fail on stock Rails as well — lobsters' own suite has order-dependent failures — so they say nothing about the emit and are excluded from the cause counts above.</p>\n)
+  html << "<table>\n<tr><th>Example</th><th>Exception</th><th>Message</th></tr>\n"
+  env_rows.each do |r|
+    html << %(<tr><td><code>#{esc(r["name"])}</code><br><code>#{esc(r["id"])}</code></td><td>)
+    html << (r["exception"].to_s.empty? ? "—" : "<code>#{esc(r["exception"])}</code>")
+    html << %(</td><td>#{esc(r["message"])}</td></tr>\n)
+  end
+  html << "</table>\n"
+end
+
+# A note from the join itself: why there is no `rows` (Rails not run, or
+# a baseline recorded at another commit).
+if rows.nil? && baseline["note"]
+  html << %(<p class="caveat">#{esc(baseline["note"])}</p>\n)
 end
 
 # ── Emit diagnostics ─────────────────────────────────────────────────

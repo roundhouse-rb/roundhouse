@@ -1,0 +1,8 @@
+{
+  "name": "writebook",
+  "repo": "basecamp/writebook",
+  "src": "~/git/writebook",
+  "framework": "minitest",
+  "allow_unsupported": true,
+  "rails_extra_gems": ["benchmark"]
+}

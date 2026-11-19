@@ -81,7 +81,9 @@ enforces executed-test floors, so a successful empty test run is insufficient.
 validation, and styles. [`tests/browser_smoke/`](../../tests/browser_smoke/)
 exercises SharedWorker and browser compiler surfaces.
 
-`scripts/campfire-suite` runs the pinned app's own tests and reports a worklist;
-CI owns its conformance floors. The [Writebook inventory](../writebook.md) is a
+`scripts/app-suite --app NAME` runs a pinned app's own tests (Campfire and
+Writebook in CI) against the emit, joins them row by row to Rails' own run of
+the same suite (`bench/campfire/rails-baseline.json`, `bench/writebook/rails-baseline.json`, recorded by
+`scripts/app-suite-baseline`), and reports a worklist; CI owns the floors. The [Writebook inventory](../writebook.md) is a
 manually run corpus survey, not a CI gate; it does not run the app and must not
 be described as compilation, runtime, or UI conformance.

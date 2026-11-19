@@ -10,6 +10,11 @@ fn app() -> emit_and_run::Overlay {
   get "/moved/:id", to: redirect(status: 302) { |params, req| "#{req.protocol}other.test/items/#{params[:id]}" }
   get "/relative", to: redirect("/articles")
   get "/controller-outside", to: "outbound#show"
+  get "/scheme-no-slash", to: "outbound#scheme_no_slash"
+  get "/scheme-one-slash", to: "outbound#scheme_one_slash"
+  get "/scheme-opaque", to: "outbound#scheme_opaque"
+  get "/bare-relative", to: "outbound#bare_relative"
+  get "/rooted", to: "outbound#rooted"
 "##,
         )
         .write(
@@ -17,6 +22,29 @@ fn app() -> emit_and_run::Overlay {
             r#"class OutboundController < ApplicationController
   def show
     redirect_to "https://other.test/landing"
+  end
+
+  # A scheme written without `//` has no URI authority, so the
+  # same-host check has no host to compare — but a browser navigates
+  # it to `https://evil.test/` all the same.
+  def scheme_no_slash
+    redirect_to "https:evil.test"
+  end
+
+  def scheme_one_slash
+    redirect_to "https:/evil.test"
+  end
+
+  def scheme_opaque
+    redirect_to "javascript:alert(1)"
+  end
+
+  def bare_relative
+    redirect_to "evil.test"
+  end
+
+  def rooted
+    redirect_to "/articles"
   end
 end
 "#,
@@ -76,6 +104,53 @@ rescue ArgumentError
 end
 raise "ordinary controller allowed another host" unless refused
 puts "routing host policy passed natively"
+"#,
+        )
+        .assert_passes();
+}
+
+/// A scheme with no `//` is an open redirect unless the same-host check
+/// refuses it. `ActionController.location_host` reports a host only for
+/// `//host` and `scheme://host`, so `https:evil.test` and
+/// `https:/evil.test` reach `same_host_location` with no host at all —
+/// and before the hostless branch required a single-slash path, they
+/// were classified "relative" and sent as the `Location`. Browsers
+/// apply WHATWG special-scheme parsing and navigate `https:evil.test`
+/// to `https://evil.test/`, so `redirect_to params[:back]` was an open
+/// redirect for every app.
+///
+/// Rails 8.1 refuses all four of these: `URI(url).host` is nil and the
+/// url does not start with `/`, so `_url_host_allowed?` is false and
+/// `redirect_to` raises. A single-slash path is the one hostless
+/// location it allows, and it still does here.
+#[test]
+fn a_scheme_without_slashes_is_refused_like_any_other_host() {
+    app()
+        .run_ruby(
+            r#"
+["/scheme-no-slash", "/scheme-one-slash", "/scheme-opaque", "/bare-relative"].each do |path|
+  refused = nil
+  begin
+    Main.run_rack(
+      "REQUEST_METHOD" => "GET", "PATH_INFO" => path, "QUERY_STRING" => "",
+      "HTTP_HOST" => "app.test", "rack.input" => StringIO.new("")
+    )
+  rescue ArgumentError => error
+    refused = error.message
+  end
+  raise "not refused: " + path if refused.nil?
+  raise "wrong refusal for " + path + ": " + refused unless refused.include?("Unsafe redirect")
+end
+
+# The one hostless location Rails allows still goes through, absolute
+# against the request's own host as `_compute_redirect_to_location` makes it.
+status, headers, _body = Main.run_rack(
+  "REQUEST_METHOD" => "GET", "PATH_INFO" => "/rooted", "QUERY_STRING" => "",
+  "HTTP_HOST" => "app.test", "rack.input" => StringIO.new("")
+)
+raise "rooted status: " + status.to_s unless status == 302
+raise "rooted location: " + headers["location"].to_s unless headers["location"] == "http://app.test/articles"
+puts "a scheme without slashes is refused; a rooted path still redirects"
 "#,
         )
         .assert_passes();

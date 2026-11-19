@@ -268,10 +268,10 @@ fn query_decorated_columns(model: &Model) -> Option<crate::det::HashSet<Symbol>>
 /// (`SQLite3Integer#_limit`). An enum, `attribute` or `normalizes`
 /// column casts through its declaration instead, so it is left out, and
 /// a declaration that names its column at runtime leaves every one out.
-/// So is a `t.references` column: ingest keeps its logical name, not the
-/// `<name>_id` a query names, and drops an explicit `type:` (`:uuid`,
-/// `:string`), so its storage type is not known. A dumped schema writes
-/// the key as `t.bigint "<name>_id"`, which is listed.
+/// So is a `t.references` column: ingest drops an explicit `type:`
+/// (`:uuid`, `:string`) from its `<name>_id`, so its storage type is not
+/// known. A dumped schema writes the key as `t.bigint "<name>_id"`,
+/// which is listed.
 fn push_schema_integer_query_limits(methods: &mut Vec<MethodDef>, model: &Model, table: &Table) {
     use crate::schema::ColumnType;
     let postgres = crate::emit::shared::schema_sql::Dialect::current() == crate::emit::shared::schema_sql::Dialect::Postgres;

@@ -454,9 +454,9 @@ raise unless Widget.where(number: "1suffix").pluck(:id) == []
     }
 }
 
-// A `t.references` column keeps its logical name in the schema IR and
-// loses an explicit `type:`, so the cast cannot tell an integer key from
-// a uuid or String one; it keeps the uncast path. A dumped schema's
+// A `t.references` column loses an explicit `type:` in the schema IR,
+// so the cast cannot tell an integer key from a uuid or String one; it
+// keeps the uncast path. A dumped schema's
 // `t.bigint "owner_id"` is an ordinary integer column.
 #[test]
 fn reference_columns_keep_their_query_path() {

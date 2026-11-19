@@ -1078,6 +1078,11 @@ fn diagnose_head(app: &App) -> Vec<Diagnostic> {
     out.extend(route_guard_untyped_sends(app));
     // A support file the class ingest left out, at what failed it.
     out.extend(app.ingest_drops.iter().map(|drop| Diagnostic::ingest_unsupported(drop.span, drop.message.clone())));
+    // A test class whose framework base the runtime has no harness for.
+    out.extend(app.test_drops.iter().map(|drop| Diagnostic {
+        severity: crate::diagnostic::Severity::Warning,
+        ..Diagnostic::unsupported(drop.span, None, "test case base", drop.message.clone())
+    }));
     out.extend(conditional_declarations_reopened(app));
     out.extend(unsettled_conditional_writes(app));
     // Constructor refusals must also reach executable class constants and

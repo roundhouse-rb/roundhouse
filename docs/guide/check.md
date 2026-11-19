@@ -243,16 +243,21 @@ The same variable on an emit (`roundhouse --target ruby APP`) also prints a `pos
 ## A clean run
 
 The Rails Guides store — the app the *Getting Started with Rails*
-guide builds, checked in at `fixtures/store` — checks clean:
+guide builds, checked in at `fixtures/store` — checks with no errors and
+no gaps:
 
 ```
 $ roundhouse check fixtures/store
+fixtures/store/test/mailers/product_mailer_test.rb:1:1: warning[unsupported]: test case base not supported (all targets): `ProductMailerTest < ActionMailer::TestCase`: the emitted tests have no harness for ActionMailer::TestCase, so its tests are not emitted
+
 roundhouse-check: 24 gems: 9 framework, 2 modeled, 13 infrastructure, 0 unknown
-roundhouse-check: 13 send(s) on unknown receivers, 9 on gradual receivers, 0 unresolved on known receivers (unchecked, not errors)
-roundhouse-check: fixtures/store — 0 parse error(s), 0 error(s), 0 warning(s), 0 gap-attributed note(s), 0 survey gap(s)
+roundhouse-check: 13 send(s) on unknown receivers, 8 on gradual receivers, 0 unresolved on known receivers (unchecked, not errors)
+roundhouse-check: fixtures/store — 0 parse error(s), 0 error(s), 1 warning(s), 0 gap-attributed note(s), 0 survey gap(s)
 ```
 
-Exit status 0. Everything the analyzer saw, it typed. The send counts are
+Exit status 0. Everything the analyzer saw, it typed. The one warning
+is a test, not the app: the scaffold's mailer test, whose base the
+emitted tests have no harness for, is left out of the output. The send counts are
 not errors: they are sends on a receiver the analyzer could not type,
 which nothing checked (see below).
 

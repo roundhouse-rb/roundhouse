@@ -22,7 +22,7 @@ JOBS = {
     "store-check": {
         "checks": [
             "cargo build",
-            "The analyzer reports no errors, no warnings and no ingest gaps on the store",
+            "The analyzer reports no errors, only the mailer-test warning and no ingest gaps on the store",
         ],
         "tests": [],
     },

@@ -581,6 +581,16 @@ impl<'pr> ruby_prism::Visit<'pr> for BodyCheck<'_> {
     }
 }
 
+/// Whether a block `body` one scope inside a loop's block keeps its
+/// meaning as a body of its own: the loop's `params` are only read, no
+/// other outer local is reached, and nothing in it leaves the block.
+/// The test-class loop (`ingest::test`) holds its `test` blocks to this.
+pub(super) fn closure_reads_only(body: &Node<'_>, params: &[&str]) -> bool {
+    let mut check = BodyCheck { depth: 0, loops: 0, loop_params: params, ok: true };
+    ruby_prism::Visit::visit(&mut check, body);
+    check.ok
+}
+
 /// Whether `stmt` is a loop this unrolls, with the enclosing bodies' tables
 /// in scope.
 pub(super) fn unrollable(stmt: &Node<'_>, named: &HashSet<String>) -> bool {

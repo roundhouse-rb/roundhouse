@@ -68,8 +68,10 @@ fn default_and_custom_tests() -> Vec<(PathBuf, String)> {
             "ChannelDefaultTest",
         ),
         ruby_file("test/lib/lib_default_test.rb", "LibDefaultTest"),
-        ruby_file("test/unit/unit_custom_test.rb", "UnitCustomTest"),
-        ruby_file("test/utils/utils_custom_test.rb", "UtilsCustomTest"),
+        // Not `*_test.rb`: Rails' default glob does not run them, so only
+        // a configured root reads them.
+        ruby_file("test/unit/unit_custom.rb", "UnitCustomTest"),
+        ruby_file("test/utils/utils_custom.rb", "UtilsCustomTest"),
     ]
 }
 
@@ -96,6 +98,140 @@ const ALL_STANDARD_MODULES: &[&str] = &[
 fn rails_test_roots_include_test_lib_by_default() {
     let app = ingest_files(default_and_custom_tests()).expect("ingest tree");
     assert_modules(&app, DEFAULT_MODULES);
+}
+
+/// What `bin/rails test` runs with no arguments: `test/**/*_test.rb`,
+/// less `test/{system,dummy,fixtures}`. Before this, a test under
+/// `test/integration` or an app's own folder was dropped silently.
+#[test]
+fn rails_default_glob_reaches_every_test_folder() {
+    let mut files = default_and_custom_tests();
+    files.extend([
+        ruby_file("test/integration/flow_test.rb", "FlowTest"),
+        ruby_file("test/middleware/guard_test.rb", "GuardTest"),
+        ruby_file("test/script/admin/reset_test.rb", "ResetTest"),
+        ruby_file("test/top_level_test.rb", "TopLevelTest"),
+        // Not run by Rails' default glob.
+        ruby_file("test/integration/not_a_test_file.rb", "NotATestFileTest"),
+        ruby_file("test/system/browser_test.rb", "BrowserTest"),
+        ruby_file("test/dummy/test/dummy_test.rb", "DummyTest"),
+        ruby_file("test/fixtures/files/fixture_test.rb", "FixtureTest"),
+        // Read, but its base has no harness: reported, not emitted.
+        text_file(
+            "test/mailers/notice_mailer_test.rb",
+            "class NoticeMailerTest < ActionMailer::TestCase\n  test \"sends\" do\n  end\nend\n",
+        ),
+    ]);
+    let app = ingest_files(files).expect("ingest tree");
+    let mut expected = DEFAULT_MODULES.to_vec();
+    expected.extend(["FlowTest", "GuardTest", "ResetTest", "TopLevelTest"]);
+    assert_modules(&app, &expected);
+    let drops: Vec<&str> = app.test_drops.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        drops,
+        ["`NoticeMailerTest < ActionMailer::TestCase`: the emitted tests have no harness for ActionMailer::TestCase, so its tests are not emitted"]
+    );
+}
+
+/// Test classes on bases with no harness, reached every way the ingest
+/// handles, beside ones that keep theirs.
+fn unharnessed_tree() -> Vec<(PathBuf, String)> {
+    vec![
+        ruby_file("test/models/model_default_test.rb", "ModelDefaultTest"),
+        text_file(
+            "test/mailers/notice_test.rb",
+            "class NoticeTest < BaseMailerTest\n  KINDS.each do |kind|\n    test \"#{kind}\" do\n    end\n  end\nend\n",
+        ),
+        text_file(
+            "test/mailers/kinds_mailer_test.rb",
+            "class KindsMailerTest < ActionMailer::TestCase\n  KINDS.each do |kind|\n    test \"#{kind}\" do\n    end\n  end\nend\n",
+        ),
+        // A reopen in a later file is the same class, still left out, its
+        // body (a loop the ingest would refuse) unread.
+        text_file(
+            "test/mailers/kinds_more_test.rb",
+            "class KindsMailerTest\n  MORE.each do |kind|\n    test \"#{kind}\" do\n    end\n  end\nend\n",
+        ),
+        text_file(
+            "test/test_helper.rb",
+            // `HelperChainTest` is on a base left out earlier in this file.
+            "class BaseMailerTest < ActionMailer::TestCase\nend\nclass HelperChainTest < BaseMailerTest\n  KINDS.each do |kind|\n    test \"#{kind}\" do\n    end\n  end\nend\nclass HarnessedBase < ActiveSupport::TestCase\nend\nclass OuterBase < ActionMailer::TestCase\nend\nmodule Mailers\n  class Base < ActionMailer::TestCase\n  end\n  class HarnessedBase < ActionMailer::TestCase\n  end\n  class OuterBase < ActiveSupport::TestCase\n  end\nend\n",
+        ),
+        // `OuterBase` here is the kept `Mailers::OuterBase`, which shadows
+        // the left-out top-level one.
+        text_file(
+            "test/mailers/mailers/shadowed_test.rb",
+            "module Mailers\n  class ShadowedTest < OuterBase\n    test \"kept\" do\n    end\n  end\nend\n",
+        ),
+        // A chain within one test file, and a reopen there.
+        text_file(
+            "test/mailers/chain_test.rb",
+            "class LocalMailerTest < ActionMailer::TestCase\nend\nclass ChainTest < LocalMailerTest\n  KINDS.each do |kind|\n    test \"#{kind}\" do\n    end\n  end\nend\nclass LocalMailerTest\n  MORE.each do |kind|\n    test \"#{kind}\" do\n    end\n  end\nend\n",
+        ),
+        // Compact `class Mailers::CompactTest` looks `HarnessedBase` up at
+        // the top level only, where it has a harness.
+        text_file(
+            "test/mailers/mailers/compact_test.rb",
+            "class Mailers::CompactTest < HarnessedBase\n  test \"kept\" do\n  end\nend\n",
+        ),
+        // `Base` is `Mailers::Base` only by Ruby's lookup in the module.
+        text_file(
+            "test/mailers/mailers/digest_test.rb",
+            "module Mailers\n  class DigestTest < Base\n    KINDS.each do |kind|\n      test \"#{kind}\" do\n      end\n    end\n  end\nend\n",
+        ),
+        // `::HarnessedBase` is the top-level one, whatever the module holds.
+        text_file(
+            "test/mailers/mailers/rooted_test.rb",
+            "module Mailers\n  class RootedTest < ::HarnessedBase\n    test \"kept\" do\n    end\n  end\nend\n",
+        ),
+    ]
+}
+
+/// A base with no harness is reported however its class is reached: a
+/// base the helper defines on one, and a class on that base, are left
+/// out too, and a body construct the ingest would refuse is not read.
+#[test]
+fn an_unharnessed_base_is_reported_through_a_helper_base() {
+    let app = ingest_files(unharnessed_tree()).expect("ingest tree");
+    assert_modules(
+        &app,
+        &[
+            "ModelDefaultTest",
+            "HarnessedBase",
+            "Mailers::OuterBase",
+            "Mailers::RootedTest",
+            "Mailers::CompactTest",
+            "Mailers::ShadowedTest",
+        ],
+    );
+    let mut dropped: Vec<&str> = app.test_drops.iter().map(|d| d.message.split('`').nth(1).unwrap()).collect();
+    dropped.sort();
+    assert_eq!(
+        dropped,
+        [
+            "BaseMailerTest < ActionMailer::TestCase",
+            "ChainTest < LocalMailerTest",
+            "HelperChainTest < BaseMailerTest",
+            "KindsMailerTest < ActionMailer::TestCase",
+            "LocalMailerTest < ActionMailer::TestCase",
+            "Mailers::Base < ActionMailer::TestCase",
+            "Mailers::DigestTest < Mailers::Base",
+            "Mailers::HarnessedBase < ActionMailer::TestCase",
+            "NoticeTest < BaseMailerTest",
+            "OuterBase < ActionMailer::TestCase",
+        ]
+    );
+}
+
+/// Under `--continue` a left-out class's body is not read either, so a
+/// construct in it adds no survey gap beside the warning.
+#[test]
+fn a_left_out_class_adds_no_survey_gap() {
+    roundhouse::ingest::survey::activate();
+    let app = ingest_files(unharnessed_tree());
+    let gaps = roundhouse::ingest::survey::drain();
+    assert_eq!(app.expect("ingest tree").test_drops.len(), 10);
+    assert!(gaps.is_empty(), "{gaps:?}");
 }
 
 #[test]

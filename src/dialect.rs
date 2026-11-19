@@ -2505,6 +2505,12 @@ pub struct TestModule {
     /// import-stripper, so the field is informational only there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub includes: Vec<ClassId>,
+    /// Set when the class derives from a base the emitted tests have no
+    /// harness for: that base, resolved (or the class itself, for a
+    /// reopen of a class already left out). Its body is not read, and
+    /// the app ingest leaves it out with a warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unharnessed: Option<ClassId>,
 }
 
 impl TestModule {

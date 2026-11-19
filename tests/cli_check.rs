@@ -76,8 +76,14 @@ fn the_store_fixture_checks_clean() {
     let store = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/store");
     let (code, err) = check(&[store]);
     assert_eq!(code, 0, "{err}");
+    // The one warning: the scaffold's `test/mailers/product_mailer_test.rb`,
+    // on `ActionMailer::TestCase`, which the emitted tests have no harness for.
     assert!(
-        err.contains("0 parse error(s), 0 error(s), 0 warning(s), 0 gap-attributed note(s), 0 survey gap(s)"),
+        err.contains("0 parse error(s), 0 error(s), 1 warning(s), 0 gap-attributed note(s), 0 survey gap(s)"),
+        "{err}"
+    );
+    assert!(
+        err.contains("test/mailers/product_mailer_test.rb:1:1: warning[unsupported]: test case base not supported"),
         "{err}"
     );
 }

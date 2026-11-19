@@ -654,6 +654,12 @@ pub struct App {
     /// (`error[ingest_unsupported]`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ingest_drops: Vec<IngestDrop>,
+    /// Test classes ingest left out because the runtime has no harness
+    /// for their framework base (`ActionMailer::TestCase`): their tests
+    /// are not emitted, and `analyze` reports each as a warning, since
+    /// the app itself is whole.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub test_drops: Vec<IngestDrop>,
     /// Each support file (`lib/`, a gem's source, …) with the classes and
     /// modules it declares outside a load-time conditional, by source path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1429,6 +1435,7 @@ impl App {
             database_refusals: Vec::new(),
             database_routes: None,
             ingest_drops: Vec::new(),
+            test_drops: Vec::new(),
             library_class_files: Vec::new(),
             rails_application: None,
             concern_filters: HashMap::default(),

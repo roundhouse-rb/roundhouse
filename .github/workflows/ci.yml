@@ -285,13 +285,16 @@ jobs:
         id: build
         if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
         run: cargo build --locked --bin roundhouse
-      - name: The analyzer reports no errors, no warnings and no ingest gaps on the store
+      # The one warning: the scaffold's ProductMailerTest, on
+      # ActionMailer::TestCase, which the emitted tests have no harness for.
+      - name: The analyzer reports no errors, only the mailer-test warning and no ingest gaps on the store
         id: check
         if: steps.reuse.outcome != 'success' || steps.reuse.outputs.hit != 'true'
         run: |
           set -euo pipefail
           target/debug/roundhouse check --continue fixtures/store 2>&1 | tee /tmp/store-check.txt
-          grep -E "^roundhouse-check: .* 0 error\(s\), 0 warning\(s\), 0 gap-attributed note\(s\), 0 survey gap\(s\)" /tmp/store-check.txt
+          grep -E "^roundhouse-check: .* 0 error\(s\), 1 warning\(s\), 0 gap-attributed note\(s\), 0 survey gap\(s\)" /tmp/store-check.txt
+          grep -E "test/mailers/product_mailer_test\.rb:1:1: warning\[unsupported\]: test case base not supported" /tmp/store-check.txt
       # Use the actual dev profile and reuse the Store library build.
       # These checks also run when the Store analysis result is reused.
       - name: Build the unoptimized development bench driver

@@ -2608,6 +2608,10 @@ module ActiveRecord
         @persisted = true
         @destroyed = false
       end
+      # A rolled-back save is no last save: `<col>_previously_was` answers
+      # nil for a column it did not change, as Rails does. A callback-free
+      # write (kind 4) is no save, and leaves the answer.
+      _forget_before_last_save unless kind == 3 || kind == 4
       if @__rollback_saved
         @__last_saved_attributes = @__rollback_baseline
         # A partial row's assigned left-out columns are pending again too.
@@ -2635,6 +2639,7 @@ module ActiveRecord
         prev = previous.nil? ? nil : previous[key]
         changes[key] = [prev, value] if prev != value
       end
+      @__before_last_save = previous
       @__last_saved_attributes = _attributes_snapshot
       @__touched_updated_at = nil
       @__unloaded_writes = nil
@@ -2658,9 +2663,43 @@ module ActiveRecord
     # a local before the nil test and the index, the same precaution
     # `saved_change_to_attribute?` documents. Ruby-family only — see
     # base.rb's stub for why the indexing cannot live there.
+    #
+    # A column the last save did not change has no pair, and Rails
+    # answers the value it held before that save. The Getting Started
+    # store reads `inventory_count_previously_was.zero?` in an
+    # after_update_commit, on every update of a product. A record with
+    # no save yet (new, or hydrated) answers nil, as Rails does.
+    #
+    # The value comes from the baseline the last save replaced
+    # (`__track_saved_changes` keeps it), not from the present baseline.
+    # The save put a new snapshot in its place, and a direct write after
+    # it (`update_column`) moves a copy of that snapshot
+    # (`clear_attribute_change`), so the old one stays as it was and
+    # Dirty compares none of its values. Only a rollback of the save
+    # makes it the baseline again, and that drops it here
+    # (`_restore_after_rollback`), as Rails answers nil then.
+    #
+    # An Array goes out as a copy, from the pair too: until the
+    # transaction of the save ends, the replaced baseline is also the one
+    # a rollback puts back, and a caller that appended to the answer
+    # would change what Dirty compares after that rollback.
     def attribute_previously_was(name)
       pair = saved_changes[name]
-      pair.nil? ? nil : pair[0]
+      before = _before_last_save
+      value = pair.nil? ? (before.nil? ? nil : before[name]) : pair[0]
+      value.is_a?(Array) ? value.dup : value
+    end
+
+    # The baseline the last save replaced; nil with no save yet, and
+    # after a rollback of the save. A method, so that its signature gives
+    # the read a type.
+    def _before_last_save
+      @__before_last_save
+    end
+
+    def _forget_before_last_save
+      @__before_last_save = nil
+      nil
     end
 
     # The Dirty baseline: `attributes` with each Array value copied.

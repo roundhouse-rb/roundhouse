@@ -307,6 +307,8 @@ module ActiveRecord
     def _enlist_write: (Integer kind) -> nil
     def _enlist_direct_write: () -> nil
     def _forget_rollback_state: () -> nil
+    def _before_last_save: () -> Hash[String, untyped]?
+    def _forget_before_last_save: () -> nil
     def _run_commit_callbacks: (Integer kind) -> nil
     def self._txn_parent_joinable?: (Integer depth) -> bool
     def self._txn_note_joinable: (Integer depth, bool joinable) -> nil

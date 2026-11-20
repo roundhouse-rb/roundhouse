@@ -22782,3 +22782,5 @@ mod view_raise_statement;
 mod hidden_field_autocomplete;
 #[path = "emit_and_run/record_as_json_in_literal.rs"]
 mod record_as_json_in_literal;
+#[path = "emit_and_run/previously_was_unchanged_column.rs"]
+mod previously_was_unchanged_column;

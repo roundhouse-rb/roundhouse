@@ -45,6 +45,11 @@ pub fn analyze_and_lower(app: &mut App) -> Vec<Diagnostic> {
 }
 
 fn analyze_and_lower_with_target(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
+    // The translate fold reads the plans typing made over the same catalog.
+    crate::lower::i18n_translate::with_session_plans(|| analyze_and_lower_in_session(app, target))
+}
+
+fn analyze_and_lower_in_session(app: &mut App, target: crate::build_target::BuildTarget) -> Vec<Diagnostic> {
     if target == crate::build_target::BuildTarget::Spinel {
         crate::ingest::source_gem_autoload::answer_nil(app);
     }
@@ -67,7 +72,7 @@ fn analyze_and_lower_with_target(app: &mut App, target: crate::build_target::Bui
     #[cfg(feature = "memory-census")]
     crate::memory_census::census("after analyze", app);
     app.helper_diagnostics = Some(crate::analyze::diagnose_helper_modules(app));
-    // Only the registry outlives the analysis.
+    // Only the registry outlives the analysis (and the session's translate plans, until the fold has read them).
     #[cfg(feature = "memory-census")]
     let registry = if crate::memory_census::enabled() { analyzer.census_drop() } else { analyzer.into_class_registry() };
     #[cfg(not(feature = "memory-census"))]

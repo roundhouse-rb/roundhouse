@@ -198,6 +198,14 @@ fn helpers_returning_permit_filters_construct_models_through_the_params_factory(
     return params.require(:item).permit(:name) if params[:mode] == "first"
     @item_params ||= params.expect(item: [:name])
   end"#,
+        // `tap` returns its receiver (#1809).
+        r#"  def item_params
+    params.require(:item).permit(:name).tap { |values| values }
+  end"#,
+        // A `break` in a nested block ends that block's call, not `tap`'s.
+        r#"  def item_params
+    params.require(:item).permit(:name).tap { |values| [1].each { |n| break } }
+  end"#,
     ] {
         let run = model_app(helper).run_ruby(&create_item(&[("first", "provided"), ("second", "provided")]));
         run.assert_passes();
@@ -317,8 +325,23 @@ fn helpers_returning_a_hash_on_one_path_and_a_filter_on_another_keep_the_model_c
 #[test]
 fn filters_returned_through_other_calls_keep_the_model_constructor() {
     for helper in [
+        // `break` makes `tap` answer the block's Hash, not its receiver;
+        // `return` makes the helper answer it.
         r#"  def item_params
-    params.require(:item).permit(:name).tap { |values| values }
+    params.require(:item).permit(:name).tap { |values| break({ name: values[:name] }) }
+  end"#,
+        r#"  def item_params
+    params.require(:item).permit(:name).tap { |values| [1].each { |n| return({ name: values[:name] }) } }
+  end"#,
+        // A forwarded block isn't read, so its helper stays untyped even
+        // when, as here, Ruby returns the receiver.
+        r#"  def item_params
+    check = proc { |values| values }
+    params.require(:item).permit(:name).tap(&check)
+  end"#,
+        // Only `tap` hands back its receiver: `then` answers the block's value.
+        r#"  def item_params
+    params.require(:item).permit(:name).then { |values| { name: values[:name] } }
   end"#,
         r#"  def item_params
     same(params.require(:item).permit(:name))
@@ -338,6 +361,85 @@ fn filters_returned_through_other_calls_keep_the_model_constructor() {
         run.assert_passes();
         let controller = emitted_controller(&run.emitted);
         assert!(controller.contains("Item.new(self.item_params)"), "{controller}");
+    }
+}
+
+/// #1809: a helper that ends in `.tap { }` returns its permit chain's
+/// params class, so `except` on its result is synthesized there.
+/// `rendered` is the action's JSON: with `key?` the Ruby family emits the
+/// value-map form of `WidgetParams`, without it the record form.
+fn tap_helper_app(rendered: &str) -> emit_and_run::Overlay {
+    emit_and_run::empty_app()
+        .write("db/schema.rb", "ActiveRecord::Schema[8.1].define(version: 1) do\nend\n")
+        .write(
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :widgets, only: :create\nend\n",
+        )
+        .write(
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::API\nend\n",
+        )
+        .write(
+            "app/controllers/widgets_controller.rb",
+            &r#"class WidgetsController < ApplicationController
+  def create
+    filtered = widget_params.except(:token)
+    render json: RENDERED
+  end
+
+  private
+
+  def widget_params
+    params.require(:widget).permit(:name, :token).tap do |p|
+      @checked = true
+    end
+  end
+end
+"#
+            .replace("RENDERED", rendered),
+        )
+}
+
+/// The value-map form (`key?` is asked) and the record form (#1809's own
+/// action). In the record form `except` clears the key's presence only, so
+/// `filtered[:token]` isn't asked: it still reads the value, unlike Rails.
+const TAP_RENDERS: [(&str, &str); 2] = [
+    (
+        "{ name: filtered[:name], has_token: filtered.key?(:token), checked: @checked }",
+        r#"{ "name" => "w", "has_token" => false, "checked" => true }"#,
+    ),
+    ("{ name: filtered[:name], checked: @checked }", r#"{ "name" => "w", "checked" => true }"#),
+];
+
+#[test]
+fn helpers_ending_in_tap_keep_except_on_their_params_class() {
+    for (rendered, expected) in TAP_RENDERS {
+        let run = tap_helper_app(rendered).run_ruby(&format!(r##"require "json"
+require "stringio"
+input = JSON.generate("widget" => {{ "name" => "w", "token" => "secret" }})
+status, _, body = Main.run_rack("REQUEST_METHOD" => "POST", "PATH_INFO" => "/widgets", "QUERY_STRING" => "", "CONTENT_TYPE" => "application/json", "CONTENT_LENGTH" => input.bytesize.to_s, "rack.input" => StringIO.new(input))
+raise "#{{status}} #{{body.inspect}}" unless status == 200 && JSON.parse(body.join) == {expected}
+puts "PASS"
+"##));
+        run.assert_passes();
+        let params = std::fs::read_to_string(run.emitted.join("app/models/widget_params.rb"))
+            .expect("params class");
+        assert!(params.contains("def except"), "{params}");
+    }
+}
+
+#[test]
+#[ignore = "requires the Spinel toolchain"]
+fn helpers_ending_in_tap_keep_except_with_emitted_rbs() {
+    for (rendered, expected) in TAP_RENDERS {
+        tap_helper_app(rendered).run_spinel_with_rbs(&format!(r##"require "json"
+require_relative "app/controllers/widgets_controller"
+controller = WidgetsController.new
+controller.params = {{"widget" => {{"name" => "w", "token" => "secret"}}}}
+controller.create
+raise controller.body unless JSON.parse(controller.body) == {expected}
+puts "PASS"
+"##)).assert_passes();
     }
 }
 

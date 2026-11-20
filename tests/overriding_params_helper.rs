@@ -30,6 +30,10 @@ const PARENT: &str = "class NotesController < ApplicationController\n  \
     private\n    def note_params\n      params.require(:note).permit(:body, :tag)\n    end\nend\n";
 
 fn emit(subclass: &str) -> String {
+    emit_with_parent(PARENT, subclass)
+}
+
+fn emit_with_parent(parent: &str, subclass: &str) -> String {
     let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
     tree.insert(PathBuf::from("db/schema.rb"), SCHEMA.as_bytes().to_vec());
     tree.insert(
@@ -39,7 +43,7 @@ fn emit(subclass: &str) -> String {
     tree.insert(PathBuf::from("config/routes.rb"), ROUTES.as_bytes().to_vec());
     tree.insert(
         PathBuf::from("app/controllers/notes_controller.rb"),
-        PARENT.as_bytes().to_vec(),
+        parent.as_bytes().to_vec(),
     );
     tree.insert(
         PathBuf::from("app/controllers/notes/bots_controller.rb"),
@@ -106,6 +110,27 @@ fn an_unknown_key_declines() {
            private\n    def note_params\n      { body: \"hi\", secret: \"x\" }\n    end\nend\n",
     );
     assert!(!src.contains("NoteParams.new"), "must decline whole:\n{src}");
+}
+
+/// Under a `tap`, the value is the receiver's, so that is what becomes
+/// the params object (#1809: a parent ending in `.tap { }` has a spec).
+#[test]
+fn a_bare_permit_under_tap_reads_the_top_level_params() {
+    let parent = PARENT.replace(
+        "params.require(:note).permit(:body, :tag)\n",
+        "params.require(:note).permit(:body, :tag).tap { |p| p }\n",
+    );
+    let src = emit_with_parent(
+        &parent,
+        "class Notes::BotsController < NotesController\n  \
+           private\n    def note_params\n      params.permit(:body).tap { |p| p }\n    end\nend\n",
+    );
+    assert!(src.contains("NoteParams.new"), "{src}");
+    assert!(
+        src.contains(r#"Params.scalar_provided(@params, "body")"#),
+        "reads presence off the flat params:\n{src}"
+    );
+    assert!(!src.contains(".permit("), "no permit may survive on the Hash:\n{src}");
 }
 
 /// A subclass with its OWN full permit chain is untouched — it has a

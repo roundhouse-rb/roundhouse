@@ -25,7 +25,8 @@ across an end-to-end MVC + WebSocket stack.
 The destination is a **single deployable binary**: Spinel compiles
 `main.rb` end-to-end into native code, the binary serves production
 HTTP + WebSocket traffic, SQLite-backed persistence survives restarts.
-That round trip now closes — `spinel main.rb -o build/blog` produces a
+That round trip now closes — `spin build` (compile root `bin/blog.rb`,
+which requires `main.rb` and calls `Main.start`) produces a
 binary that serves the Tailwind-styled pages, persists through FFI
 SQLite, and pushes live Turbo Stream updates over `/cable`. The CRuby
 target runs the same lowered output under Puma for development.
@@ -123,7 +124,7 @@ Rack/Puma dependency):
 | `rake assets` | `static/assets/application.css` (empty manifest) + `static/assets/tailwind.css` (Tailwind, ~13.5KB minified) + `static/assets/turbo.min.js` (copied from turbo-rails gem) |
 | `rake dev` | Puma on :3000 via `config.ru` (Rack adapter to `Main.run`); CRuby target only |
 | `rake bench` | wrk-driven benchmark against `/articles` |
-| `make build` | `spinel main.rb -o build/blog` (spinel target; requires `spinel` on PATH) |
+| `make build` | `spin build` → `build/bin/blog`, copied to `build/blog` (spinel target; requires `spin` and `spinel` on PATH) |
 | `make spinel-test` / `make cruby-test` | compile + run the 4 model/controller suites under spinel or CRuby |
 | `make test` / `make lint` | thin wrappers around the corresponding `rake` tasks |
 | `make run` | one-shot CGI smoke (`REQUEST_METHOD=GET PATH_INFO=/articles ruby main.rb`) |
@@ -463,7 +464,8 @@ Things real-blog uses that this fixture *doesn't* reproduce:
   #203, #204, #207, #208, #219, #224, #229, #239), each removing
   a category of inference or codegen mismatch. real-blog now
   spinel-compiles end-to-end with zero C errors.
-- **The compiled binary runs.** `spinel main.rb -o build/blog`
+- **The compiled binary runs.** `spin build` (`bin/blog.rb`, which
+  calls `Main.start`; `main.rb` alone starts no server)
   produces a native binary that serves the blog over HTTP +
   WebSocket (then on the fiber server, today on `Tep::Server::Threaded`):
   GET pages render with

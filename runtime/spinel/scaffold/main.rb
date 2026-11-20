@@ -23,8 +23,7 @@
 # `configure`); under spinel the FFI-backed shim only emits when
 # `runtime/sqlite_adapter` is in the require graph.
 # The whole require chain (see boot.rb). Kept in its own file so
-# `test/test_helper.rb` can load the app without loading this one,
-# which starts a server.
+# `test/test_helper.rb` can load the app without loading this one.
 require_relative "boot"
 require_relative "runtime/cgi_io"
 
@@ -906,10 +905,11 @@ end
 # via `require_relative "main"` from tests, the dispatch isn't
 # triggered — tests call Main.run themselves with constructed I/O.
 #
-# Spinel-AOT entry: configure DB, register the Action Cable transport,
-# then start the scheduled Tep server with Main as the app. This file
-# is the spinel-target main.rb — only consumed by `make build` →
-# compiled native binary. The CRuby development path uses
+# Spinel-AOT entry: `Main.start` (below) configures the DB, registers
+# the Action Cable transport, then starts the Tep server with Main as
+# the app. This file is the spinel-target main.rb — the compile root
+# (`bin/blog.rb`) requires it and calls `Main.start`, and `make build`
+# compiles that root to the native binary. The CRuby development path uses
 # `ruby_overlay/main.rb` (Puma/Rack), which keeps the
 # `__FILE__ == $PROGRAM_NAME` guard because under Puma the file is
 # required, not invoked directly.
@@ -928,13 +928,14 @@ class MainApp
   end
 end
 
-# Unconditional entry — the spinel-compiled binary's sole purpose is
-# to start the server. `if __FILE__ == $PROGRAM_NAME` would have
-# gated this in CRuby script mode, but under spinel-AOT `__FILE__`
-# is the source file name (`"main.rb"`) and `$PROGRAM_NAME` is the
-# binary's argv[0] (e.g. `"./build/blog"`), so the guard always
-# returns false. The Ruby-overlay sibling keeps the guard for its
-# Puma/Rack-required-from-config.ru shape.
+# The start of the spinel-compiled binary, as a method. The compile
+# root (`bin/blog.rb`) calls it with ARGV. Requiring this file starts no
+# server: it runs the boot chain only (boot.rb), so a test can load it,
+# and a program that links the tree as a library (spinel's --ext-entry)
+# calls `Main.start` at the time it chooses. The boot chain is not
+# deferred. With no SECRET_KEY_BASE and no stored key it writes
+# `storage/secret_key_base` (runtime/local_secret.rb), so a host whose
+# tree is read-only gives the key before it loads this file.
 #
 # CLI surface. Flags override the PORT/WORKERS env vars; --help exits
 # before any DB or server setup runs. Parsed with a plain while loop
@@ -944,123 +945,127 @@ end
 # runtime/sidekiq_worker.rb). No socket is served, so no in-process
 # drain thread, and a Cable transport only to publish to Redis; jobs a
 # job enqueues still push to Redis.
-if ARGV.length > 0 && ARGV[0] == "sidekiq"
-  SidekiqWorker.prepare_pool(ARGV)
-  Main.configure_default_adapter!
-  Db.checkpoint_in_background!
-  ActiveJob.register_drain
-  # A job's broadcasts go to the web processes through Redis when
-  # config/cable.yml says `adapter: redis` (runtime/redis_cable.rb).
-  Broadcasts.set_transport(Cable::Transport.new) if RedisCable.enabled?
-  SidekiqWorker.cli(ARGV)
-end
-port = (ENV["PORT"] || "3000").to_i
-workers = (ENV["WORKERS"] || "1").to_i
-binding_arg = ""
-unix_bind = ENV["UNIX_BIND"].to_s
-i = 0
-while i < ARGV.length
-  arg = ARGV[i]
-  if arg == "--help" || arg == "-h"
-    puts "usage: " + $PROGRAM_NAME + " [options]"
-    puts ""
-    puts "  -p, --port N     listen port (default 3000; PORT env)"
-    puts "  -w, --workers N  prefork N processes (default 1; WORKERS env)"
-    puts "  -b, --binding IP bind to IP (BINDING env; default localhost in development, 0.0.0.0 otherwise)"
-    puts "      --unix-bind URL add unix:///absolute/path?mode=600 (UNIX_BIND env; default disabled)"
-    puts "  -h, --help       show this help and exit"
-    puts "  sidekiq [options]  run jobs from Redis instead of serving HTTP (sidekiq --help)"
-    puts ""
-    puts "  OS workers per process: one per core; SPINEL_WORKERS=N caps it"
-    puts "  TEP_SERVER=fiber runs the fiber-per-connection server instead"
-    puts "    (HTTP only, one thread; the measurement lane, matz/spinel#4306)"
-    puts "  SQLite file: BLOG_DB env (default storage/development.sqlite3)"
-    exit(0)
-  elsif (arg == "--port" || arg == "-p") && i + 1 < ARGV.length
-    port = ARGV[i + 1].to_i
-    i += 2
-  elsif (arg == "--workers" || arg == "-w") && i + 1 < ARGV.length
-    workers = ARGV[i + 1].to_i
-    i += 2
-  elsif (arg == "--binding" || arg == "-b") && i + 1 < ARGV.length
-    binding_arg = ARGV[i + 1]
-    i += 2
-  elsif arg == "--unix-bind" && i + 1 < ARGV.length
-    unix_bind = ARGV[i + 1]
-    i += 2
-  else
-    $stderr.puts "unknown option: " + arg + " (try --help)"
-    exit(1)
+module Main
+  def self.start(argv)
+    if argv.length > 0 && argv[0] == "sidekiq"
+      SidekiqWorker.prepare_pool(argv)
+      Main.configure_default_adapter!
+      Db.checkpoint_in_background!
+      ActiveJob.register_drain
+      # A job's broadcasts go to the web processes through Redis when
+      # config/cable.yml says `adapter: redis` (runtime/redis_cable.rb).
+      Broadcasts.set_transport(Cable::Transport.new) if RedisCable.enabled?
+      SidekiqWorker.cli(argv)
+    end
+    port = (ENV["PORT"] || "3000").to_i
+    workers = (ENV["WORKERS"] || "1").to_i
+    binding_arg = ""
+    unix_bind = ENV["UNIX_BIND"].to_s
+    i = 0
+    while i < argv.length
+      arg = argv[i]
+      if arg == "--help" || arg == "-h"
+        puts "usage: " + $PROGRAM_NAME + " [options]"
+        puts ""
+        puts "  -p, --port N     listen port (default 3000; PORT env)"
+        puts "  -w, --workers N  prefork N processes (default 1; WORKERS env)"
+        puts "  -b, --binding IP bind to IP (BINDING env; default localhost in development, 0.0.0.0 otherwise)"
+        puts "      --unix-bind URL add unix:///absolute/path?mode=600 (UNIX_BIND env; default disabled)"
+        puts "  -h, --help       show this help and exit"
+        puts "  sidekiq [options]  run jobs from Redis instead of serving HTTP (sidekiq --help)"
+        puts ""
+        puts "  OS workers per process: one per core; SPINEL_WORKERS=N caps it"
+        puts "  TEP_SERVER=fiber runs the fiber-per-connection server instead"
+        puts "    (HTTP only, one thread; the measurement lane, matz/spinel#4306)"
+        puts "  SQLite file: BLOG_DB env (default storage/development.sqlite3)"
+        exit(0)
+      elsif (arg == "--port" || arg == "-p") && i + 1 < argv.length
+        port = argv[i + 1].to_i
+        i += 2
+      elsif (arg == "--workers" || arg == "-w") && i + 1 < argv.length
+        workers = argv[i + 1].to_i
+        i += 2
+      elsif (arg == "--binding" || arg == "-b") && i + 1 < argv.length
+        binding_arg = argv[i + 1]
+        i += 2
+      elsif arg == "--unix-bind" && i + 1 < argv.length
+        unix_bind = argv[i + 1]
+        i += 2
+      else
+        $stderr.puts "unknown option: " + arg + " (try --help)"
+        exit(1)
+      end
+    end
+    if port <= 0 || port > 65535
+      $stderr.puts "invalid port: " + port.to_s
+      exit(1)
+    end
+    # The listen address as `rails server` picks it: -b, else BINDING, else
+    # localhost in development and 0.0.0.0 in every other environment.
+    if binding_arg.empty?
+      binding_env = ENV["BINDING"].to_s
+      rails_env = ENV["RAILS_ENV"].to_s
+      binding_arg = if !binding_env.empty?
+        binding_env
+      elsif rails_env.empty? || rails_env == "development"
+        "localhost"
+      else
+        "0.0.0.0"
+      end
+    end
+    # An address-specific listener is not shared across prefork processes
+    # (SO_REUSEPORT is the every-interface listener's), so -w N > 1 needs it.
+    if workers > 1 && binding_arg != "0.0.0.0"
+      $stderr.puts "--workers " + workers.to_s + " needs --binding 0.0.0.0 (one listener per process shares only that address)"
+      exit(1)
+    end
+    Tep::APP.bind_host = binding_arg
+    Sock.sphttp_install_term_handlers
+    unix_listener = Tep::UnixListener.new(unix_bind)
+    unix_listener.open
+    begin
+    Main.configure_default_adapter!
+    # Serving, so WAL checkpoints move off the request path: a background
+    # thread runs them instead of some request's COMMIT
+    # (Db.checkpoint_in_background!).
+    Db.checkpoint_in_background!
+    # Wire model after-commit Turbo Stream broadcasts to the live WebSocket
+    # fan-out. Without this, broadcasts only land in the in-memory log.
+    Broadcasts.set_transport(Cable::Transport.new)
+    # Background jobs go on the scheduler instead of running at the call
+    # site. `register_drain` is what flips `perform_later` from dispatching
+    # to enqueueing (see `lower::job_class_side`): a job is only handed to a
+    # queue once something has said it will drain it, so a tree that never
+    # reaches this line keeps the inline behaviour rather than dropping work
+    # into an Array nobody reads.
+    ActiveJob.register_drain
+    # Under queue_adapter :sidekiq jobs go to Redis instead; say where.
+    SidekiqPush.announce if JobRegistry.sidekiq?
+    Thread.new do
+      Main.job_loop
+    end
+    # The server announces itself by the app's own name (its GlobalID app
+    # name, which ingest writes into config/application.rb), not by the
+    # binary's file name.
+    Tep::APP.name = Rails.application.global_id_app
+    # Tep::Server::Threaded is the thread-per-connection server: a green
+    # thread per connection, every wait a park (recv, write, sleep, and the
+    # timed idle waits), so a held-open WebSocket costs a small stack and
+    # the OS workers run other connections' Ruby meanwhile. It replaced the
+    # fiber-per-connection server, whose poll loop sat above a blocking
+    # write in C that no Ruby scheduler could see.
+    #
+    # TEP_SERVER=fiber runs the server it replaced, Tep::Server::Scheduled,
+    # from the same binary: the two designs measured back to back with only
+    # the environment differing (matz/spinel#4306). HTTP only; see the note
+    # at the top of tep/server_scheduled.rb.
+    if (ENV["TEP_SERVER"] || "thread") == "fiber"
+      Tep::Server::Scheduled.new(MainApp.new).run(port, workers, false, unix_listener)
+    else
+      Tep::Server::Threaded.new(MainApp.new).run(port, workers, false, unix_listener)
+    end
+    ensure
+      unix_listener.close
+    end
   end
-end
-if port <= 0 || port > 65535
-  $stderr.puts "invalid port: " + port.to_s
-  exit(1)
-end
-# The listen address as `rails server` picks it: -b, else BINDING, else
-# localhost in development and 0.0.0.0 in every other environment.
-if binding_arg.empty?
-  binding_env = ENV["BINDING"].to_s
-  rails_env = ENV["RAILS_ENV"].to_s
-  binding_arg = if !binding_env.empty?
-    binding_env
-  elsif rails_env.empty? || rails_env == "development"
-    "localhost"
-  else
-    "0.0.0.0"
-  end
-end
-# An address-specific listener is not shared across prefork processes
-# (SO_REUSEPORT is the every-interface listener's), so -w N > 1 needs it.
-if workers > 1 && binding_arg != "0.0.0.0"
-  $stderr.puts "--workers " + workers.to_s + " needs --binding 0.0.0.0 (one listener per process shares only that address)"
-  exit(1)
-end
-Tep::APP.bind_host = binding_arg
-Sock.sphttp_install_term_handlers
-unix_listener = Tep::UnixListener.new(unix_bind)
-unix_listener.open
-begin
-Main.configure_default_adapter!
-# Serving, so WAL checkpoints move off the request path: a background
-# thread runs them instead of some request's COMMIT
-# (Db.checkpoint_in_background!).
-Db.checkpoint_in_background!
-# Wire model after-commit Turbo Stream broadcasts to the live WebSocket
-# fan-out. Without this, broadcasts only land in the in-memory log.
-Broadcasts.set_transport(Cable::Transport.new)
-# Background jobs go on the scheduler instead of running at the call
-# site. `register_drain` is what flips `perform_later` from dispatching
-# to enqueueing (see `lower::job_class_side`): a job is only handed to a
-# queue once something has said it will drain it, so a tree that never
-# reaches this line keeps the inline behaviour rather than dropping work
-# into an Array nobody reads.
-ActiveJob.register_drain
-# Under queue_adapter :sidekiq jobs go to Redis instead; say where.
-SidekiqPush.announce if JobRegistry.sidekiq?
-Thread.new do
-  Main.job_loop
-end
-# The server announces itself by the app's own name (its GlobalID app
-# name, which ingest writes into config/application.rb), not by the
-# binary's file name.
-Tep::APP.name = Rails.application.global_id_app
-# Tep::Server::Threaded is the thread-per-connection server: a green
-# thread per connection, every wait a park (recv, write, sleep, and the
-# timed idle waits), so a held-open WebSocket costs a small stack and
-# the OS workers run other connections' Ruby meanwhile. It replaced the
-# fiber-per-connection server, whose poll loop sat above a blocking
-# write in C that no Ruby scheduler could see.
-#
-# TEP_SERVER=fiber runs the server it replaced, Tep::Server::Scheduled,
-# from the same binary: the two designs measured back to back with only
-# the environment differing (matz/spinel#4306). HTTP only; see the note
-# at the top of tep/server_scheduled.rb.
-if (ENV["TEP_SERVER"] || "thread") == "fiber"
-  Tep::Server::Scheduled.new(MainApp.new).run(port, workers, false, unix_listener)
-else
-  Tep::Server::Threaded.new(MainApp.new).run(port, workers, false, unix_listener)
-end
-ensure
-  unix_listener.close
 end

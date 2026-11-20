@@ -1951,12 +1951,13 @@ fn render_test_helper(fixture_lcs: &[LibraryClass], truncate_lines: &[String]) -
     // — a require gap that reads exactly like a modeling gap.
     //
     // Defers to `boot.rb`, which is the app's whole chain in its
-    // curated order and NOTHING that starts anything. Deliberately not
-    // `main.rb`: the spinel-AOT main.rb boots the server
-    // unconditionally (the `__FILE__ == $PROGRAM_NAME` guard cannot
-    // work under AOT — see its own comment), so a test that required it
-    // opened the dev database and died at `sqlite3_open(…) failed (14)`
-    // before running an assertion. boot.rb is the half both can share.
+    // curated order and NOTHING that starts anything. Not `main.rb`:
+    // when this was written the spinel-AOT main.rb booted the server at
+    // its top level (the `__FILE__ == $PROGRAM_NAME` guard cannot work
+    // under AOT), so a test that required it opened the dev database
+    // and died at `sqlite3_open(…) failed (14)` before running an
+    // assertion. main.rb now boots only in `Main.start`, which the
+    // compile root calls; boot.rb stays the half both share.
     const REQUIRE_BLOCK: &str = "require_relative \"../runtime/base64\"";
     const REQUIRE_BLOCK_END: &str = "require_relative \"../app/models\"";
 

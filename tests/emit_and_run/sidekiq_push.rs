@@ -125,7 +125,7 @@ fn a_tree_on_sidekiq_gets_the_worker_role() {
     let worker = read(&emitted, "runtime/sidekiq_worker.rb");
     assert!(worker.contains("def self.processor(index)"), "{worker}");
     assert!(!emitted.join("runtime/sidekiq_worker.rbs").exists(), "the façade's sidecar must drop");
-    assert!(read(&emitted, "main.rb").contains("SidekiqWorker.cli(ARGV)"));
+    assert!(read(&emitted, "main.rb").contains("SidekiqWorker.cli(argv)"));
     assert!(read(&emitted, "runtime/sidekiq_envelope.rbs").contains("def self.with_error"));
 
     for target in [BuildTarget::Ruby, BuildTarget::Jruby] {

@@ -173,7 +173,7 @@ fn attribute_gap_ivars(diags: &mut [Diagnostic], app: &App, sites: &[(FileId, u3
     }
     let mut view_by_file: HashMap<FileId, &crate::ident::Symbol> = HashMap::default();
     for v in &app.views {
-        if let Some(f) = first_real_file(&[&v.body]) {
+        for f in first_real_file(&[&v.body]).into_iter().chain(v.variant_files()) {
             view_by_file.entry(f).or_insert(&v.name);
         }
     }
@@ -331,7 +331,7 @@ impl<'a> AttributionCtx<'a> {
 
         let mut view_by_file: HashMap<FileId, &crate::ident::Symbol> = HashMap::default();
         for v in &app.views {
-            if let Some(f) = first_real_file(&[&v.body]) {
+            for f in first_real_file(&[&v.body]).into_iter().chain(v.variant_files()) {
                 view_by_file.entry(f).or_insert(&v.name);
             }
         }
@@ -689,7 +689,7 @@ pub fn attribute_unknown_gems(diags: &mut [Diagnostic], app: &App) {
     }
     let mut view_by_file: HashMap<FileId, &crate::ident::Symbol> = HashMap::default();
     for v in &app.views {
-        if let Some(f) = first_real_file(&[&v.body]) {
+        for f in first_real_file(&[&v.body]).into_iter().chain(v.variant_files()) {
             view_by_file.entry(f).or_insert(&v.name);
         }
     }

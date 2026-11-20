@@ -21,6 +21,7 @@ mod built_send;
 mod conditional_permit;
 mod controller_name_constants;
 pub(crate) mod unreachable_views;
+mod locale_templates;
 mod view_paths;
 mod uncalled_helper_copies;
 mod written_names;

@@ -3776,6 +3776,9 @@ fn lower_action_body(
     let mut filtered = crate::lower::params_permit::filtered_permit_helpers(privs);
     filtered.extend(crate::lower::params_permit::filtered_permit_helpers(params_privs));
     crate::lower::params_permit::stringify_filtered_helper_reads(&mut lowered, &filtered);
+    let mut permitted = crate::lower::params_permit::permitted_helpers(privs);
+    permitted.extend(crate::lower::params_permit::permitted_helpers(params_privs));
+    crate::lower::params_permit::symbolize_permitted_helper_reads(&mut lowered, &permitted);
     if !defer_implicit_render {
         return (lowered, None);
     }

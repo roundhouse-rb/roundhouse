@@ -405,6 +405,7 @@ fn rewrite(expr: &mut Expr, lists: &HelperLists) {
             }
         }
     }
+    symbolize_permitted_key_args(expr, &crate::det::HashSet::default());
     if parameters_on_hash(expr) {
         return;
     }
@@ -448,6 +449,162 @@ pub(crate) fn rewrite_bare_permits(expr: &mut Expr) {
         *expr = permitted;
     } else if let Some(filtered) = filtered_chain(expr) {
         *expr = filtered;
+    }
+    symbolize_permitted_key_args(expr, &crate::det::HashSet::default());
+}
+
+/// Whether `e` answers the Symbol-keyed Hash a top-level `permit` lowers to (`Params.permitted`, or the `permit` call
+/// still to be lowered), a no-argument call of one of `helpers` that answers it (`permitted_helpers`), or what a call
+/// that keeps its keys answers from either (`params.permit(%w[a b]).merge(c: 1).compact`). By how the value was built,
+/// not by its type: a `Hash[Symbol, String]` the app builds itself keeps Ruby's String-is-not-a-Symbol answers.
+fn from_permitted(e: &Expr, helpers: &crate::det::HashSet<Symbol>) -> bool {
+    if permitted_chain(e).is_some() || is_helper_call(e, helpers) {
+        return true;
+    }
+    let ExprNode::Send { recv: Some(r), method, .. } = &*e.node else { return false };
+    match method.as_str() {
+        "permitted" => matches!(&*r.node, ExprNode::Const { path } if path.len() == 1 && path[0].as_str() == "Params"),
+        "merge" | "reverse_merge" | "with_defaults" | "compact" | "compact_blank" | "except" | "slice" => {
+            from_permitted(r, helpers)
+        }
+        _ => false,
+    }
+}
+
+/// `x_params` or `self.x_params`, with no arguments and no block, naming one of `helpers`.
+fn is_helper_call(e: &Expr, helpers: &crate::det::HashSet<Symbol>) -> bool {
+    matches!(&*e.node, ExprNode::Send { recv, method, args, block: None, .. }
+        if args.is_empty()
+            && helpers.contains(method)
+            && recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef)))
+}
+
+/// The private helpers with no parameters whose value is the Symbol-keyed Hash a top-level `permit` with literal
+/// names lowers to (`def x_params = params.permit(%w[a b])`, `def x_params = @x ||= params.permit(...)`), before or
+/// after that lowering, so a key-taking call on their result names its Symbol keys (#2279).
+pub(crate) fn permitted_helpers(privs: &[crate::dialect::Action]) -> crate::det::HashSet<Symbol> {
+    let none = crate::det::HashSet::default();
+    privs
+        .iter()
+        .filter(|a| a.params.fields.is_empty() && from_permitted(value_tail(&a.body), &none))
+        .map(|a| a.name.clone())
+        .collect()
+}
+
+/// What a body answers: its last statement, through an assignment's value (`@x ||= value`).
+fn value_tail(e: &Expr) -> &Expr {
+    match &*e.node {
+        ExprNode::Seq { exprs } if !exprs.is_empty() => value_tail(exprs.last().unwrap()),
+        ExprNode::OpAssign { value, .. } | ExprNode::Assign { value, .. } => value_tail(value),
+        _ => e,
+    }
+}
+
+/// `x_params.except("a")` → `x_params.except(:a)` for each of `helpers` (`permitted_helpers`), as
+/// `symbolize_permitted_key_args` does on the `permit` written inline.
+pub(crate) fn symbolize_permitted_helper_reads(expr: &mut Expr, helpers: &crate::det::HashSet<Symbol>) {
+    if helpers.is_empty() {
+        return;
+    }
+    expr.node.for_each_child_mut(&mut |c| symbolize_permitted_helper_reads(c, helpers));
+    symbolize_permitted_key_args(expr, helpers);
+}
+
+/// `params.permit(%w[a b]).except("a")` → `.except(:a)`. Rails' Parameters take a String key as they take a Symbol,
+/// and the Hash `permit` lowered to holds Symbol keys, so a String key name on it is its Symbol: a String literal
+/// becomes the Symbol, `*%w[a]` becomes `*%i[a]`, another String `key.to_sym`, another splatted String Array
+/// `*keys.map { |x| x.to_sym }`, and a String-keyed Hash literal `merge` takes gets Symbol keys (#2279).
+fn symbolize_permitted_key_args(expr: &mut Expr, helpers: &crate::det::HashSet<Symbol>) {
+    let ExprNode::Send { recv: Some(r), method, args, .. } = &mut *expr.node else { return };
+    if !from_permitted(r, helpers) {
+        return;
+    }
+    match method.as_str() {
+        "except" | "slice" | "values_at" => args.iter_mut().for_each(symbolize_key),
+        "[]" | "fetch" | "key?" | "has_key?" | "include?" | "member?" | "delete" | "dig" => {
+            args.iter_mut().take(1).for_each(symbolize_key)
+        }
+        "merge" | "reverse_merge" | "with_defaults" => {
+            for arg in args.iter_mut() {
+                let ExprNode::Hash { entries, .. } = &mut *arg.node else { continue };
+                for (key, _) in entries.iter_mut() {
+                    symbolize_literal(key);
+                }
+                let all_symbols = entries.iter().all(|(k, _)| sym_name(k).is_some());
+                if let Some(Ty::Hash { key, .. }) = &mut arg.ty
+                    && all_symbols
+                {
+                    *key = std::sync::Arc::new(Ty::Sym);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A String literal → its Symbol; false for anything else.
+fn symbolize_literal(e: &mut Expr) -> bool {
+    let ExprNode::Lit { value: Literal::Str { value } } = &*e.node else { return false };
+    let sym = Symbol::from(value.as_str());
+    *e.node = ExprNode::Lit { value: Literal::Sym { value: sym } };
+    e.ty = Some(Ty::Sym);
+    true
+}
+
+/// One key argument: a String literal, a splatted String Array literal, or another String (or splatted String Array).
+fn symbolize_key(arg: &mut Expr) {
+    if symbolize_literal(arg) {
+        return;
+    }
+    let span = arg.span;
+    let sym_array = || Some(Ty::Array { elem: std::sync::Arc::new(Ty::Sym) });
+    if let ExprNode::Splat { value } = &mut *arg.node {
+        if let ExprNode::Array { elements, style } = &mut *value.node {
+            if !elements.is_empty() && elements.iter().all(|e| matches!(&*e.node, ExprNode::Lit { value: Literal::Str { .. } })) {
+                for element in elements.iter_mut() {
+                    symbolize_literal(element);
+                }
+                if *style == crate::expr::ArrayStyle::PercentW {
+                    *style = crate::expr::ArrayStyle::PercentI;
+                }
+                value.ty = sym_array();
+                arg.ty = Some(Ty::Sym);
+            }
+            return;
+        }
+        if !matches!(&value.ty, Some(Ty::Array { elem }) if **elem == Ty::Str) {
+            return;
+        }
+        // `*keys` → `*keys.map { |x| x.to_sym }`.
+        let x = Symbol::from("x");
+        let mut var = Expr::new(span, ExprNode::Var { id: crate::ident::VarId(0), name: x.clone() });
+        var.ty = Some(Ty::Str);
+        let mut body = send(span, Some(var), "to_sym", vec![]);
+        body.ty = Some(Ty::Sym);
+        let block = Expr::new(span, ExprNode::Lambda {
+            extra_params: Vec::new(),
+            params: vec![x],
+            rest_param: None,
+            block_param: None,
+            body,
+            block_style: crate::expr::BlockStyle::Brace,
+        });
+        let mut mapped = Expr::new(span, ExprNode::Send {
+            recv: Some(value.clone()),
+            method: Symbol::from("map"),
+            args: vec![],
+            block: Some(block),
+            parenthesized: false,
+        });
+        mapped.ty = sym_array();
+        *value = mapped;
+        arg.ty = Some(Ty::Sym);
+        return;
+    }
+    if matches!(arg.ty, Some(Ty::Str)) {
+        let mut to_sym = send(span, Some(arg.clone()), "to_sym", vec![]);
+        to_sym.ty = Some(Ty::Sym);
+        *arg = to_sym;
     }
 }
 

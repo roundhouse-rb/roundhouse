@@ -22793,3 +22793,5 @@ mod params_string_filter_scalars;
 mod hidden_field_autocomplete;
 #[path = "emit_and_run/record_as_json_in_literal.rs"]
 mod record_as_json_in_literal;
+#[path = "emit_and_run/params_permit_key_args.rs"]
+mod params_permit_key_args;

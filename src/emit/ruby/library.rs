@@ -2517,6 +2517,115 @@ pub(crate) fn apply_scope_lowering(lcs: &mut [LibraryClass], app: &App) {
                     }
                 }
             }
+            // A winner whose `super` reaches a concern several models
+            // include stays where it is above, so `super` lands in that
+            // concern's module body, which isn't lowered for any one of
+            // them (#2228). Here the definition it reaches is copied in,
+            // lowered for this model under a private name, and the
+            // winner's `super(...)` calls that copy: a model's own def is
+            // rewritten in place, a module's winner gets a lowered copy of
+            // its own. Only one level: a reached definition that calls
+            // `super` itself, a bare `super`, a block, a definition that
+            // reads its own name (`__method__`), or one behind a load-time
+            // condition all stay as they were.
+            let instance_def = |module: &crate::dialect::LibraryClass, name: &Symbol| {
+                module.methods.iter().rev().find(|m| m.receiver == MethodReceiver::Instance && m.name == *name).cloned()
+            };
+            let modules: Vec<&crate::dialect::LibraryClass> = chain
+                .iter()
+                .filter_map(|id| app.library_classes.iter().find(|l| l.is_module && l.name == *id))
+                .collect();
+            let unconditional = |module: &crate::dialect::LibraryClass, m: &MethodDef| {
+                !module.conditional_definitions.iter().any(|c| c.contains(m))
+            };
+            // The definition a winner's `super` reaches, from `from` on,
+            // when it is one this model needs its own lowered copy of.
+            let reached = |from: usize, name: &Symbol| -> Option<(Symbol, MethodDef)> {
+                let (module, target) =
+                    modules[from..].iter().find_map(|module| instance_def(module, name).map(|m| (*module, m)))?;
+                let shared = shared_concerns.get(&module.name).is_some_and(|models| models.contains(&lc.name));
+                if !shared
+                    || !unconditional(module, &target)
+                    || contains_super(&target.body)
+                    || target.params.iter().filter_map(|p| p.default.as_ref()).any(contains_super)
+                    || target.block_param.is_some()
+                    || target.has_anonymous_block
+                    || contains_yield_or_block(&target.body)
+                    || target.params.iter().filter_map(|p| p.default.as_ref()).any(contains_yield_or_block)
+                {
+                    return None;
+                }
+                let module_side = lowered(&target, &module.name, None);
+                let here = lowered(&target, &module.name, Some(&lc.name));
+                if format!("{:?}{:?}", here.body, here.params) == format!("{:?}{:?}", module_side.body, module_side.params) {
+                    return None;
+                }
+                let short = module.name.0.as_str().rsplit("::").next().unwrap_or_default();
+                let private = Symbol::from(format!("__rh_super_{}_{}", crate::naming::snake_case(short), name.as_str()).as_str());
+                let mut copy = here;
+                copy.name = private.clone();
+                copy.visibility = crate::dialect::MethodVisibility::Private;
+                copy.enclosing_class = Some(Symbol::from(lc.name.0.as_str().rsplit("::").next().unwrap_or_default()));
+                Some((private, copy))
+            };
+            let plain_name = |name: &Symbol| {
+                let s = name.as_str();
+                let core = s.strip_suffix('!').or_else(|| s.strip_suffix('?')).unwrap_or(s);
+                !core.is_empty() && core.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            };
+            let calls_super_explicitly = |m: &MethodDef| {
+                contains_super(&m.body)
+                    && supers_all_explicit(&m.body)
+                    && !m.params.iter().filter_map(|p| p.default.as_ref()).any(contains_super)
+            };
+            let mut super_copies: Vec<MethodDef> = Vec::new();
+            // The model's own defs: Ruby keeps the last of each name, and
+            // its `super` starts at the first module.
+            let own_last: crate::det::HashMap<Symbol, usize> = lc
+                .methods
+                .iter()
+                .enumerate()
+                .filter(|(_, m)| m.receiver == MethodReceiver::Instance)
+                .map(|(i, m)| (m.name.clone(), i))
+                .collect();
+            for (i, own) in lc.methods.iter_mut().enumerate() {
+                if own_last.get(&own.name) != Some(&i)
+                    || !plain_name(&own.name)
+                    || !calls_super_explicitly(own)
+                {
+                    continue;
+                }
+                let Some((private, copy)) = reached(0, &own.name) else { continue };
+                replace_supers(&mut own.body, &private);
+                super_copies.push(copy);
+            }
+            // A module's winner: the first module that defines the name,
+            // when the model doesn't. Its `super` starts at the next one.
+            let mut module_settled: std::collections::BTreeSet<Symbol> = own_last.keys().cloned().collect();
+            for (index, module) in modules.iter().enumerate() {
+                let names: Vec<Symbol> = module
+                    .methods
+                    .iter()
+                    .filter(|m| m.receiver == MethodReceiver::Instance)
+                    .map(|m| m.name.clone())
+                    .collect();
+                for name in names {
+                    if !module_settled.insert(name.clone()) || !plain_name(&name) {
+                        continue;
+                    }
+                    let Some(winner) = instance_def(module, &name) else { continue };
+                    if !unconditional(module, &winner) || !calls_super_explicitly(&winner) {
+                        continue;
+                    }
+                    let Some((private, copy)) = reached(index + 1, &name) else { continue };
+                    let mut here = lowered(&winner, &module.name, Some(&lc.name));
+                    here.enclosing_class = Some(Symbol::from(lc.name.0.as_str().rsplit("::").next().unwrap_or_default()));
+                    replace_supers(&mut here.body, &private);
+                    includer_copies.push(here);
+                    super_copies.push(copy);
+                }
+            }
+            includer_copies.extend(super_copies);
         }
         for m in &mut lc.methods {
             // A `__scope_` entry's forward body already carries `__rel`
@@ -14229,6 +14338,46 @@ fn load_time_stable(conditional: &crate::dialect::ConditionalDefinitions) -> boo
     conditional.arms.iter().all(|arm| {
         arm.condition.as_ref().is_none_or(stable) && arm.nested.iter().all(load_time_stable)
     })
+}
+
+/// Whether every `super` in `expr` passes its arguments (`super(x)`), not
+/// the current method's (`super`).
+fn supers_all_explicit(expr: &Expr) -> bool {
+    if matches!(&*expr.node, ExprNode::Super { args: None }) {
+        return false;
+    }
+    let mut all = true;
+    expr.node.for_each_child(&mut |child| all = all && supers_all_explicit(child));
+    all
+}
+
+/// Each `super(args)` in `expr` becomes `private(args)` on self.
+fn replace_supers(expr: &mut Expr, private: &Symbol) {
+    if let ExprNode::Super { args: Some(args) } = &*expr.node {
+        let args = args.clone();
+        *expr.node = ExprNode::Send { recv: None, method: private.clone(), args, block: None, parenthesized: true };
+    }
+    expr.node.for_each_child_mut(&mut |child| replace_supers(child, private));
+}
+
+/// Any `yield`, `block_given?` (bare or on `self`), `__method__` or
+/// `__callee__` in `expr`, at any depth: what a definition called under
+/// another name, without the caller's block, would answer differently.
+fn contains_yield_or_block(expr: &Expr) -> bool {
+    let on_self = |recv: &Option<Expr>| recv.as_ref().is_none_or(|r| matches!(&*r.node, ExprNode::SelfRef));
+    let found_here = match &*expr.node {
+        ExprNode::Yield { .. } => true,
+        ExprNode::Send { recv, method, .. } => {
+            on_self(recv) && matches!(method.as_str(), "block_given?" | "__method__" | "__callee__")
+        }
+        _ => false,
+    };
+    if found_here {
+        return true;
+    }
+    let mut found = false;
+    expr.node.for_each_child(&mut |child| found = found || contains_yield_or_block(child));
+    found
 }
 
 /// Any `super` in `expr`, at any depth.

@@ -481,6 +481,10 @@ module ActiveRecord
     def integer_query_null?: (String | Integer | Float | bool val) -> bool
     def integer_query_cast: (String | Integer | Float | bool val, Integer limit) -> ::ActiveRecord::IntegerKeyCast
     def integer_list_predicate: (String qcol, Array[untyped] vals, Integer limit) -> String
+    def uuid_query_column?: (String col) -> bool
+    def uuid_value_predicate: (String qcol, String | Integer | Float | bool val) -> String
+    def uuid_record_key: (Base record) -> Integer?
+    def uuid_list_predicate: (String qcol, Array[untyped] vals) -> String
     def substitute_binds: (String sql, Array[untyped] args) -> String
     def substitute_named_binds: (String sql, Hash[Symbol, untyped] binds) -> String
     def bound_text: (untyped value) -> String

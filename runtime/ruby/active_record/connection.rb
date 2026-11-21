@@ -148,6 +148,43 @@ module ActiveRecord
     end
   end
 
+  # PostgreSQL's uuid type as Rails casts a value bound to it
+  # (OID::Uuid#cast_value): the value's text when it matches
+  # ACCEPTABLE_UUID, `\A(\{)?([a-fA-F0-9]{4}-?){8}(?(1)\}|)\z`, in
+  # canonical form (lowercase 8-4-4-4-12), and nil otherwise, which
+  # Rails binds as NULL. Sent as written, PostgreSQL rejects a blank or
+  # malformed literal (`invalid input syntax for type uuid`). The answer
+  # is "" for no uuid, so it stays a String: a real one is never blank.
+  class UuidCast
+    def self.cast_text(value)
+      text = value.to_s
+      i = 0
+      stop = text.length
+      if text[0, 1].to_s == "{"
+        return "" unless stop >= 2 && text[stop - 1, 1].to_s == "}"
+        i = 1
+        stop -= 1
+      end
+      hex = +""
+      groups = 0
+      while groups < 8
+        return "" if i + 4 > stop
+        k = 0
+        while k < 4
+          char = text[i + k, 1].to_s.downcase
+          return "" unless "0123456789abcdef".include?(char)
+          hex << char
+          k += 1
+        end
+        i += 4
+        i += 1 if i < stop && text[i, 1].to_s == "-"
+        groups += 1
+      end
+      return "" unless i == stop
+      "#{hex[0, 8]}-#{hex[8, 4]}-#{hex[12, 4]}-#{hex[16, 4]}-#{hex[20, 12]}"
+    end
+  end
+
   # The edges of `Model.transaction`, for work that has to wait for the
   # COMMIT. No-ops here, so this file stays self-contained; the
   # Ruby-family job registry (runtime/job_registry.rb) redefines them to
@@ -685,6 +722,13 @@ module ActiveRecord
     # (Relation#integer_query_limit). Schema-generated models list theirs.
     def self.schema_integer_query_limits
       {}
+    end
+
+    # The PostgreSQL uuid columns whose query values cast as Rails' uuid
+    # type does (Relation#uuid_query_column?). Schema-generated models on
+    # PostgreSQL list theirs.
+    def self.schema_uuid_query_columns
+      []
     end
 
     def self.schema_json_coder_columns

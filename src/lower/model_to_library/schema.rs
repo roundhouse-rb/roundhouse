@@ -308,6 +308,32 @@ fn push_schema_integer_query_limits(methods: &mut Vec<MethodDef>, model: &Model,
     });
 }
 
+/// `def self.schema_uuid_query_columns; [:id, :owner_id]; end`: on
+/// PostgreSQL, the uuid columns whose query values Relation casts as
+/// Rails' OID::Uuid does (Relation#uuid_query_column?), so a blank or
+/// malformed value is `= NULL` rather than a literal the server rejects.
+/// Left out where Rails does not cast through the uuid type: on SQLite,
+/// whose uuid column is text, and for a `uuid[]`, enum, `attribute` or
+/// `normalizes` column, as `schema_integer_query_limits` leaves them out.
+/// A model with no such column still lists none of its own: a model
+/// whose parent has a table (an abstract parent whose conventional table
+/// exists) would otherwise inherit the parent's list and cast its own
+/// keys as uuids.
+fn push_schema_uuid_query_columns(methods: &mut Vec<MethodDef>, model: &Model, table: &Table) {
+    use crate::emit::shared::schema_sql::Dialect;
+    if Dialect::current() != Dialect::Postgres {
+        return;
+    }
+    let decorated = query_decorated_columns(model);
+    let keep = |c: &Column| {
+        c.col_type == crate::schema::ColumnType::Uuid
+            && !c.array
+            && !model.enums.contains_key(&c.name)
+            && decorated.as_ref().is_some_and(|names| !names.contains(&c.name))
+    };
+    push_schema_symbol_list(methods, &model.name, "schema_uuid_query_columns", table, keep);
+}
+
 pub(super) fn push_schema_methods(
     methods: &mut Vec<MethodDef>,
     model: &Model,
@@ -740,6 +766,7 @@ pub(super) fn push_schema_methods(
     push_schema_column_types(methods, owner, table, source);
     if runtime_relation == super::RuntimeRelation::Present {
         push_schema_integer_query_limits(methods, model, table);
+        push_schema_uuid_query_columns(methods, model, table);
     }
     let json_coder = crate::lower::serialize::json_serialize_columns(model);
     if table.columns.iter().any(|c| json_coder.contains(&c.name)) {

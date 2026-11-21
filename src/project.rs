@@ -637,6 +637,15 @@ fn widen_key_contract(app: &App, files: &mut [(String, String)]) -> Result<(), S
         ));
     }
     *relation = relation.replace(ids_narrow, ids_wide);
+    // Relation#uuid_record_key answers a record's key, nil when unsaved.
+    let key_narrow = "    def uuid_record_key: (Base record) -> Integer?\n";
+    let key_wide = "    def uuid_record_key: (Base record) -> (Integer | String)?\n";
+    if !relation.contains(key_narrow) {
+        return Err(format!(
+            "widen_key_contract: relation.rbs no longer declares {key_narrow:?}"
+        ));
+    }
+    *relation = relation.replace(key_narrow, key_wide);
     Ok(())
 }
 

@@ -1384,7 +1384,16 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 1006 after separating handle holds from model routing:
     // `Db.hold_slot` remains typed; no additional gradual sites.
     // Raise to 1008, preserving the two-site headroom.
-    const CEILING: usize = 1008;
+    // MEASURED 1010 on PostgreSQL uuid casts (base 7d9513597: 1006):
+    // Relation#uuid_list_predicate reads the elements of a hash
+    // condition's untyped Array, as integer_list_predicate does (+4 in
+    // active_record/relation.rb). UuidCast.cast_text and
+    // uuid_value_predicate take a typed scalar and add none; every other
+    // file is unchanged. The ceiling is the measure.
+    // MEASURED 1012 on merging main 81b6491fc (main's ceiling 1008, its
+    // headroom used) with the uuid casts' +4, which add up; the unsaved
+    // record's `IS NULL` arm adds none here.
+    const CEILING: usize = 1012;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

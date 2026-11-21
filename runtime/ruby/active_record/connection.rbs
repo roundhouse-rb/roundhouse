@@ -29,6 +29,10 @@ module ActiveRecord
     def self.exceeds_limit: (String digits, String limit) -> bool
   end
 
+  class UuidCast
+    def self.cast_text: (String | Integer | Float | bool | nil value) -> String
+  end
+
   class Result
     @rows: Array[Hash[String, untyped]]
     @affected_rows: Integer
@@ -132,6 +136,7 @@ module ActiveRecord
     def attribute_in_database: (Symbol | String name) -> untyped
     def self.schema_column_types: () -> Hash[Symbol, Symbol]
     def self.schema_integer_query_limits: () -> Hash[Symbol, Integer]
+    def self.schema_uuid_query_columns: () -> Array[Symbol]
     def self.schema_json_coder_columns: () -> Array[Symbol]
     def self.type_for_attribute: (String | Symbol name) -> ActiveRecord::Type::Value
     def self.default_scoped: () -> Relation

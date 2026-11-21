@@ -127,6 +127,15 @@ pub(super) fn synth_exists_primary_key_input(owner: &ClassId, table: &Table) -> 
     )
 }
 
+/// A PostgreSQL uuid key, which Rails casts through OID::Uuid before
+/// the lookup. SQLite stores the column as text and Rails leaves the
+/// value as given there.
+fn uuid_key_casts(table: &Table) -> bool {
+    use crate::emit::shared::schema_sql::Dialect;
+    Dialect::current() == Dialect::Postgres
+        && key_column(table).is_some_and(|c| c.col_type == crate::schema::ColumnType::Uuid && !c.array)
+}
+
 fn synth_primary_key_input(
     owner: &ClassId,
     table: &Table,
@@ -146,7 +155,28 @@ fn synth_primary_key_input(
         recv: Some(super::class_const(&caster)), method: Symbol::from(method),
         args: vec![var_ref(&id)], block: None, parenthesized: true,
     });
-    let body = if key == Ty::Str {
+    let body = if uuid_key_casts(table) {
+        // Rails' OID::Uuid cast (ActiveRecord::UuidCast): the canonical
+        // uuid, or "" for a value that is none, which finds no row
+        // rather than reaching PostgreSQL as a literal it rejects.
+        let key_text = Symbol::from("key");
+        let uuid_cast = ClassId(Symbol::from("ActiveRecord::UuidCast"));
+        let cast = Expr::new(Span::synthetic(), ExprNode::Send {
+            recv: Some(super::class_const(&uuid_cast)), method: Symbol::from("cast_text"),
+            args: vec![var_ref(&id)], block: None, parenthesized: true,
+        });
+        let blank = Expr::new(Span::synthetic(), ExprNode::Send {
+            recv: Some(var_ref(&key_text)), method: Symbol::from("empty?"),
+            args: vec![], block: None, parenthesized: true,
+        });
+        super::seq(vec![
+            arel_assign(&key_text, cast),
+            Expr::new(Span::synthetic(), ExprNode::If {
+                cond: blank, then_branch: invalid,
+                else_branch: adapter_call(var_ref(&key_text)),
+            }),
+        ])
+    } else if key == Ty::Str {
         adapter_call(caster_call("input_text"))
     } else if key != Ty::Int {
         // Other schema keys retain their existing adapter conversion. For

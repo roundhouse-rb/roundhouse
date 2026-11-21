@@ -911,6 +911,17 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     validate_additional_test_paths(vfs, dir, &additional_test_paths)?;
     let mut roots = app_roots(vfs, dir, &path_gems);
     roots.extend(solid_queue_root.clone());
+    // The app's inflections come first: everything after this that
+    // turns `:leaves` into a class name or `Leaf` into a table name
+    // consults them, the autoload paths below included. A missing
+    // initializer leaves Rails' defaults.
+    crate::naming::install_app_inflections(ingest_inflections(vfs, dir));
+    // Before any pass reads the app: a file at the autoload path of a constant a source gem defines never loads.
+    let hidden_vfs = super::gem_shadowed_files::HiddenVfs {
+        inner: vfs,
+        hidden: super::gem_shadowed_files::shadowed(vfs, dir, &roots, &source_gems),
+    };
+    let vfs = &hidden_vfs;
     let lib_ignores: Vec<String> = vfs
         .read(&dir.join("config/application.rb"))
         .ok()
@@ -950,11 +961,6 @@ fn ingest_rails_app<V: Vfs + ?Sized>(vfs: &V, dir: &Path, auto_source_gems: &[St
     // until the splice folds them into each including model's own
     // `enums` table, and nothing downstream reads them by module.
     let mut concern_enums: Vec<(crate::ident::ClassId, Vec<ConcernEnumDecl>)> = Vec::new();
-
-    // The app's inflections come first: everything after this that
-    // turns `:leaves` into a class name or `Leaf` into a table name
-    // consults them. A missing initializer leaves Rails' defaults.
-    crate::naming::install_app_inflections(ingest_inflections(vfs, dir));
 
     // The lockfile is not a source: it never enters the analysis. It
     // is carried so the census and the unknown-gem attribution can

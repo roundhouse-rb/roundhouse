@@ -137,6 +137,7 @@ mod configured_superclass;
 mod gem_hooks;
 pub(crate) use gem_hooks::method_missing_readers;
 mod gem_routes;
+mod gem_shadowed_files;
 mod column_accessors;
 mod model_macros;
 mod referenced_carriers;

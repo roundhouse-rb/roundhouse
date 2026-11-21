@@ -111,6 +111,21 @@ raise "describe #{got.inspect}" unless got == "box / app box / local"
 puts "reopen passed"
 "##;
 
+/// [`models_app`]: Rails 8.1.4.1 never loads the reopen (Zeitwerk loads
+/// `app/models/shelf/box.rb` only for an undefined `Shelf::Box`, and the gem
+/// defined it), with eager loading or without, so the class is the gem's.
+pub const MODELS_ASSERTIONS: &str = r##"got = [Shelf::Box.kind, Shelf::Box.label, Shelf::Box.respond_to?(:local_tag)]
+raise "models #{got.inspect}" unless got == ["box", "shelf box", false]
+puts "models passed"
+"##;
+
+/// [`required_models_app`]: Rails 8.1.4.1 loads a file an initializer
+/// requires by path, autoload path or not, so the reopen applies.
+pub const REQUIRED_MODELS_ASSERTIONS: &str = r##"got = [Shelf::Box.kind, Shelf::Box.label, Shelf::Box.respond_to?(:local_tag)]
+raise "required models #{got.inspect}" unless got == ["box", "app box", true]
+puts "required models passed"
+"##;
+
 pub const EXTRAS_ASSERTIONS: &str = r##"got = BoxLimits.describe + [Shelf::Box::LIMIT]
 raise "extras #{got.inspect}" unless got == ["box", "tagged", 3]
 puts "extras passed"
@@ -150,6 +165,135 @@ pub fn local_app() -> emit_and_run::Overlay {
         .write("config/initializers/shelf_box_local.rb", "require Rails.root.join(\"lib/shelf_box_local\").to_s\n")
         .write("app/models/article_box.rb", ARTICLE_BOX)
 }
+
+/// [`LOCAL`] at `app/models/shelf/box.rb`, the path Zeitwerk maps to
+/// `Shelf::Box`, with no initializer requiring it (#2093's third form).
+#[allow(dead_code)]
+pub fn models_app() -> emit_and_run::Overlay {
+    with_gem().write("app/models/shelf/box.rb", LOCAL)
+}
+
+/// [`models_app`] with an initializer requiring the file by path.
+#[allow(dead_code)]
+pub fn required_models_app() -> emit_and_run::Overlay {
+    models_app().write("config/initializers/shelf_box.rb", "require Rails.root.join(\"app/models/shelf/box\").to_s\n")
+}
+
+/// [`models_app`] with the require split into `Rails.root.join` arguments.
+#[allow(dead_code)]
+pub fn split_required_models_app() -> emit_and_run::Overlay {
+    models_app().write("config/initializers/shelf_box.rb", "require Rails.root.join(\"app\", \"models\", \"shelf\", \"box\").to_s\n")
+}
+
+/// [`models_app`] with an initializer loading `lib/patches.rb`, which loads the reopen: both by `require_relative`.
+#[allow(dead_code)]
+pub fn chain_required_models_app() -> emit_and_run::Overlay {
+    models_app()
+        .write("config/initializers/patches.rb", "require_relative \"../../lib/patches\"\n")
+        .write("lib/patches.rb", "require_relative \"../app/models/shelf/box\"\n")
+}
+
+/// [`models_app`] with the require only in a comment.
+#[allow(dead_code)]
+pub fn commented_required_models_app() -> emit_and_run::Overlay {
+    models_app().write("config/initializers/shelf_box.rb", "# require Rails.root.join(\"app/models/shelf/box\").to_s\n")
+}
+
+/// The gem's `Shelf::Box` assigned (`Box = Class.new(Base)`) rather than declared.
+pub const SHELF_ASSIGNED: &str = r##"module Shelf
+  class Base
+    def self.kind
+      "box"
+    end
+
+    def self.label
+      "shelf box"
+    end
+  end
+
+  Box = Class.new(Base)
+end
+"##;
+
+/// The reopen at `app/models/shelf/box.rb` of a gem class it assigns.
+#[allow(dead_code)]
+pub fn assigned_models_app() -> emit_and_run::Overlay {
+    with_gem_lib(SHELF_ASSIGNED).write("app/models/shelf/box.rb", LOCAL)
+}
+
+/// The gem's class under a namespace the app's acronym inflection names (`API`).
+pub const SHELF_API: &str = r##"module Shelf
+end
+
+module API
+  class Box
+    def self.kind
+      "box"
+    end
+
+    def self.label
+      "shelf box"
+    end
+  end
+end
+"##;
+
+/// The reopen at `app/models/api/box.rb`, which Zeitwerk maps to `API::Box` under `inflect.acronym "API"`.
+#[allow(dead_code)]
+pub fn acronym_models_app() -> emit_and_run::Overlay {
+    with_gem_lib(SHELF_API)
+        .write("config/initializers/inflections.rb", "ActiveSupport::Inflector.inflections(:en) do |inflect|\n  inflect.acronym \"API\"\nend\n")
+        .write("app/models/api/box.rb", &LOCAL.replace("module Shelf", "module API"))
+}
+
+/// A gem whose `Shelf::Box` is in a file of its own, `lib/shelf/box.rb`,
+/// which `lib/shelf.rb` doesn't require.
+fn with_unrequired_gem_box() -> emit_and_run::Overlay {
+    with_gem_lib("module Shelf\nend\n").write(&format!("{GEM_DIR}/lib/shelf/box.rb"), SHELF)
+}
+
+/// [`models_app`] with the gem's `Shelf::Box` in `lib/shelf/box.rb`, which
+/// nothing requires.
+#[allow(dead_code)]
+pub fn unrequired_gem_box_models_app() -> emit_and_run::Overlay {
+    with_unrequired_gem_box().write("app/models/shelf/box.rb", LOCAL)
+}
+
+/// [`models_app`] with the gem's `Shelf::Box` in `lib/shelf/box.rb`, which
+/// the gem autoloads by feature name (`autoload :Box, "shelf/box"`).
+#[allow(dead_code)]
+pub fn feature_autoloaded_gem_box_models_app() -> emit_and_run::Overlay {
+    with_gem_lib("module Shelf\n  autoload :Box, \"shelf/box\"\nend\n")
+        .write(&format!("{GEM_DIR}/lib/shelf/box.rb"), SHELF)
+        .write("app/models/shelf/box.rb", LOCAL)
+}
+
+/// [`unrequired_gem_box_models_app`]: the gem has not defined `Shelf::Box`
+/// when Zeitwerk scans `app/models`, so Rails 8.1.4.1 loads the app's file,
+/// with eager loading or without, and never the gem's.
+#[allow(dead_code)]
+pub const APP_FILE_MODELS_ASSERTIONS: &str = r##"got = [Shelf::Box.respond_to?(:kind), Shelf::Box.label, Shelf::Box.respond_to?(:local_tag)]
+raise "app file models #{got.inspect}" unless got == [false, "app box", true]
+puts "app file models passed"
+"##;
+
+/// [`feature_autoloaded_gem_box_models_app`]: an autoload to a feature name
+/// doesn't count (Zeitwerk 2.8.3 skips a file only for a defined constant
+/// or an autoload to a `.rb` path), so Rails 8.1.4.1 loads the app's file,
+/// with eager loading or without. It never reads the gem's either, so
+/// `kind` is undefined there, but roundhouse compiles every file the gem's
+/// requires and autoloads reach, as main does, and that half isn't asserted.
+#[allow(dead_code)]
+pub const AUTOLOADED_MODELS_ASSERTIONS: &str = r##"got = [Shelf::Box.label, Shelf::Box.respond_to?(:local_tag)]
+raise "autoloaded models #{got.inspect}" unless got == ["app box", true]
+puts "autoloaded models passed"
+"##;
+
+/// [`acronym_models_app`]: Rails 8.1.4.1 never loads the reopen, so the class is the gem's.
+pub const ACRONYM_MODELS_ASSERTIONS: &str = r##"got = [API::Box.kind, API::Box.label, API::Box.respond_to?(:local_tag)]
+raise "acronym models #{got.inspect}" unless got == ["box", "shelf box", false]
+puts "acronym models passed"
+"##;
 
 /// The reopen that adds only `LIMIT` and `include Tagging`.
 #[allow(dead_code)]

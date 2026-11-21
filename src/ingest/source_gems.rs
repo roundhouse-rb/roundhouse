@@ -18,9 +18,22 @@ pub(super) struct SourceGem {
     pub mount: PathBuf,
     installed: PathBuf,
     files: BTreeSet<PathBuf>,
+    /// Of `files`, those reached only through an `autoload` to a feature
+    /// name (`autoload :Box, "shelf/box"`), or through a file only such an
+    /// autoload reaches: Ruby reads them the first time their constant is
+    /// read, not while the gem boots.
+    autoload_only: BTreeSet<PathBuf>,
 }
 
 impl SourceGem {
+    /// Does the gem define what `path`, one of its files under the mount,
+    /// declares before the app's autoloaders are set up? Not for a file only
+    /// a feature-name autoload reaches: Zeitwerk sets its own autoload over
+    /// one of those, so an app file at that constant's path still loads.
+    pub(super) fn loaded_at_boot(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.mount).is_ok_and(|rel| self.files.contains(rel) && !self.autoload_only.contains(rel))
+    }
+
     /// The installed gem's `lib/` and `app/`, read in place.
     pub(super) fn source_dirs(&self) -> Vec<PathBuf> {
         vec![self.installed.join("lib"), self.installed.join("app")]
@@ -58,7 +71,7 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
         let installed = vfs.canonical(&installed).unwrap_or_else(|| normalize(&installed));
         let native_features = native_features(vfs, &roots, lock, name);
         let native = |feature: &str| native_features.contains(feature);
-        let mut files = required_files(vfs, &installed, name, lock.gemfile_requires.get(name), &native)?;
+        let (mut files, mut autoload_only) = required_files(vfs, &installed, name, lock.gemfile_requires.get(name), &native)?;
         // Not only what the gem requires: the app's own `require "devise/orm/active_record"` loads that file of the gem too.
         let lib = installed.join("lib");
         let mut extra: Vec<String> = app_features.iter().filter(|f| vfs.exists(&lib.join(format!("{f}.rb")))).cloned().collect();
@@ -69,9 +82,14 @@ pub(super) fn resolve<V: Vfs + ?Sized>(
             extra.extend(patches.loaded_features(&dir).iter().filter(|f| vfs.exists(&lib.join(format!("{f}.rb")))).cloned());
         }
         if !extra.is_empty() {
-            files.extend(required_files(vfs, &installed, name, Some(&extra), &native)?);
+            let (more, more_autoload_only) = required_files(vfs, &installed, name, Some(&extra), &native)?;
+            // A file either walk reaches at boot is loaded at boot.
+            let at_boot: BTreeSet<PathBuf> =
+                files.difference(&autoload_only).chain(more.difference(&more_autoload_only)).cloned().collect();
+            files.extend(more);
+            autoload_only = files.difference(&at_boot).cloned().collect();
         }
-        gems.push(SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files });
+        gems.push(SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files, autoload_only });
     }
     Ok(gems)
 }
@@ -101,7 +119,12 @@ pub(super) fn framework_models<V: Vfs + ?Sized>(vfs: &V, dir: &Path, lock: Optio
             }
         }
     }
-    (!files.is_empty()).then(|| SourceGem { mount: dir.join(MOUNT).join(format!("{name}-{version}")), installed, files })
+    (!files.is_empty()).then(|| SourceGem {
+        mount: dir.join(MOUNT).join(format!("{name}-{version}")),
+        installed,
+        files,
+        autoload_only: BTreeSet::new(),
+    })
 }
 
 /// The features locked gems build as C extensions the Spinel tree cannot build, and whose namespace
@@ -185,7 +208,7 @@ fn app_required_features<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> BTreeSet<Strin
                 && let Ok(text) = vfs.read_to_string(&entry)
                 && text.contains("require")
             {
-                out.extend(requires(&text).into_iter().filter(|(relative, _)| !relative).map(|(_, f)| f.trim_end_matches(".rb").to_string()));
+                out.extend(requires(&text).into_iter().filter(|(relative, _, _)| !relative).map(|(_, f, _)| f.trim_end_matches(".rb").to_string()));
             }
         }
     }
@@ -198,7 +221,7 @@ fn required_files<V: Vfs + ?Sized>(
     name: &str,
     gemfile_requires: Option<&Vec<String>>,
     native: &dyn Fn(&str) -> bool,
-) -> Result<BTreeSet<PathBuf>, String> {
+) -> Result<(BTreeSet<PathBuf>, BTreeSet<PathBuf>), String> {
     let lib = gem.join("lib");
     // Not the gem's name when the app's Gemfile says what Bundler requires (svg-graph has no `svg-graph.rb`).
     let entries: Vec<PathBuf> = match gemfile_requires.filter(|features| !features.is_empty()) {
@@ -224,15 +247,24 @@ fn required_files<V: Vfs + ?Sized>(
         return Err(format!("source gem {name:?} has no lib/{name}.rb to require"));
     }
     let mut seen = BTreeSet::new();
-    let mut pending = entries;
-    while let Some(file) = pending.pop() {
-        if !seen.insert(file.strip_prefix(gem).unwrap().to_path_buf()) {
+    // What the gem loads while it boots: not a file only a feature-name autoload reaches.
+    let mut at_boot = BTreeSet::new();
+    let mut pending: Vec<(PathBuf, bool)> = entries.into_iter().map(|entry| (entry, true)).collect();
+    while let Some((file, boot)) = pending.pop() {
+        let rel = file.strip_prefix(gem).unwrap().to_path_buf();
+        let first = seen.insert(rel.clone());
+        // Walked again when a file first reached through an autoload is reached at boot: what it loads is loaded at boot too.
+        if !first && !(boot && !at_boot.contains(&rel)) {
             continue;
+        }
+        if boot {
+            at_boot.insert(rel.clone());
         }
         let text = vfs.read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
         // Not carried: on the Spinel tree its require raises LoadError, and a `rescue LoadError` takes the other file (addressable's IDNA picks pure.rb).
         if requires_native(&text, native) {
-            seen.remove(file.strip_prefix(gem).unwrap());
+            seen.remove(&rel);
+            at_boot.remove(&rel);
             continue;
         }
         // Not only what is required: a Zeitwerk loader autoloads every file under its root dirs by its constant name.
@@ -247,7 +279,8 @@ fn required_files<V: Vfs + ?Sized>(
                     if vfs.is_dir(&entry) {
                         dirs.push(entry);
                     } else if entry.extension().is_some_and(|e| e == "rb") {
-                        pending.push(entry);
+                        // Zeitwerk's autoloads name `.rb` paths, which an app file at that constant's path defers to.
+                        pending.push((entry, boot));
                     }
                 }
             }
@@ -257,7 +290,7 @@ fn required_files<V: Vfs + ?Sized>(
             let Ok(entries) = vfs.read_dir(&lib.join(&prefix)) else { continue };
             for entry in entries {
                 if entry.extension().is_some_and(|e| e == "rb") && !vfs.is_dir(&entry) {
-                    pending.push(normalize(&entry));
+                    pending.push((normalize(&entry), false));
                 }
             }
         }
@@ -266,18 +299,19 @@ fn required_files<V: Vfs + ?Sized>(
         for feature in active_support_autoloads(&text) {
             let path = normalize(&lib.join(format!("{feature}.rb")));
             if vfs.exists(&path) {
-                pending.push(path);
+                pending.push((path, false));
             }
         }
-        for (relative, feature) in requires(&text) {
+        for (relative, feature, autoloaded) in requires(&text) {
             let base = if relative { file.parent().unwrap().to_path_buf() } else { lib.clone() };
             let path = base.join(if feature.ends_with(".rb") { feature } else { format!("{feature}.rb") });
             let path = normalize(&path);
             if path.starts_with(&lib) && vfs.exists(&path) {
-                pending.push(path);
+                pending.push((path, boot && !autoloaded));
             }
         }
     }
+    let autoload_only: BTreeSet<PathBuf> = seen.difference(&at_boot).cloned().collect();
     // An engine's app/ is no require target: Rails puts it on the host's load paths, so it is the gem's code too
     if super::app::declares_rails_engine(vfs, &lib) {
         // Its route set too, which the host's `mount` draws.
@@ -303,7 +337,7 @@ fn required_files<V: Vfs + ?Sized>(
             }
         }
     }
-    Ok(seen)
+    Ok((seen, autoload_only))
 }
 
 /// The paths the Zeitwerk loaders of the gem at `lib` ignore: Ruby loads
@@ -395,9 +429,13 @@ pub(super) fn path_of(node: &ruby_prism::Node<'_>, dir: &Path) -> Option<PathBuf
     Some(path_of(base, dir)?.join(rest))
 }
 
-fn requires(text: &str) -> Vec<(bool, String)> {
+/// Each `require`, `require_relative` and top-level `autoload` a file makes:
+/// whether its feature is relative, the feature, and whether it is an
+/// `autoload` to a feature name (one ending in `.rb` is a path Zeitwerk
+/// defers to, as to a defined constant).
+fn requires(text: &str) -> Vec<(bool, String, bool)> {
     /// `.4`: the blocks entered, each with its own locals and the outer ones it writes.
-    struct Finder(Vec<(bool, String)>, usize, Vec<Vec<u8>>, usize, Vec<(Vec<Vec<u8>>, Vec<Vec<u8>>)>);
+    struct Finder(Vec<(bool, String, bool)>, usize, Vec<Vec<u8>>, usize, Vec<(Vec<Vec<u8>>, Vec<Vec<u8>>)>);
     /// `File.dirname(__FILE__)` or `__dir__`: the directory of the file being loaded.
     fn file_dir(node: &ruby_prism::Node<'_>) -> bool {
         if let Some(call) = node.as_call_node() {
@@ -511,13 +549,15 @@ fn requires(text: &str) -> Vec<(bool, String)> {
                 _ => None,
             };
             if let (Some(feature), None) = (feature, node.receiver()) {
-                self.0.push((relative == Some(true), String::from_utf8_lossy(feature.unescaped()).into_owned()));
+                let feature = String::from_utf8_lossy(feature.unescaped()).into_owned();
+                let autoloaded = relative.is_none() && !feature.ends_with(".rb");
+                self.0.push((relative == Some(true), feature, autoloaded));
             } else if relative == Some(false)
                 && node.receiver().is_none()
                 && let [arg] = args.as_slice()
                 && let Some(path) = self.built_relative(arg)
             {
-                self.0.push((true, path));
+                self.0.push((true, path, false));
             }
             ruby_prism::visit_call_node(self, node);
         }
@@ -827,7 +867,7 @@ mod tests {
     #[test]
     fn a_require_built_on_the_files_directory_is_relative() {
         let found = super::requires("direc = File.dirname(__FILE__)\nrequire \"#{direc}/method_source/version\"\nrequire \"#{__dir__}/other\"\nrequire \"#{name}/no\"\n");
-        assert_eq!(found, vec![(true, "method_source/version".to_string()), (true, "other".to_string())]);
+        assert_eq!(found, vec![(true, "method_source/version".to_string(), false), (true, "other".to_string(), false)]);
     }
 
     #[test]
@@ -842,21 +882,21 @@ dir = ENV[\"X\"]
 require \"#{dir}/gone\"
 ",
         );
-        assert_eq!(found, vec![(true, "kept".to_string())]);
+        assert_eq!(found, vec![(true, "kept".to_string(), false)]);
         let found = super::requires(
             "dir = __dir__\nmodule Other\n  dir = ENV[\"X\"]\nend\nif false\n  dir = ENV[\"X\"]\nend\nrequire \"#{dir}/a\"\ndir = require \"#{dir}/b\"\nrequire \"#{dir}/c\"\n",
         );
-        assert_eq!(found, vec![(true, "a".to_string()), (true, "b".to_string())]);
+        assert_eq!(found, vec![(true, "a".to_string(), false), (true, "b".to_string(), false)]);
         let found = super::requires("dir = __dir__\n[1].each { |x; dir| dir = ENV[\"X\"] }\nrequire \"#{dir}/kept\"\n");
-        assert_eq!(found, vec![(true, "kept".to_string())]);
+        assert_eq!(found, vec![(true, "kept".to_string(), false)]);
         let found = super::requires("[1].each do\n  inner = __dir__\n  require \"#{inner}/inside\"\nend\nrequire \"#{inner}/after\"\ndir = __dir__\n[1].each { dir = ENV[\"X\"] }\nrequire \"#{dir}/gone\"\n");
-        assert_eq!(found, vec![(true, "inside".to_string())]);
+        assert_eq!(found, vec![(true, "inside".to_string(), false)]);
         let found = super::requires("[1].each do\n  dir = __dir__\n  [ENV[\"X\"]].each { |dir| require \"#{dir}/wrong\" }\n  require \"#{dir}/right\"\nend\n");
-        assert_eq!(found, vec![(true, "right".to_string())]);
+        assert_eq!(found, vec![(true, "right".to_string(), false)]);
         let found = super::requires("dir = __dir__\n[1].each do |; dir|\n  dir = __dir__\n  [1].each { dir = ENV[\"X\"] }\nend\nrequire \"#{dir}/kept\"\n");
-        assert_eq!(found, vec![(true, "kept".to_string())]);
+        assert_eq!(found, vec![(true, "kept".to_string(), false)]);
         let found = super::requires("dir = __dir__\n[1].each do\n  module Other\n    dir = ENV[\"X\"]\n  end\nend\nrequire \"#{dir}/kept\"\n");
-        assert_eq!(found, vec![(true, "kept".to_string())]);
+        assert_eq!(found, vec![(true, "kept".to_string(), false)]);
     }
 
     #[test]
@@ -909,6 +949,46 @@ require \"#{dir}/gone\"
         let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();
         let files: Vec<_> = gems[0].files.iter().map(|p| p.display().to_string()).collect();
         assert_eq!(files, vec!["lib/widgets/base.rb", "lib/widgets.rb"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_only_a_feature_autoload_reaches_is_not_loaded_at_boot() {
+        let root = std::env::temp_dir().join(format!("rh-source-gems-autoload-boot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |path: &str, text: &str| {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, text).unwrap();
+        };
+        write("app/.bundle/config", "---\nBUNDLE_PATH: \"vendor/bundle\"\n");
+        let gem = "app/vendor/bundle/ruby/3.4.0/gems/widgets-1.0";
+        write(
+            &format!("{gem}/lib/widgets.rb"),
+            concat!(
+                "module Widgets\n",
+                "  autoload :Lazy, \"widgets/lazy\"\n",
+                "  autoload :Pathed, \"widgets/pathed.rb\"\n",
+                "  autoload :Both, \"widgets/both\"\n",
+                "end\n",
+                "require \"widgets/core\"\n",
+            ),
+        );
+        write(&format!("{gem}/lib/widgets/lazy.rb"), "require \"widgets/helper\"\nmodule Widgets; class Lazy; end; end\n");
+        write(&format!("{gem}/lib/widgets/helper.rb"), "module Widgets; class Helper; end; end\n");
+        write(&format!("{gem}/lib/widgets/pathed.rb"), "module Widgets; class Pathed; end; end\n");
+        write(&format!("{gem}/lib/widgets/both.rb"), "module Widgets; class Both; end; end\n");
+        write(&format!("{gem}/lib/widgets/core.rb"), "require \"widgets/both\"\n");
+        let lock = Lockfile::parse("GEM\n  remote: https://rubygems.org/\n  specs:\n    widgets (1.0)\n\nDEPENDENCIES\n  widgets\n");
+        let gems = resolve(&crate::vfs::FsVfs::new(), &root.join("app"), Some(&lock), &["widgets".to_string()]).unwrap();
+        let at_boot = |rel: &str| gems[0].loaded_at_boot(&gems[0].mount.join(rel));
+        // Compiled with the gem, all of them.
+        assert_eq!(gems[0].files.len(), 6);
+        assert!(at_boot("lib/widgets.rb") && at_boot("lib/widgets/core.rb"));
+        // An autoload to a `.rb` path, and a file a boot file requires as well as autoloads, count.
+        assert!(at_boot("lib/widgets/pathed.rb") && at_boot("lib/widgets/both.rb"));
+        // A feature-name autoload's file doesn't, nor what only it requires.
+        assert!(!at_boot("lib/widgets/lazy.rb") && !at_boot("lib/widgets/helper.rb"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

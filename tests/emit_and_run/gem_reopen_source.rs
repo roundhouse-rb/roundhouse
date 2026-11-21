@@ -17,6 +17,64 @@ fn a_gem_class_reopened_for_a_constant_and_an_include_answers_all_three() {
     contract::listed(contract::extras_app()).run_ruby(contract::EXTRAS_ASSERTIONS).assert_passes();
 }
 
+/// A reopen at the gem class's autoload path is a file Rails never loads:
+/// the class keeps the gem's methods and gains none of the file's.
+#[test]
+fn a_reopen_at_the_gem_classs_autoload_path_leaves_the_gems_class() {
+    contract::listed(contract::models_app()).run_ruby(contract::MODELS_ASSERTIONS).assert_passes();
+}
+
+/// A boot file that requires the reopen by path loads it, autoload path or not.
+#[test]
+fn a_reopen_at_the_gem_classs_autoload_path_an_initializer_requires_is_loaded() {
+    contract::listed(contract::required_models_app()).run_ruby(contract::REQUIRED_MODELS_ASSERTIONS).assert_passes();
+}
+
+/// `Rails.root.join("app", "models", "shelf", "box")` names the same file.
+#[test]
+fn a_reopen_at_the_gem_classs_autoload_path_required_by_joined_parts_is_loaded() {
+    contract::listed(contract::split_required_models_app()).run_ruby(contract::REQUIRED_MODELS_ASSERTIONS).assert_passes();
+}
+
+/// A file the boot loads through another file's `require_relative` is loaded too.
+#[test]
+fn a_reopen_at_the_gem_classs_autoload_path_required_through_a_lib_file_is_loaded() {
+    contract::listed(contract::chain_required_models_app()).run_ruby(contract::REQUIRED_MODELS_ASSERTIONS).assert_passes();
+}
+
+/// A require in a comment loads nothing.
+#[test]
+fn a_reopen_at_the_gem_classs_autoload_path_required_only_in_a_comment_leaves_the_gems_class() {
+    contract::listed(contract::commented_required_models_app()).run_ruby(contract::MODELS_ASSERTIONS).assert_passes();
+}
+
+/// A constant the gem assigns is defined as one it declares is.
+#[test]
+fn a_reopen_at_the_autoload_path_of_a_constant_the_gem_assigns_leaves_the_gems_class() {
+    contract::listed(contract::assigned_models_app()).run_ruby(contract::MODELS_ASSERTIONS).assert_passes();
+}
+
+/// The path is camelized with the app's acronyms, as Zeitwerk does.
+#[test]
+fn a_reopen_at_an_acronym_autoload_path_leaves_the_gems_class() {
+    contract::listed(contract::acronym_models_app()).run_ruby(contract::ACRONYM_MODELS_ASSERTIONS).assert_passes();
+}
+
+/// A gem file that nothing requires defines nothing, so Rails loads the
+/// app's file at that path. The gem's file isn't one roundhouse reads
+/// either: a source gem is the files its requires reach.
+#[test]
+fn a_reopen_at_the_autoload_path_of_a_gem_class_in_an_unrequired_file_is_loaded() {
+    contract::listed(contract::unrequired_gem_box_models_app()).run_ruby(contract::APP_FILE_MODELS_ASSERTIONS).assert_passes();
+}
+
+/// Nor does a gem file the gem autoloads by feature name: Zeitwerk sets
+/// its own autoload over that one, from the app's file.
+#[test]
+fn a_reopen_at_the_autoload_path_of_a_gem_class_autoloaded_by_feature_is_loaded() {
+    contract::listed(contract::feature_autoloaded_gem_box_models_app()).run_ruby(contract::AUTOLOADED_MODELS_ASSERTIONS).assert_passes();
+}
+
 /// The emitted `Shelf::Box`: one file holding each opening in load order.
 fn shelf_box(app: super::emit_and_run::Overlay) -> String {
     let (emitted, _errors) = app.emit(BuildTarget::Spinel);

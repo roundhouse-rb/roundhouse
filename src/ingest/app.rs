@@ -3510,6 +3510,7 @@ end
             }
         }
         super::oj::lower_oj(&mut app, &sources, &initializers)?;
+        super::multi_json::lower_multi_json(&mut app, &sources, &initializers)?;
     }
     super::dry_initializer::drop_type_constants(&mut app, &sources);
     // graphql-ruby object types: analyzer-only field methods, so

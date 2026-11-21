@@ -1460,6 +1460,8 @@ pub enum LibraryClassOrigin {
     },
     /// The `Oj` stand-in an app under `Oj.mimic_JSON` reaches (`ingest::oj`).
     Oj,
+    /// The `MultiJson` stand-in an app on multi_json's oj adapter reaches (`ingest::multi_json`).
+    MultiJson,
     /// Not a class: an autoloaded app file that declares no class or
     /// module and holds only file-level constants (`RemoteThing =
     /// Thing`, `Labels = LabelFactory.build(...)`). Named for the

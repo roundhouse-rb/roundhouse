@@ -17,6 +17,8 @@ mod emit_and_run;
 #[path = "support/native_http.rs"]
 #[allow(dead_code)]
 mod native_http;
+#[path = "emit_and_run/multi_json.rs"]
+mod multi_json;
 #[path = "emit_and_run/deep_stringify_keys.rs"]
 mod deep_stringify_keys;
 #[path = "emit_and_run/fixture_explicit_id.rs"]

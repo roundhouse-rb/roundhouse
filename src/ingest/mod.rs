@@ -43,6 +43,7 @@ pub(crate) use concern_accessors::{library_classes_by_name, unconsumed_class_sid
 mod dry_initializer;
 mod dry_struct;
 mod dry_types;
+mod multi_json;
 mod oj;
 pub(crate) mod source_gems;
 mod auto_source_gems;

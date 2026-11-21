@@ -2969,6 +2969,11 @@ impl<'a> BodyTyper<'a> {
                         return ty;
                     }
                 }
+                // Recomputed on each pass: a lambda analyzed again with a value the stand-in writes drops the earlier refusal.
+                let refusal = multi_json_dump_refusal(recv.as_ref(), method, args);
+                if refusal.is_some() || crate::expr::ExprCold::diagnostic(&expr.cold).as_ref().is_some_and(|d| matches!(d, crate::diagnostic::DiagnosticKind::Unsupported { construct, .. } if construct.as_str() == "MultiJson.dump")) {
+                    crate::expr::ExprCold::set_diagnostic(&mut expr.cold, refusal);
+                }
                 if let Some(refusal) = self.pagy_object_refusal(recv_ty.as_ref(), method, args) {
                     crate::expr::ExprCold::set_diagnostic(&mut expr.cold, Some(refusal));
                 }
@@ -8894,4 +8899,47 @@ fn locals_read(expr: &Expr) -> Vec<Symbol> {
     }
     walk(expr, &mut out);
     out
+}
+
+/// `MultiJson.dump(value)` whose value the stand-in (`ingest::multi_json`) does not write: oj calls a record's or any
+/// other object's `to_json`, which runs Rails' encoder (`<>&` escaped), and an untyped value may be one.
+fn multi_json_dump_refusal(recv: Option<&Expr>, method: &Symbol, args: &[Expr]) -> Option<crate::diagnostic::DiagnosticKind> {
+    let ExprNode::Const { path } = &*recv?.node else { return None };
+    if !matches!(path.iter().map(|p| p.as_str()).filter(|p| !p.is_empty()).collect::<Vec<_>>().as_slice(), ["MultiJson"])
+        || !matches!(method.as_str(), "dump" | "generate" | "encode")
+    {
+        return None;
+    }
+    fn written(ty: &Ty) -> bool {
+        match ty {
+            Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Sym | Ty::Nil | Ty::Time => true,
+            Ty::Array { elem } => written(elem),
+            Ty::Hash { key, value } => written(key) && written(value),
+            Ty::Tuple { elems } => elems.iter().all(written),
+            Ty::Record { row } => row.rest.is_none() && row.fields.values().all(written),
+            Ty::Union { variants } => variants.iter().all(written),
+            _ => false,
+        }
+    }
+    // A literal by its elements: an empty `{}` or `[]` in it leaves an unresolved element in the literal's own type.
+    fn written_expr(expr: &Expr) -> bool {
+        match &*expr.node {
+            ExprNode::Hash { entries, .. } => entries.iter().all(|(k, v)| written_expr(k) && written_expr(v)),
+            ExprNode::Array { elements, .. } => elements.iter().all(written_expr),
+            _ => expr.ty.as_ref().is_some_and(written),
+        }
+    }
+    let value = args.first()?;
+    if written_expr(value) {
+        return None;
+    }
+    let ty = value.ty.as_ref();
+    Some(crate::diagnostic::DiagnosticKind::Unsupported {
+        target: None,
+        construct: Symbol::from("MultiJson.dump"),
+        detail: format!(
+            "of a {} value: oj writes an object through its `to_json`, and only Hashes, Arrays, Strings, Symbols, numbers, booleans, nil and Times are modeled",
+            ty.map_or("untyped".to_string(), crate::rbs::print_ty)
+        ),
+    })
 }

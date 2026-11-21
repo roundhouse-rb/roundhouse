@@ -791,6 +791,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("kaminari", GemFate::Modeled),    // Relation#page / per / paginate
     ("mail", GemFate::Modeled),        // catalog/gems: Mail::Address; ActionMailer
     ("mocha", GemFate::Modeled),       // lower/mocha bridge
+    ("multi_json", GemFate::Modeled), // ingest/multi_json + lower/oj: on the oj adapter, dump on ruby, jruby and spinel; load, other adapters and every other target refused
     ("nokogiri", GemFate::Modeled),    // catalog/gems: Nokogiri
     ("oj", GemFate::Modeled),          // ingest/oj + lower/oj: under Oj.mimic_JSON, load/generate on ruby, jruby and spinel; dump and every other target refused
     ("pagy", GemFate::Modeled),        // registry/controllers + analyze/body/pagy + runtime action_controller/pagy.rb: pagy(scope[, limit: n]) offset paginator, Pagy#series_nav/info_tag/readers (English); before 43, pagy9.rb: pagy/pagy_array(limit:, page:, items:), readers, series, vars[k], pagy_url_for, the overflow/array extras; other paginators/options/helpers refused

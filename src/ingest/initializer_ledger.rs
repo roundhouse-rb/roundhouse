@@ -448,6 +448,17 @@ const RECOGNIZERS: &[Recognizer] = &[
         },
     },
     Recognizer {
+        name: "multi_json (MultiJson.use(:oj): ingest/multi_json reads the adapter)",
+        origins: INIT,
+        levels: ANY,
+        reads: |p| {
+            code_lines(p.text).any(|l| {
+                let l = l.trim_start_matches("::");
+                ["MultiJson.use(:oj)", "MultiJSON.use(:oj)", "MultiJson.use :oj", "MultiJSON.use :oj"].contains(&l.trim_end())
+            })
+        },
+    },
+    Recognizer {
         name: "load_hooks (ActiveSupport.on_load(:name) a model's run_load_hooks(:name, self) runs as its class body)",
         origins: INIT,
         levels: TOP,

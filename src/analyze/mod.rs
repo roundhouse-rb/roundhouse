@@ -3089,7 +3089,7 @@ impl Analyzer {
                     self.body_typer().analyze_method_body(&mut method.body, &mctx);
                 }
             }
-            self.harvest_one_model(model);
+            self.harvest_one_model(model, &app.schema);
         }
         drop(_typing_models);
 
@@ -5780,7 +5780,7 @@ impl Analyzer {
         }
     }
 
-    fn harvest_one_model(&mut self, model: &Model) {
+    fn harvest_one_model(&mut self, model: &Model, schema: &crate::schema::Schema) {
         let class_id = &model.name;
         for (name, ty) in crate::lower::model_to_library::markers::readonly_attr_types(model) {
             self.classes.entry(class_id.clone()).or_default().instance_methods.insert(name, ty);
@@ -5847,12 +5847,91 @@ impl Analyzer {
             }
             Self::register_method_return(target, &method.name, ret.as_ref());
         }
+        self.harvest_model_aliases(model, schema);
+    }
+
+    /// A model's `alias new old` answers as what it copies: the lowering
+    /// gives the model that copy (`resolve_model_aliases`), so a caller
+    /// elsewhere in the app (`@goods_in.items` over
+    /// `alias items goods_in_items`) dispatches to it. An alias the
+    /// lowering refuses stays unknown.
+    ///
+    /// A synthesized reader's type comes from its declaration, not from
+    /// the registry entry of its name: a later `alias comments author`
+    /// writes that entry, and an earlier `alias saved_comments comments`
+    /// still copies the association reader, on every harvest.
+    fn harvest_model_aliases(&mut self, model: &Model, schema: &crate::schema::Schema) {
+        use crate::lower::model_to_library::{model_aliases, AliasSource};
+        let class_id = &model.name;
+        let aliases = {
+            let known = self.classes.get(class_id).map(|c| &c.instance_methods);
+            model_aliases(model, schema, &|name| known.is_some_and(|m| m.contains_key(name)))
+        };
+        for alias in aliases {
+            if alias.redefined_later {
+                continue;
+            }
+            let ty = match alias.source {
+                None => continue,
+                Some(AliasSource::Method(method)) => {
+                    let ret = self.method_return_ty(class_id, method);
+                    self.unfold_model_alias(class_id, &alias.new);
+                    let target = &mut self.classes.entry(class_id.clone()).or_default().instance_methods;
+                    Self::register_method_return(target, &alias.new, ret.as_ref());
+                    continue;
+                }
+                Some(AliasSource::Synthesized { name, item }) => Some(synthesized_reader_ty(item, &name)),
+                // The copy forwards to `old` on the model itself, so it
+                // answers what dispatch finds for `old` there: the
+                // model's own entry, or the nearest parent's (an app base
+                // class that redefines `reload`), substituted as the
+                // instance-method dispatch in `body::send` does: self as
+                // this model, and a model ancestor's own class as this
+                // model. Nothing yet when the parent's override has no
+                // return so far: a later harvest has it.
+                Some(AliasSource::Inherited(name)) => {
+                    let model_ty = Ty::Class { id: class_id.clone(), args: vec![].into() };
+                    let receiver_is_model = self.classes.get(class_id).is_some_and(|c| c.table.is_some());
+                    let mut current = Some(class_id);
+                    let mut found = None;
+                    for _ in 0..32 {
+                        let Some(cid) = current else { break };
+                        let Some(cls) = self.classes.get(cid) else { break };
+                        if let Some(ty) = cls.instance_methods.get(&name) {
+                            let ty = ty.subst_self(&model_ty);
+                            found = Some(if cid != class_id && cls.table.is_some() && receiver_is_model {
+                                ty.rebind_class(cid, class_id)
+                            } else {
+                                ty
+                            });
+                            break;
+                        }
+                        current = cls.parent.as_ref();
+                    }
+                    found
+                }
+            };
+            if let Some(ty) = ty {
+                self.unfold_model_alias(class_id, &alias.new);
+                self.classes.entry(class_id.clone()).or_default().instance_methods.insert(alias.new, ty);
+            }
+        }
+    }
+
+    /// The alias is the model's own method, which Ruby puts ahead of an
+    /// included module's: drop `name` from the fold's copies, so
+    /// `fold_concern_surfaces` leaves the alias's entry in place even when
+    /// the fold wrote `name` on a harvest before the alias had a type.
+    fn unfold_model_alias(&mut self, class_id: &ClassId, name: &Symbol) {
+        if let Some((instance, _)) = self.concern_folded.get_mut(class_id) {
+            instance.remove(name);
+        }
     }
 
     fn harvest_method_returns(&mut self, app: &App, harvest_tests: bool) {
         let returns_span = crate::timings::begin("harvest: returns");
         for model in &app.models {
-            self.harvest_one_model(model);
+            self.harvest_one_model(model, &app.schema);
         }
         // Each body's return is read on its own, so the reads run in
         // parallel; the registry is written afterwards, in source order.
@@ -12141,14 +12220,33 @@ fn register_ar_attributes(body: &[ModelBodyItem], methods: &mut HashMap<Symbol, 
             .as_ref()
             .and_then(|t| typed_store_ty(t.as_str()))
             .unwrap_or(Ty::Untyped);
-        let reader_ty =
-            if matches!(ty, Ty::Untyped) { Ty::Untyped } else { Ty::Union { variants: vec![ty.clone(), Ty::Nil].into() } };
-        methods.entry(name.clone()).or_insert(reader_ty);
+        methods.entry(name.clone()).or_insert(ar_attribute_reader_ty(&ty));
         let setter = Symbol::from(format!("{}=", name.as_str()));
         methods.entry(setter).or_insert(ty.clone());
         let predicate = Symbol::from(format!("{}?", name.as_str()));
         methods.entry(predicate).or_insert(Ty::Bool);
     }
+}
+
+/// The reader of an `attribute :name, :type`: the value or nil, or
+/// untyped when the type is not one the registry knows.
+fn ar_attribute_reader_ty(ty: &Ty) -> Ty {
+    if matches!(ty, Ty::Untyped) { Ty::Untyped } else { Ty::Union { variants: vec![ty.clone(), Ty::Nil].into() } }
+}
+
+/// The type the registry seeds for the reader `name` that `item`
+/// declares: an association's reader (`association_member_ty`), an
+/// `attribute` reader (`register_ar_attributes`) or an `attr_accessor`
+/// reader, untyped (`register_attr_accessors`).
+fn synthesized_reader_ty(item: &ModelBodyItem, name: &Symbol) -> Ty {
+    if let ModelBodyItem::Association { assoc, .. } = item {
+        return association_member_ty(assoc).1;
+    }
+    crate::lower::model_to_library::markers::attribute_api_decls(std::slice::from_ref(item))
+        .into_iter()
+        .find(|(declared, _)| declared == name)
+        .map(|(_, ty)| ar_attribute_reader_ty(&ty.as_ref().and_then(|t| typed_store_ty(t.as_str())).unwrap_or(Ty::Untyped)))
+        .unwrap_or(Ty::Untyped)
 }
 
 /// Register the flat accessors `lower::has_json` synthesizes for a

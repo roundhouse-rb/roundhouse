@@ -137,3 +137,75 @@ raise "hand-written alias" unless widget.greet == widget.greeting
         );
     run.assert_passes();
 }
+
+#[test]
+fn alias_of_a_has_many_reader_answers_to_another_class() {
+    // Called from another model's own method, so the analysis must
+    // dispatch `parts` on `Widget`, not only the emitted model define it.
+    let run = widgets_app()
+        .write(
+            "app/models/widget.rb",
+            "class Widget < ApplicationRecord\n  has_many :gadgets, dependent: :destroy, inverse_of: :widget\n  alias parts gadgets\nend\n",
+        )
+        .write(
+            "app/models/gadget.rb",
+            "class Gadget < ApplicationRecord\n  belongs_to :widget\n\n  def sibling_count\n    widget.parts.size\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"
+widget = Widget.create!(name: "sprocket")
+first = Gadget.create!(widget: widget)
+Gadget.create!(widget: widget)
+raise "has_many alias" unless widget.parts.map(&:id).sort == widget.gadgets.map(&:id).sort
+raise "has_many alias from another class" unless first.sibling_count == 2
+"#,
+        );
+    run.assert_passes();
+}
+
+#[test]
+fn an_alias_of_a_method_a_parent_redefines_forwards_to_the_parents() {
+    let run = widgets_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\n\n  def reload\n    super\n  end\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  alias refresh reload\nend\n")
+        .write(
+            "app/models/gadget.rb",
+            "class Gadget < ApplicationRecord\n  belongs_to :widget, optional: true\n\n  def widget_name\n    widget.refresh.name\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"
+widget = Widget.create!(name: "before")
+gadget = Gadget.create!(widget: widget)
+Widget.where(id: widget.id).update_all(name: "after")
+raise "refresh reloads" unless widget.refresh.name == "after"
+raise "refresh from another class" unless gadget.widget_name == "after"
+"#,
+        );
+    run.assert_passes();
+}
+
+#[test]
+fn an_alias_of_a_method_a_parent_overrides_answers_the_overrides_value() {
+    let run = widgets_app()
+        .write(
+            "app/models/application_record.rb",
+            "class ApplicationRecord < ActiveRecord::Base\n  primary_abstract_class\n\n  def reload\n    \"ready\"\n  end\nend\n",
+        )
+        .write("app/models/widget.rb", "class Widget < ApplicationRecord\n  alias refresh reload\nend\n")
+        .write(
+            "app/models/gadget.rb",
+            "class Gadget < ApplicationRecord\n  belongs_to :widget, optional: true\n\n  def widget_status\n    widget.refresh.upcase\n  end\nend\n",
+        )
+        .run_ruby(
+            r#"
+widget = Widget.create!(name: "w")
+gadget = Gadget.create!(widget: widget)
+raise "refresh answers the override" unless widget.refresh == "ready"
+raise "refresh from another class" unless gadget.widget_status == "READY"
+"#,
+        );
+    run.assert_passes();
+}

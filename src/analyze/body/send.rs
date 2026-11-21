@@ -3079,6 +3079,15 @@ impl<'a> BodyTyper<'a> {
             }
             Some(Ty::Hash { key, value }) => hash_method(method, key, value, block_ret, args),
             Some(Ty::Record { row }) => record_method(method, row, args),
+            // `<=>` against an operand of another kind answers nil (core RBS:
+            // `(Integer | Rational) -> Integer` beside `(untyped) -> Integer?`,
+            // and the same for String and Symbol); the tables answer the like
+            // operand, and an operand not yet typed reads as like.
+            Some(recv @ (Ty::Int | Ty::Str | Ty::Sym))
+                if method.as_str() == "<=>" && args.len() == 1 && unlike_operand(recv, &args[0]) =>
+            {
+                Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }
+            }
             // A method the app adds by reopening `String` (campfire's
             // `all_emoji?`) answers where the builtin table has nothing.
             Some(Ty::Str) if method.as_str() == "bytes" && block_ret.is_some() => Ty::Str,
@@ -3158,9 +3167,14 @@ impl<'a> BodyTyper<'a> {
                 // `@status_change = status_change.dup.freeze` over
                 // `[String?, String]?` was typed `Array[String?]`, the
                 // reader inherited it, and `status_change.present?` ground
-                // to `!status_change.empty?` -- nil at runtime.
-                if matches!(method.as_str(), "dup" | "clone")
-                    && args.is_empty()
+                // to `!status_change.empty?` -- nil at runtime. And
+                // `nil <=> x` answers nil (0 only against nil).
+                let nil_answers = match method.as_str() {
+                    "dup" | "clone" => args.is_empty(),
+                    "<=>" => args.len() == 1,
+                    _ => false,
+                };
+                if nil_answers
                     && !resolved.is_empty()
                     && variants.iter().any(|v| matches!(v, Ty::Nil))
                 {
@@ -4468,9 +4482,10 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
         "inquiry" => Ty::Str,
         // Operators. `+` concats; `<<` mutates in place but still returns self.
         // `*` is repetition ("a" * 3); `%` is sprintf (returns Str). Comparisons
-        // uniformly return Bool.
+        // return Bool; `<=>` answers -1, 0 or 1.
         "+" | "<<" | "*" | "%" | "concat" => Ty::Str,
-        "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
+        "==" | "!=" | "<" | ">" | "<=" | ">=" | "eql?" | "equal?" => Ty::Bool,
+        "<=>" => Ty::Int,
         // ActiveSupport String extensions. Pluralization/inflection
         // methods all return Str; comparison-style return Bool. Match
         // the surface of `ActiveSupport::Inflector` that real Rails
@@ -4497,6 +4512,19 @@ pub(super) fn str_method(method: &Symbol) -> Ty {
     }
 }
 
+/// True when `<=>`'s operand is known to be of another kind than the
+/// Integer, String or Symbol receiver, so Ruby can answer nil. An operand
+/// with no type yet (`Var`, untyped) is not known to differ.
+fn unlike_operand(recv: &Ty, operand: &crate::expr::Expr) -> bool {
+    let Some(t) = operand.ty.as_ref() else { return false };
+    match (recv, t) {
+        (_, Ty::Var { .. } | Ty::Untyped) => false,
+        (Ty::Int, Ty::Int) | (Ty::Str, Ty::Str) | (Ty::Sym, Ty::Sym) => false,
+        (Ty::Int, Ty::Class { id, .. }) => id.0.as_str() != "Rational",
+        _ => true,
+    }
+}
+
 pub(super) fn sym_method(method: &Symbol) -> Ty {
     // Universal methods (`==`, `!=`, `to_s`, `inspect`, `class`, …)
     // resolve in `universal_method` before this is reached. Cover only
@@ -4518,7 +4546,8 @@ pub(super) fn sym_method(method: &Symbol) -> Ty {
         "match" => Ty::Untyped,
         "match?" => Ty::Bool,
         "=~" => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
-        "<=>" | "<" | ">" | "<=" | ">=" => Ty::Bool,
+        "<" | ">" | "<=" | ">=" => Ty::Bool,
+        "<=>" => Ty::Int,
         // ActiveSupport `Object#presence_in(list)`: the receiver when the list holds it, else nil.
         "presence_in" => Ty::Union { variants: vec![Ty::Sym, Ty::Nil].into() },
         _ => unknown(),
@@ -4546,7 +4575,10 @@ pub(super) fn int_method(method: &Symbol) -> Ty {
         // Arithmetic: Int op Int → Int (we approximate Int/Float mixing here;
         // refine when a fixture demands it).
         "+" | "-" | "*" | "/" | "%" | "**" | "&" | "|" | "^" | "<<" | ">>" => Ty::Int,
-        "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
+        "==" | "!=" | "<" | ">" | "<=" | ">=" | "eql?" | "equal?" => Ty::Bool,
+        // -1, 0 or 1 against an Integer; an operand of another kind is
+        // read at the dispatch (`unlike_operand`).
+        "<=>" => Ty::Int,
         // Bit access (`flags[0]`) returns the bit as Int; `times` returns
         // the receiver (Int) — `n.times { }` evaluates to `n`.
         "[]" | "times" | "clamp" | "div" | "modulo" | "gcd" | "lcm" | "pow" | "bit_length" => Ty::Int,
@@ -4658,7 +4690,9 @@ pub(super) fn float_method(method: &Symbol, args: &[crate::expr::Expr]) -> Ty {
         "zero?" | "positive?" | "negative?" | "nan?" | "finite?" | "infinite?" => Ty::Bool,
         // Float arithmetic stays Float (Float op Int is also Float).
         "+" | "-" | "*" | "/" | "%" | "**" => Ty::Float,
-        "==" | "!=" | "<" | ">" | "<=" | ">=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
+        "==" | "!=" | "<" | ">" | "<=" | ">=" | "eql?" | "equal?" => Ty::Bool,
+        // nil when either side is NaN.
+        "<=>" => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         _ => unknown(),
     }
 }
@@ -4846,7 +4880,9 @@ pub(super) fn bool_method(method: &Symbol) -> Ty {
     match method.as_str() {
         // Unary `!` and bitwise/logical operators all produce Bool.
         "!" | "&" | "|" | "^" => Ty::Bool,
-        "==" | "!=" | "<=>" | "eql?" | "equal?" => Ty::Bool,
+        "==" | "!=" | "eql?" | "equal?" => Ty::Bool,
+        // `Object#<=>`: 0 for the same value, nil otherwise.
+        "<=>" => Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() },
         "to_s" => Ty::Str,
         "inspect" => Ty::Str,
         _ => unknown(),

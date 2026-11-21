@@ -3481,6 +3481,13 @@ fn js_send_inner(
                     }
                     ("<=>", 1) => {
                         let other = js_expr(&args[0]);
+                        // Ruby answers nil when a side is NaN: neither `<`, `>` nor `===` holds then. For any
+                        // other two numbers `===` holds once `<` and `>` do not, so the tail costs nothing.
+                        let equal = Js::synth(JsExpr::Ternary {
+                            cond: Js::binary(Span::synthetic(), "===", synth_ident("__a"), synth_ident("__b")),
+                            then: zero(),
+                            else_: Js::synth(JsExpr::Null),
+                        });
                         let cmp = Js::synth(JsExpr::Arrow {
                             params: vec![js_param("__a"), js_param("__b")],
                             body: ArrowBody::Expr(Js::synth(JsExpr::Ternary {
@@ -3489,7 +3496,7 @@ fn js_send_inner(
                                 else_: Js::synth(JsExpr::Ternary {
                                     cond: Js::binary(Span::synthetic(), ">", synth_ident("__a"), synth_ident("__b")),
                                     then: Js::num(Span::synthetic(), "1"),
-                                    else_: zero(),
+                                    else_: equal,
                                 }),
                             })),
                             is_async: false,

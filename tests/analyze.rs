@@ -6071,3 +6071,60 @@ end
     let ty = remote.methods.iter().find(|m| m.name.as_str() == "status").expect("status").body.ty.clone();
     assert!(matches!(ty, Some(Ty::Int)), "the app's own get: {ty:?}");
 }
+
+/// `<=>` answers an Integer where Ruby's core signatures say so (Integer,
+/// String and Symbol compared with their own kind) and Integer or nil where
+/// it can answer nil: Float (NaN), `true` and `false` (`Object#<=>`), an
+/// operand of another kind (`(untyped) -> Integer?`), a receiver that can be
+/// nil. An operand with no type yet reads as like. Typed `bool`,
+/// `(a <=> b) * -1` read as `bool * Integer`.
+#[test]
+fn spaceship_answers_an_integer_or_nil_as_ruby_does() {
+    let cases = [
+        ("int", "(Integer, Integer)"),
+        ("str", "(String, String)"),
+        ("sym", "(Symbol, Symbol)"),
+        ("int_untyped", "(Integer, untyped)"),
+        ("int_rational", "(Integer, Rational)"),
+        ("float", "(Float, Float)"),
+        ("bool", "(bool, bool)"),
+        ("int_float", "(Integer, Float)"),
+        ("str_int", "(String, Integer)"),
+        ("sym_str", "(Symbol, String)"),
+        ("nilable_str", "(String?, String)"),
+        ("int_record", "(Integer, Item)"),
+    ];
+    let probes: String = cases
+        .iter()
+        .map(|(name, sig)| format!("  #: {sig} -> untyped\n  def self.{name}(a, b)\n    (a <=> b).answer_of_{name}\n  end\n"))
+        .collect();
+    let model = format!(
+        "class Item < ApplicationRecord\n{probes}  #: (Integer, Integer) -> Integer\n  def self.reversed(a, b)\n    (a <=> b) * -1\n  end\nend\n"
+    );
+    let app = app_from_files(&[
+        ("app/models/application_record.rb", "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\nend\n"),
+        ("app/models/item.rb", &model),
+    ]);
+    let diagnostics = diagnose(&app);
+    let answer = |name: &str| {
+        diagnostics.iter().find_map(|d| match &d.kind {
+            DiagnosticKind::SendDispatchFailed { method, recv_ty } if method.as_str() == format!("answer_of_{name}") => {
+                Some(recv_ty.clone())
+            }
+            _ => None,
+        })
+    };
+    let int_or_nil = Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() };
+    for name in ["int", "str", "sym", "int_untyped", "int_rational"] {
+        assert_eq!(answer(name), Some(Ty::Int), "{name}");
+    }
+    for name in ["float", "bool", "int_float", "str_int", "sym_str", "nilable_str", "int_record"] {
+        assert_eq!(answer(name), Some(int_or_nil.clone()), "{name}");
+    }
+    let binops: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| matches!(d.kind, DiagnosticKind::IncompatibleBinop { .. }))
+        .map(|d| d.message.clone())
+        .collect();
+    assert!(binops.is_empty(), "{binops:?}");
+}

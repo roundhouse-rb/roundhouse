@@ -21,6 +21,8 @@ use std::process::Command;
 mod memoized_fields;
 #[path = "support/own_not_nil.rs"]
 mod own_not_nil;
+#[path = "support/spaceship_nan.rs"]
+mod spaceship_nan;
 #[path = "support/app_class_base.rs"]
 mod app_class_base;
 #[path = "support/parenless_calls.rs"]
@@ -533,6 +535,23 @@ fn run_under_tsx(emitted: &Path, script: &str) -> String {
         .expect("run tsx");
     assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
     String::from_utf8_lossy(&run.stdout).trim().to_string()
+}
+
+#[test]
+#[ignore]
+fn real_blog_spaceship_answers_nil_for_nan_under_tsx() {
+    // `Float#<=>` answers nil when a side is NaN, as on CRuby; an Integer
+    // comparison keeps 0 for equal values. The app compiles.
+    let (emitted, errors) = spaceship_nan::overlay().emit(roundhouse::project::BuildTarget::Typescript);
+    assert!(errors.is_empty(), "{errors:?}");
+    let script = format!(
+        "import {{ Article }} from \"./app/models/article.js\";\nconsole.log(JSON.stringify({}));\n",
+        spaceship_nan::CALLS
+    );
+    let out = run_under_tsx(&emitted, &script);
+    assert_eq!(out, spaceship_nan::SUMMARY);
+    std::fs::remove_file(emitted.join("check.ts")).unwrap();
+    assert_tsc_passes("real-blog with Float <=>", &emitted);
 }
 
 #[test]

@@ -30,6 +30,7 @@ pub const PROBE: &str = r#"class TruthProbe
     out << [nil, 0].index { |x| x } << [0, ""].none? { |x| x }
     flags = [0, false, nil, ""]
     out << (flags.first || 5) << (flags.last && 5) << (flags[1] || 5) << (flags.first ? "t" : "f") << flags.select { |f| f }
+    out << ((zero <=> zero) ? "t" : "f")
     out
   end
 end
@@ -37,7 +38,7 @@ end
 
 /// `JSON.generate(TruthProbe.run(0, "", nil, false, [], ["", "a"]))` under CRuby.
 #[allow(dead_code)]
-pub const EXPECTED: &str = r#"["t","t","f","f","t",0,"",5,5,[],5,"x",null,false,false,false,true,true,"if0","t","t",0,9,0,2,0,"both",["","a"],[0,1],[null],0,1,true,true,1,false,0,5,5,"t",[0,""]]"#;
+pub const EXPECTED: &str = r#"["t","t","f","f","t",0,"",5,5,[],5,"x",null,false,false,false,true,true,"if0","t","t",0,9,0,2,0,"both",["","a"],[0,1],[null],0,1,true,true,1,false,0,5,5,"t",[0,""],"t"]"#;
 
 pub fn overlay() -> Overlay {
     emit_and_run::real_blog().write("app/models/truth_probe.rb", PROBE).edit(

@@ -22801,3 +22801,5 @@ mod record_as_json_in_literal;
 mod empty_base_list_override;
 #[path = "emit_and_run/relation_argument.rs"]
 mod relation_argument;
+#[path = "emit_and_run/spaceship_as_integer.rs"]
+mod spaceship_as_integer;

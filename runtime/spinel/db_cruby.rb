@@ -1397,7 +1397,12 @@ module Db
     if cache.nil?
       cache = {}
       conn.instance_variable_set(:@rh_stmt_cache, cache)
+      # Recency apart from the cache: statement => its SQL, by identity,
+      # least recently used first. A hit moves one pointer-keyed entry
+      # instead of deleting and re-inserting the SQL text in `cache`.
+      conn.instance_variable_set(:@rh_stmt_recent, {}.compare_by_identity)
     end
+    recent = conn.instance_variable_get(:@rh_stmt_recent)
     open = conn.instance_variable_get(:@rh_open) || open_statements(conn)
     stmt   = cache[sql]
     cached = true
@@ -1408,21 +1413,21 @@ module Db
     elsif stmt.nil?
       stmt = conn.prepare(sql)
       if cache.size >= STMT_CACHE_CAP
-        # Evict least-recently-used (Ruby Hash is insertion-ordered and
-        # hits below re-insert, so the earliest key is the LRU). Skip
+        # Evict least-recently-used (`recent` is insertion-ordered and
+        # hits below re-insert there, so its earliest key is the LRU). Skip
         # any statement still held by an open handle — closing it
         # under a live cursor would break nested prepare patterns. If
         # everything is somehow in use, insert past the cap (soft
         # bound) rather than close a live statement.
         live = nil
-        cache.each_key do |k|
-          candidate = cache[k]
+        recent.each_key do |candidate|
           next if open.key?(candidate)
-          live = k
+          live = candidate
           break
         end
         unless live.nil?
-          evicted = cache.delete(live)
+          evicted = live
+          cache.delete(recent.delete(live))
           begin
             evicted.close
           rescue StandardError
@@ -1436,11 +1441,12 @@ module Db
         end
       end
       cache[sql] = stmt
+      recent[stmt] = -sql
     else
       # Only a successful release makes a statement idle: it is already
       # reset and unbound. Re-insert to record recency (LRU discipline).
-      cache.delete(sql)
-      cache[sql] = stmt
+      kept = recent.delete(stmt)
+      recent[stmt] = kept.nil? ? -sql : kept
     end
     handle = { stmt: stmt, row: nil, cached: cached, capture: nil, open: open }
     open[stmt] = handle
@@ -1659,6 +1665,8 @@ module Db
         conn ||= current_dbh
         cache = conn.instance_variable_get(:@rh_stmt_cache)
         cache.delete_if { |_sql, cached| cached.equal?(stmt) } if cache
+        recent = conn.instance_variable_get(:@rh_stmt_recent)
+        recent.delete(stmt) if recent
         entry[:cached] = false
       end
     end

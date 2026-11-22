@@ -2760,6 +2760,16 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
             _ => false,
         }
     }
+    // Every receiver the analyzer answers a String's method on: the String, a union with a
+    // String arm (`String?`), a nested params value, a StringInquirer.
+    fn answers_as_string(ty: &crate::ty::Ty) -> bool {
+        match ty {
+            crate::ty::Ty::Str => true,
+            crate::ty::Ty::Class { id, .. } => matches!(id.0.as_str(), crate::analyze::PARAM_VALUE | "ActiveSupport::StringInquirer"),
+            crate::ty::Ty::Union { variants } => variants.iter().any(answers_as_string),
+            _ => false,
+        }
+    }
     // A job's own fields and hooks are runtime/spinel/active_job_serialization.rb's, which only the ruby family loads.
     let parents: crate::det::HashMap<&str, &str> = app
         .library_classes
@@ -2793,9 +2803,16 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     fn visit(expr: &crate::expr::Expr, target: BuildTarget, kernel: &[&str], jobs: &crate::det::HashSet<String>) {
         use crate::expr::ExprNode;
         use crate::ty::Ty;
-        if let ExprNode::Send { recv, method, .. } = &*expr.node {
+        if let ExprNode::Send { recv, method, args, .. } = &*expr.node {
             let recv_ty = recv.as_ref().and_then(|r| r.ty.as_ref());
             let admitted = expr.decisions & crate::expr::KERNEL_CONVERSION != 0;
+            // `s.public_send(:setbyte, i, b)` is typed as the call it names.
+            let sends_setbyte = matches!(method.as_str(), "send" | "public_send" | "__send__")
+                && args.first().is_some_and(|arg| match &*arg.node {
+                    ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => value.as_str() == "setbyte",
+                    ExprNode::Lit { value: crate::expr::Literal::Str { value } } => value == "setbyte",
+                    _ => false,
+                });
             let construct = match (recv, method.as_str()) {
                 (None, "Rational") if kernel.contains(&"Rational") || admitted => Some("Kernel#Rational"),
                 (None, "Integer") if kernel.contains(&"Integer") => Some("Kernel#Integer"),
@@ -2833,6 +2850,10 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
                 (Some(_), "fetch") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#fetch"),
                 (Some(_), "grapheme_clusters") if matches!(recv_ty, Some(Ty::Str)) => Some("String#grapheme_clusters"),
                 (Some(_), "truncate_bytes") if matches!(recv_ty, Some(Ty::Str)) => Some("String#truncate_bytes"),
+                // Typed for the CSRF token's XOR (runtime/ruby/action_controller/authenticity_token.rb, which
+                // only the ruby family and spinel load); no strict runtime writes a String's byte in place.
+                (Some(_), "setbyte") if recv_ty.is_some_and(answers_as_string) => Some("String#setbyte"),
+                (Some(_), _) if sends_setbyte && recv_ty.is_some_and(answers_as_string) => Some("String#setbyte"),
                 (Some(_), "each_slice") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#each_slice"),
                 (Some(_), "grep") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#grep"),
                 (Some(_), "grep_v") if matches!(recv_ty, Some(Ty::Array { .. })) => Some("Array#grep_v"),

@@ -1384,7 +1384,12 @@ fn every_runtime_method_body_concretely_typed() {
     // MEASURED 1006 after separating handle holds from model routing:
     // `Db.hold_slot` remains typed; no additional gradual sites.
     // Raise to 1008, preserving the two-site headroom.
-    const CEILING: usize = 1008;
+    // MEASURED 1009 on an Integer bound value's early answer (main
+    // bf4d4afd8: 1008): `column_bound_value` answers its untyped value
+    // before the two boolean tests when it is an Integer (+1 in
+    // active_record/relation.rb); every other file is unchanged. Main had
+    // no headroom left, so the ceiling is the measure.
+    const CEILING: usize = 1009;
     assert!(
         total_gradual <= CEILING,
         "{total_gradual} Ty::Untyped sites exceeds ceiling of {CEILING}"

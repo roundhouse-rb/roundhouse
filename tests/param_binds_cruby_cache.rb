@@ -220,7 +220,8 @@ begin
     seed = Db.prepare("SELECT 11 AS eviction_ownership_seed")
     Db.finalize(seed)
     cache = eviction_conn.instance_variable_get(:@rh_stmt_cache)
-    evicted = cache.values.first
+    # The least recently used statement, the one the eviction below closes.
+    evicted = eviction_conn.instance_variable_get(:@rh_stmt_recent).keys.first
     real_evicted_close = evicted.method(:close)
     evicted.define_singleton_method(:close) { raise eviction_error }
     real_prepare = eviction_conn.method(:prepare)

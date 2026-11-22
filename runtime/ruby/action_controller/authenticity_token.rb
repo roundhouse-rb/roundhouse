@@ -7,9 +7,10 @@
 # Write-once for every ruby-family target. Strict-target `base.rb`
 # still answers an empty token (no `Current.session`); this file is
 # required from `action_controller.rb`, off those tables, like
-# `current.rb`. Masking is byte XOR — transpilable — and the only
-# primitives below are `MessageDigest.secure_random_bytes`,
-# `hmac_sha256`, and `secure_compare`.
+# `current.rb`, so only the ruby family (CRuby, JRuby, Spinel) compiles
+# it. Masking is byte XOR, and the only primitives below are
+# `MessageDigest.secure_random_bytes`, `hmac_sha256`, and
+# `secure_compare`.
 module ActionController
     module AuthenticityToken
     LENGTH = 32
@@ -18,7 +19,7 @@ module ActionController
     def self.masked
       raw_b64 = ensure_session_token
       return "" if raw_b64.empty?
-      raw = decode(raw_b64)
+      raw = secret_bytes(raw_b64)
       return "" if raw.length != 32
       pad = MessageDigest.secure_random_bytes(32)
       return "" if pad.length != 32
@@ -66,11 +67,40 @@ module ActionController
       ""
     end
 
+    # The session secret's bytes. A page masks one token per form and one
+    # for the csrf meta tag, all from the one secret its session holds:
+    # the last decode is kept in `Thread.current[]` (per fiber on CRuby
+    # and JRuby, per thread on Spinel) and answered again only for the
+    # very String it was decoded from, which a session holds for one
+    # request. Identity first: another session's secret, or the same one
+    # parsed from the next request's cookie, is a different String and is
+    # decoded, so a secret's bytes are only ever compared with the copy
+    # taken from that same String, never with another session's secret.
+    # A String changed in place (`replace`) differs from its copy and is
+    # decoded again. The three stay until the next page's first token
+    # replaces them; after the slot's first decode the copy is written
+    # over the one kept before, so a decode builds no String for it.
+    def self.secret_bytes(encoded)
+      kept = Thread.current[:rh_csrf_secret]
+      return kept[1].to_s if !kept.nil? && encoded.equal?(kept[0]) && encoded == kept[2]
+      raw = decode(encoded)
+      Thread.current[:rh_csrf_secret] = [encoded, raw, kept.nil? ? encoded.dup : kept[2].replace(encoded)]
+      raw
+    end
+
+    # The XOR of two 32-byte strings (`masked` checks the pad's length,
+    # `unmask` slices 32), written over a copy of `a`: one string, where
+    # appending a `chr` per byte built 64 and copied the growing one each
+    # time, for every masked token (a page renders one per form and one
+    # for the csrf meta tag). The work does not depend on the bytes. The
+    # copy is binary whatever `a`'s encoding, so `valid?` counts bytes
+    # when it asks the length; a longer `a` would come back longer and
+    # fail `unmask`'s length check, closed.
     def self.xor(a, b)
-      out = ""
+      out = a.b
       i = 0
       while i < 32
-        out = out + (a.getbyte(i) ^ b.getbyte(i)).chr
+        out.setbyte(i, a.getbyte(i) ^ b.getbyte(i))
         i += 1
       end
       out

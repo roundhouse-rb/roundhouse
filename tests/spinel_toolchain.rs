@@ -228,6 +228,10 @@ mod io_process_constants;
 mod backticks_contract;
 #[path = "spinel_toolchain/backticks.rs"]
 mod backticks;
+#[path = "support/string_setbyte.rs"]
+mod string_setbyte_contract;
+#[path = "spinel_toolchain/string_setbyte.rs"]
+mod string_setbyte;
 #[path = "support/class_side_default.rs"]
 mod class_side_default_contract;
 #[path = "spinel_toolchain/class_side_default.rs"]

@@ -41,6 +41,34 @@ w.count = Object.new
 raise "count Object: #{w.count.inspect}" unless w.count.nil?
 w.count = "5"
 raise "count \"5\": #{w.count.inspect}" unless w.count == 5
+w.count = 7
+raise "count 7: #{w.count.inspect}" unless w.count == 7
+w.count = nil
+raise "count nil: #{w.count.inspect}" unless w.count.nil?
+w.count = true
+raise "count true: #{w.count.inspect}" unless w.count == 1
+w.count = false
+raise "count false: #{w.count.inspect}" unless w.count == 0
+w.ratio = 1.5
+raise "ratio 1.5: #{w.ratio.inspect}" unless w.ratio == 1.5
+w.ratio = 3
+raise "ratio 3: #{w.ratio.inspect}" unless w.ratio == 3.0
+w.ratio = nil
+raise "ratio nil: #{w.ratio.inspect}" unless w.ratio.nil?
+w.ratio = true
+raise "ratio true: #{w.ratio.inspect}" unless w.ratio == 1.0
+w.ratio = false
+raise "ratio false: #{w.ratio.inspect}" unless w.ratio == 0.0
+w.price = 2
+raise "price 2: #{w.price.inspect}" unless w.price == 2.0
+w.price = 2.25
+raise "price 2.25: #{w.price.inspect}" unless w.price == 2.25
+w.price = nil
+raise "price nil: #{w.price.inspect}" unless w.price.nil?
+w.price = true
+raise "price true: #{w.price.inspect}" unless w.price == 1.0
+w.price = false
+raise "price false: #{w.price.inspect}" unless w.price == 0.0
 w.price = :many
 raise "price :many: #{w.price.inspect}" unless w.price == 0.0
 w.price = []

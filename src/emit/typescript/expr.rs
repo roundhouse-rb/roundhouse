@@ -3481,17 +3481,49 @@ fn js_send_inner(
                     }
                     ("<=>", 1) => {
                         let other = js_expr(&args[0]);
+                        // Ruby answers nil when a side is NaN: neither `<`, `>` nor `===` holds then. For any
+                        // other two numbers `===` holds once `<` and `>` do not, so the tail costs nothing.
+                        let equal = Js::synth(JsExpr::Ternary {
+                            cond: Js::binary(Span::synthetic(), "===", synth_ident("__a"), synth_ident("__b")),
+                            then: zero(),
+                            else_: Js::synth(JsExpr::Null),
+                        });
+                        let ordered = Js::synth(JsExpr::Ternary {
+                            cond: Js::binary(Span::synthetic(), "<", synth_ident("__a"), synth_ident("__b")),
+                            then: Js::num(Span::synthetic(), "-1"),
+                            else_: Js::synth(JsExpr::Ternary {
+                                cond: Js::binary(Span::synthetic(), ">", synth_ident("__a"), synth_ident("__b")),
+                                then: Js::num(Span::synthetic(), "1"),
+                                else_: equal,
+                            }),
+                        });
+                        // A side that is not a number (nil, a String, a boolean, from a nilable or untyped side)
+                        // answers nil, and two nil sides 0 (`Object#<=>`), where `<` and `>` would coerce it: null
+                        // reads as 0, "5" as 5. Checked first when a side is not known to be a number.
+                        let number = |ty: Option<&Ty>| matches!(ty, Some(Ty::Int | Ty::Float));
+                        let body = if number(r.ty.as_ref()) && number(args[0].ty.as_ref()) {
+                            ordered
+                        } else {
+                            let not_number = |x: &str| {
+                                let kind = Js::unary(Span::synthetic(), "typeof ", synth_ident(x));
+                                Js::binary(Span::synthetic(), "!==", kind, Js::str(Span::synthetic(), "number"))
+                            };
+                            let is_nil = |x: &str| {
+                                Js::binary(Span::synthetic(), "==", synth_ident(x), Js::synth(JsExpr::Null))
+                            };
+                            Js::synth(JsExpr::Ternary {
+                                cond: Js::binary(Span::synthetic(), "||", not_number("__a"), not_number("__b")),
+                                then: Js::synth(JsExpr::Ternary {
+                                    cond: Js::binary(Span::synthetic(), "&&", is_nil("__a"), is_nil("__b")),
+                                    then: zero(),
+                                    else_: Js::synth(JsExpr::Null),
+                                }),
+                                else_: ordered,
+                            })
+                        };
                         let cmp = Js::synth(JsExpr::Arrow {
                             params: vec![js_param("__a"), js_param("__b")],
-                            body: ArrowBody::Expr(Js::synth(JsExpr::Ternary {
-                                cond: Js::binary(Span::synthetic(), "<", synth_ident("__a"), synth_ident("__b")),
-                                then: Js::num(Span::synthetic(), "-1"),
-                                else_: Js::synth(JsExpr::Ternary {
-                                    cond: Js::binary(Span::synthetic(), ">", synth_ident("__a"), synth_ident("__b")),
-                                    then: Js::num(Span::synthetic(), "1"),
-                                    else_: zero(),
-                                }),
-                            })),
+                            body: ArrowBody::Expr(body),
                             is_async: false,
                         });
                         return Js::call(span, cmp, vec![n(), other]);

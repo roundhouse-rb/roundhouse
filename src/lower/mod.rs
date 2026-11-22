@@ -1770,6 +1770,54 @@ pub(crate) fn for_each_emit_body_ref(app: &crate::App, f: &mut impl FnMut(&crate
     }
 }
 
+/// The name and the name's span of every method the app defines, by `def` or
+/// by an alias: in models (and a `has_many`'s extension), library classes,
+/// the Rails application class, controllers (actions, class methods and
+/// `alias_method`s), and test files (the test class's own methods and the
+/// classes a file defines). These are the holders [`for_each_owned_hook_body_ref`]
+/// and `test_module_roots!` walk the bodies of: a holder added there is added
+/// here too. A model's or a controller's alias is a method only once the
+/// lowering copies it, so it is read from the statement, at its span.
+pub(crate) fn for_each_method_name(app: &crate::App, f: &mut impl FnMut(&crate::ident::Symbol, crate::span::Span)) {
+    use crate::dialect::{Association, ControllerBodyItem, ModelBodyItem};
+    for model in &app.models {
+        for item in &model.body {
+            match item {
+                ModelBodyItem::Method { method, .. } => f(&method.name, method.name_span),
+                ModelBodyItem::Alias { new, span, .. } => f(new, *span),
+                ModelBodyItem::Association { assoc: Association::HasMany { extension, .. }, .. } => {
+                    for method in extension {
+                        f(&method.name, method.name_span);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for class in app.library_classes.iter().chain(&app.rails_application) {
+        for method in &class.methods {
+            f(&method.name, method.name_span);
+        }
+    }
+    for controller in &app.controllers {
+        for item in &controller.body {
+            match item {
+                ControllerBodyItem::Action { action, .. } => f(&action.name, action.name_span),
+                ControllerBodyItem::ClassMethod { method, .. } => f(&method.name, method.name_span),
+                _ => {}
+            }
+        }
+        for (name, _, span) in controller_to_library::alias_methods(controller) {
+            f(&name, span);
+        }
+    }
+    for tm in &app.test_modules {
+        for method in tm.helpers.iter().chain(tm.inner_classes.iter().flat_map(|class| &class.methods)) {
+            f(&method.name, method.name_span);
+        }
+    }
+}
+
 pub use associations::{
     build_has_many_table, resolve_has_many, resolve_has_many_on_local, HasManyRef, HasManyRow,
 };

@@ -2868,6 +2868,89 @@ fn report_ruby_only_sends(app: &App, target: BuildTarget) {
     crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, &kernel, &jobs));
 }
 
+/// `<=>` where the target's emit has no translation for it is refused here,
+/// in one place, call and definition, until the target renders it:
+/// - Elixir, Go, Kotlin, Python, Rust, Swift and C# write the Ruby operator
+///   as it is (`a.<=>(b)`, `fun <=>`, `fn <=>`), which does not build;
+/// - TypeScript renders a numeric receiver (Integer, Float, either with nil)
+///   and refuses `String#<=>` by its own table (`report_typescript_array_sends`);
+///   any other receiver is written as `a.<=>(b)` and does not load;
+/// - Crystal keeps its own `<=>`, which answers an Int32: right as the value
+///   of a `sort`/`min`/`max` block, which wants exactly that, and refused
+///   elsewhere, where the emit declares Integer as Int64 and drops the
+///   parentheses of a nested operator (`(a <=> b) * -1` would order wrong).
+/// The Ruby targets run it as written. Like `report_ruby_only_sends`, the walk
+/// also reads classes these targets do not emit: library classes, the Rails
+/// application class, and a test file's classes on Go, Elixir and Python,
+/// which leave them out.
+fn report_untranslated_spaceship(app: &App, target: BuildTarget) {
+    let typescript = matches!(target, BuildTarget::Typescript | BuildTarget::TypescriptWorker);
+    if !typescript && !matches!(target, BuildTarget::Crystal | BuildTarget::Elixir | BuildTarget::Go
+        | BuildTarget::Kotlin | BuildTarget::Python | BuildTarget::Rust | BuildTarget::Swift | BuildTarget::CSharp) {
+        return;
+    }
+    const DETAIL: &str = "this target's emit has no translation for the comparison operator";
+    // A `def <=>` (or an alias named `<=>`) is refused on each of these targets, wherever the app defines a method
+    // (`lower::for_each_method_name`). TypeScript too: it drops one from a model, and writes it as it is in a
+    // controller's action dispatch and in a `has_many` extension.
+    crate::lower::for_each_method_name(app, &mut |name, span| {
+        if name.as_str() == "<=>" {
+            emit::diagnostics::report_unsupported(span, target.as_str(), "def <=>", DETAIL);
+        }
+    });
+    // What the TypeScript emit renders or refuses itself: a number, or a String (its own table).
+    fn typescript_handles(ty: Option<&crate::ty::Ty>) -> bool {
+        use crate::ty::Ty;
+        let inner: Vec<&Ty> = match ty {
+            Some(Ty::Union { variants }) => variants.iter().filter(|v| !matches!(v, Ty::Nil)).collect(),
+            Some(t) => vec![t],
+            None => vec![],
+        };
+        !inner.is_empty()
+            && (inner.iter().all(|t| matches!(t, Ty::Int | Ty::Float)) || inner.iter().all(|t| matches!(t, Ty::Str)))
+    }
+    fn is_spaceship(expr: &crate::expr::Expr) -> bool {
+        matches!(&*expr.node, crate::expr::ExprNode::Send { recv: Some(_), method, args, .. }
+            if method.as_str() == "<=>" && args.len() == 1)
+    }
+    // The value of a block: its last statement.
+    fn block_value(body: &crate::expr::Expr) -> &crate::expr::Expr {
+        match &*body.node {
+            crate::expr::ExprNode::Seq { exprs } if !exprs.is_empty() => block_value(&exprs[exprs.len() - 1]),
+            _ => body,
+        }
+    }
+    fn visit(expr: &crate::expr::Expr, target: BuildTarget, comparator: Option<crate::span::Span>) {
+        use crate::expr::ExprNode;
+        if let ExprNode::Send { recv: Some(r), .. } = &*expr.node {
+            if is_spaceship(expr) {
+                let renders = match target {
+                    BuildTarget::Typescript | BuildTarget::TypescriptWorker => typescript_handles(r.ty.as_ref()),
+                    BuildTarget::Crystal => comparator == Some(expr.span),
+                    _ => false,
+                };
+                if !renders {
+                    emit::diagnostics::report_unsupported(expr.span, target.as_str(), "<=>", DETAIL);
+                }
+            }
+        }
+        // A comparator block's own `<=>` (Crystal's sort, min and max want its Int32).
+        let inner = match &*expr.node {
+            ExprNode::Send { method, block: Some(b), .. }
+                if matches!(method.as_str(), "sort" | "sort!" | "min" | "max" | "minmax") =>
+            {
+                match &*b.node {
+                    ExprNode::Lambda { body, .. } if is_spaceship(block_value(body)) => Some(block_value(body).span),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        expr.node.for_each_child(&mut |child| visit(child, target, inner.or(comparator)));
+    }
+    crate::lower::for_each_emit_body_ref(app, &mut |expr| visit(expr, target, None));
+}
+
 /// `Digest::BLAKE3` is the digest gem's from 3.3.0 (Ruby 4.0 bundles
 /// 3.2.1, without it). The CRuby tree declares the gem
 /// (`apply_digest_gem`) and the Rust target hashes over the `blake3`
@@ -3891,6 +3974,7 @@ fn target_files_inner(
     report_native_ruby_syntax(app, target);
     report_self_bindings(app, target);
     report_ruby_only_sends(app, target);
+    report_untranslated_spaceship(app, target);
     report_digest_blake3(app, target);
     report_test_unknown_constants(app, target);
     report_boot_program(app, target);

@@ -875,27 +875,29 @@ fn collect_attr_accessor_methods(controller: &Controller) -> Vec<MethodDef> {
 /// The `alias_method :new, :old` pairs in a controller's class body, in
 /// declaration order, as `(new, old)`.
 fn alias_method_pairs(controller: &Controller) -> Vec<(Symbol, Symbol)> {
+    alias_methods(controller).map(|(new_name, old_name, _)| (new_name, old_name)).collect()
+}
+
+/// [`alias_method_pairs`] with the span of each statement (`alias_method`,
+/// or the `alias` keyword, which ingest records as one).
+pub(crate) fn alias_methods(controller: &Controller) -> impl Iterator<Item = (Symbol, Symbol, crate::span::Span)> + '_ {
     use crate::expr::Literal;
     let sym = |e: &Expr| match &*e.node {
         ExprNode::Lit { value: Literal::Sym { value } } => Some(value.clone()),
         _ => None,
     };
-    controller
-        .body
-        .iter()
-        .filter_map(|item| {
-            let ControllerBodyItem::Unknown { expr, .. } = item else { return None };
-            let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
-                return None;
-            };
-            if method.as_str() != "alias_method" {
-                return None;
-            }
-            let new_name = sym(args.first()?)?;
-            let old_name = sym(args.get(1)?)?;
-            Some((new_name, old_name))
-        })
-        .collect()
+    controller.body.iter().filter_map(move |item| {
+        let ControllerBodyItem::Unknown { expr, .. } = item else { return None };
+        let ExprNode::Send { recv: None, method, args, .. } = &*expr.node else {
+            return None;
+        };
+        if method.as_str() != "alias_method" {
+            return None;
+        }
+        let new_name = sym(args.first()?)?;
+        let old_name = sym(args.get(1)?)?;
+        Some((new_name, old_name, expr.span))
+    })
 }
 
 fn apply_alias_methods(controller: &Controller, methods: &mut Vec<MethodDef>) {

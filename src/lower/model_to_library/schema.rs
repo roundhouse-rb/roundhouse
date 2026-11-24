@@ -2662,9 +2662,10 @@ fn prev_was_name(col: &Column) -> Symbol {
 /// previous value out of the last save's diff, whose entries are
 /// `[prev, value]` pairs.
 ///
-/// Answers nil when the column did not change, which is Rails: the
-/// diff has no entry, and `attribute_previously_was` reads through it
-/// rather than falling back to the current value.
+/// When the last save did not change the column, the diff has no
+/// entry, and `attribute_previously_was` answers the value the column
+/// held before that save (the baseline the save left), which is Rails.
+/// A record with no save yet answers nil.
 ///
 /// Same `saved_changes` seam as the predicates, so the ruby-family
 /// trees get the real snapshot diff from the connection.rb reopen and

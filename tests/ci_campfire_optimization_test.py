@@ -1,4 +1,4 @@
-"""Ruby campfire-suite runs may overlap without changing the serial contract.
+"""Ruby app-suite runs may overlap without changing the serial contract.
 
 Parallelism is acceptable only when each file still sees the serial
 launch: the default SECRET_KEY_BASE, combined stdout/stderr order, the
@@ -18,7 +18,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SUITE = ROOT / "scripts/campfire-suite"
+SUITE = ROOT / "scripts/app-suite"
 
 SHIM = textwrap.dedent(
     """\
@@ -47,9 +47,9 @@ def executable(path: Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-class CampfireSuiteParallelTests(unittest.TestCase):
+class AppSuiteParallelTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="campfire-suite-opt-")
+        self.tmp = tempfile.TemporaryDirectory(prefix="app-suite-opt-")
         self.addCleanup(self.tmp.cleanup)
         self.emit = Path(self.tmp.name) / "emit"
         write(self.emit / "db/seed.sql", "")
@@ -206,7 +206,7 @@ class CampfireSuiteParallelTests(unittest.TestCase):
         self.assertEqual(serial_note, note)
         self.assertIn(f"uid={os.getuid()}", note)
         self.assertIn(f"euid={os.geteuid()}", note)
-        self.assertIn("secret=campfire-suite-secret", note)
+        self.assertIn("secret=app-suite-secret", note)
         # Capability lines from the test process, not from the mount helper.
         # Inherited and ambient must be clear; the bounding set must still
         # be the caller's, which an ordinary process also has.
@@ -239,7 +239,7 @@ class CampfireSuiteParallelTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertNotIn("ruby files ran in", result.stdout)
         self.assertIn("PASS|test/models/alpha_test|1|1|", result.tally_path.read_text())
-        self.assertIn("secret=campfire-suite-secret", self._note("alpha"))
+        self.assertIn("secret=app-suite-secret", self._note("alpha"))
         self.assertIn(f"uid={os.getuid()}", self._note("alpha"))
 
     def test_missing_unshare_falls_back_to_serial(self):
@@ -260,7 +260,7 @@ class CampfireSuiteParallelTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertNotIn("ruby files ran in", result.stdout)
         self.assertIn("PASS|test/models/alpha_test|1|1|", result.tally_path.read_text())
-        self.assertIn("secret=campfire-suite-secret", self._note("alpha"))
+        self.assertIn("secret=app-suite-secret", self._note("alpha"))
 
     def test_worker_mount_failure_cannot_run_with_shared_storage(self):
         self._require_mounts()

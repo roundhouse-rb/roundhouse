@@ -1438,7 +1438,7 @@ class TestBase
   # `vips_loader_policy_test` skips the formats the local libvips did
   # not compile in, and the set differs by host: two on a Linux runner
   # where this laptop has one. Counted as neither by the shim, and
-  # taken out of both sides of the tally by scripts/campfire-suite, so
+  # taken out of both sides of the tally by scripts/app-suite, so
   # the number a run reports is what it actually checked.
   def skip(message = "skipped")
     raise TestSkipped, message

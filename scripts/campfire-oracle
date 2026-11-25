@@ -3,7 +3,7 @@
 #
 # The reference side of the campfire benchmark, and the oracle the
 # conformance lane has never had: every number this repo publishes about
-# campfire so far describes the EMIT alone (scripts/campfire-suite runs
+# campfire so far describes the EMIT alone (scripts/app-suite runs
 # campfire's tests against our output and never boots Rails at all). A
 # throughput claim needs the other operand, and a DOM-equivalence claim
 # needs it twice — see [[feedback_build_the_oracle_first]].

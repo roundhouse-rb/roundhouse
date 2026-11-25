@@ -317,7 +317,7 @@ work happening in parallel**:
 Emit once, then iterate against the retained tree:
 
 ```
-scripts/campfire-suite --target spinel --jobs 8 --out /tmp/wm-emit \
+scripts/app-suite --app campfire --target spinel --jobs 8 --out /tmp/wm-emit \
   --filter 'opengraph|webhook_test|unfurl|bot_test|messages_controller' \
   --tally /tmp/wm-tally.txt --fail-log /tmp/wm-fail.txt
 ```

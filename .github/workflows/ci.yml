@@ -57,6 +57,10 @@ env:
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
   CAMPFIRE_SHA: c8f74a0b0e1e93146c4d7c1d6ac80c9079682216
+  # The second app on the conformance floor (basecamp/writebook, MIT),
+  # pinned to the SHA bench/writebook/rails-baseline.json records Rails'
+  # own run at — moving one without the other makes the row join refuse.
+  WRITEBOOK_SHA: b31aa0d7885ba156ff1edff1af6b6b57f2e46f0b
   # roundhouse-rb/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
@@ -1622,7 +1626,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      # No setup-rust: strict-emit and campfire-suite use the shared debug binary.
+      # No setup-rust: strict-emit and app-suite use the shared debug binary.
       - uses: actions/download-artifact@v8
         with:
           name: roundhouse-debug-bin
@@ -1644,7 +1648,7 @@ jobs:
       # useragent arrives with that gem.
       # ruby-vips: an FFI binding, so libvips has to be installed too.
       # ffmpeg: the video previewer extracts a poster frame.
-      - &campfire-suite-apt
+      - &app-suite-apt
         name: Install libvips (ruby-vips binds it through FFI) and ffmpeg
         # libvips42 and ffmpeg are a slow apt install on a shared runner.
         timeout-minutes: 20
@@ -1654,12 +1658,12 @@ jobs:
       # concurrent-ruby, net-http-persistent, web-push: WebPush::Pool
       # loads them. concurrent-ruby is named even though sentry-ruby
       # also depends on it.
-      - &campfire-suite-gems
+      - &app-suite-gems
         name: Install the gems the emitted suite loads
         # rack: the ruby-family swap of runtime/rack_utils.rb requires it.
         run: gem install sqlite3 bcrypt nokogiri webmock mocha rqrcode ruby-vips sentry-ruby platform_agent concurrent-ruby net-http-persistent web-push rails-html-sanitizer rack --no-document
       - name: Verify the suite's bcrypt test configuration
-        run: ruby tests/campfire_suite_bcrypt.rb
+        run: ruby tests/app_suite_bcrypt.rb
       - name: Fetch once-campfire at the pinned SHA
         run: |
           set -euo pipefail
@@ -1702,11 +1706,15 @@ jobs:
           if [ "$errors" -lt "$CEILING_ERRORS" ]; then
             echo "::notice::ceiling is stale — lower CEILING_ERRORS to $errors"
           fi
-      # --json feeds the published page. --fail-log attributes each
-      # unpassed test to its own message, not the file's first error.
+      # --json feeds the published page, and adds the row join against
+      # Rails' own run (bench/campfire/rails-baseline.json). --fail-log
+      # attributes each unpassed test to its own message, not the file's
+      # first error. --sha is the pin: the tarball has no .git.
       - name: Run campfire's suite against the emit
         run: |
-          scripts/campfire-suite \
+          scripts/app-suite \
+            --app campfire \
+            --sha "$CAMPFIRE_SHA" \
             --tally /tmp/campfire-tally.txt \
             --fail-log /tmp/campfire-failures.txt \
             --json /tmp/campfire-suite/summary.json \
@@ -1762,6 +1770,153 @@ jobs:
         with:
           name: campfire-conformance-summary
           path: /tmp/campfire-suite/summary.json
+          if-no-files-found: warn
+
+  # The second app on the same floor, and the reason it is not one app's
+  # lane: a compiler claim resting on a single app is a claim about that
+  # app. Writebook is the same shape as Campfire (Rails, Minitest, Active
+  # Storage) with a different codebase, so a construct the emit handles
+  # for one and drops for the other shows up here as a smaller
+  # denominator rather than as nobody's problem.
+  writebook-conformance:
+    needs: [build-roundhouse, plan]
+    # Require the producer's debug binary artifact id so a missing
+    # upload cannot skip into a green compact gate (#317).
+    if: ${{ contains(fromJSON(needs.plan.outputs.jobs), 'writebook-conformance') && needs.build-roundhouse.outputs.roundhouse-bin-artifact-id != '' }}
+    runs-on: ubuntu-latest
+    # 45m: the same libvips apt install Campfire pays for, then the emit.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v7
+      # No setup-rust: strict-emit and app-suite use the shared debug binary.
+      - uses: actions/download-artifact@v8
+        with:
+          name: roundhouse-debug-bin
+          path: roundhouse-debug-bin
+      - *stage-roundhouse-debug-bin
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ env.MRI_RUBY }}
+      # The suite runs each file with `ruby -Itest`, so these gems have to
+      # be on the default gem path; a bundler cache is not seen. The apt
+      # and gem lists are Campfire's (same shared cache key, and Writebook
+      # boots the same rails-family code), plus redcarpet and rouge in the
+      # step below: Writebook renders Markdown and highlights it.
+      - *app-suite-apt
+      - *app-suite-gems
+      - name: Install redcarpet and rouge (Writebook's Markdown)
+        run: gem install redcarpet rouge --no-document
+      - name: Verify the suite's bcrypt test configuration
+        run: ruby tests/app_suite_bcrypt.rb
+      - name: Fetch Writebook at the pinned SHA
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://codeload.github.com/basecamp/writebook/tar.gz/${WRITEBOOK_SHA}" -o /tmp/writebook.tar.gz
+          mkdir -p /tmp/writebook
+          tar -xzf /tmp/writebook.tar.gz -C /tmp/writebook --strip-components=1
+      # Strict emit, separate from the suite: no `--allow-unsupported`, so
+      # an unsupported construct is an error. The recipe declares
+      # `allow_unsupported`, so the suite below emits through the same
+      # findings as warnings — this is the ceiling they may not exceed.
+      #
+      # 49 is what the spinel target reports at b31aa0d on this compiler
+      # (16 unsupported/syntax + 33 type errors). It is a regression
+      # ceiling, not a target: when the count drops the step prints the
+      # number to lower it to, and it must never be raised without a
+      # change that explains the new gap.
+      - name: Enforce the strict-emit ceiling
+        env:
+          CEILING_ERRORS: 49
+        run: |
+          set -uo pipefail
+          test -n "${ROUNDHOUSE_BIN:-}"
+          test -x "$ROUNDHOUSE_BIN"
+          # Never cargo run: prove the producer binary is the one that emits.
+          status=0
+          "$ROUNDHOUSE_BIN" \
+            --target spinel /tmp/writebook -o /tmp/writebook-spinel \
+            > /tmp/writebook-strict.log 2>&1 || status=$?
+          errors=$(grep -c 'error\[' /tmp/writebook-strict.log || true)
+          # An ingest abort prints no `error[` line, so a count of zero
+          # with a nonzero exit is that. Counted errors at or below the
+          # ceiling are the pin's remaining gaps, not an abort.
+          if [ "$status" -ne 0 ] && [ "$errors" -eq 0 ]; then
+            tail -5 /tmp/writebook-strict.log
+            echo "::error::writebook strict emit failed (exit $status) without a counted error: ingest stopped before analysis"
+            exit 1
+          fi
+          echo "writebook strict emit (spinel, no --allow-unsupported): $errors errors"
+          echo "ceiling: $CEILING_ERRORS"
+          grep 'error\[' /tmp/writebook-strict.log || true
+          if [ "$errors" -gt "$CEILING_ERRORS" ]; then
+            echo "::error::writebook strict emit regressed: $errors > $CEILING_ERRORS (each line above is a modelling gap, not app breakage)"
+            exit 1
+          fi
+          if [ "$errors" -lt "$CEILING_ERRORS" ]; then
+            echo "::notice::ceiling is stale — lower CEILING_ERRORS to $errors"
+          fi
+      # --json feeds the join against Rails' own run
+      # (bench/writebook/rails-baseline.json) and the published page;
+      # --fail-log attributes each unpassed test to its own message;
+      # --sha is the pin, since the tarball has no .git.
+      - name: Run writebook's suite against the emit
+        run: |
+          scripts/app-suite \
+            --app writebook \
+            --sha "$WRITEBOOK_SHA" \
+            --tally /tmp/writebook-tally.txt \
+            --fail-log /tmp/writebook-failures.txt \
+            --json /tmp/writebook-suite/summary.json \
+            /tmp/writebook
+      # The harness reports a count and does not gate on it. A count under
+      # the floor fails this step; a count over it prints a notice so the
+      # floor can be raised. The pin is `WRITEBOOK_SHA`.
+      - name: Enforce the floor
+        env:
+          # 104 tests passed, 8 files green at b31aa0d.
+          FLOOR_TESTS: 104
+          FLOOR_FILES: 8
+        run: |
+          set -euo pipefail
+          tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/writebook-tally.txt)
+          total=$(awk -F'|' '{t += $4} END {print t+0}' /tmp/writebook-tally.txt)
+          files=$(grep -c '^PASS' /tmp/writebook-tally.txt || true)
+          echo "writebook conformance: $tests of $total tests, $files of $(grep -c . /tmp/writebook-tally.txt) files green"
+          echo "floor: $FLOOR_TESTS tests / $FLOOR_FILES files"
+          rc=0
+          if [ "$tests" -lt "$FLOOR_TESTS" ]; then
+            echo "::error::writebook tests regressed: $tests < $FLOOR_TESTS (see the tally artifact for the first error per file)"
+            rc=1
+          fi
+          if [ "$files" -lt "$FLOOR_FILES" ]; then
+            echo "::error::writebook green files regressed: $files < $FLOOR_FILES"
+            rc=1
+          fi
+          if [ "$tests" -gt "$FLOOR_TESTS" ] || [ "$files" -gt "$FLOOR_FILES" ]; then
+            echo "::notice::floor is stale — raise FLOOR_TESTS/FLOOR_FILES to $tests/$files"
+          fi
+          exit $rc
+      # Always: a regression is exactly when the per-file first-error
+      # column is worth reading, and that is the run where the step above
+      # failed.
+      - name: Upload the tally
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: writebook-conformance-tally
+          path: /tmp/writebook-tally.txt
+          if-no-files-found: warn
+      # The site job's input, `always()` for the campfire step's reason: a
+      # run that trips the floor is the run whose published worklist
+      # someone needs to read, and assembly does not gate on this job's
+      # conclusion.
+      - name: Upload the conformance summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: writebook-conformance-summary
+          path: /tmp/writebook-suite/summary.json
           if-no-files-found: warn
 
   # -------------------------------------------------------------------
@@ -4196,7 +4351,7 @@ jobs:
           fi
       - name: Render compiled campfire conformance page
         if: steps.fetch-campfire-suite-spinel.outputs.compiled_data == 'present'
-        run: scripts/campfire-suite-report _site/bench/campfire-suite-spinel _site/bench/campfire-suite-spinel/index.html
+        run: scripts/app-suite-report _site/bench/campfire-suite-spinel _site/bench/campfire-suite-spinel/index.html
 
       # The per-target archives, for the e2e-<target> jobs to download and
       # boot — the exact bytes published to roundhouse-rb.dev.
@@ -4309,12 +4464,13 @@ jobs:
         run: cd docs-site && bundle exec jekyll build --destination "$RUNNER_TEMP/docs-site"
 
   assemble-site:
-    # campfire-conformance is here for ORDERING ONLY — its summary.json is
-    # this job's input. Assembly can render a failed conformance report
-    # for triage, but a failed compact floor still prevents Pages deploy.
-    # A missing summary degrades to a skipped render and warning here;
-    # assembly does not override the separate publication guards.
-    needs: [build-site, build-wasm, campfire-conformance, campfire-archive-build, archive-results, plan]
+    # campfire-conformance and writebook-conformance are here for ORDERING
+    # ONLY — their summary.json files are this job's input. Assembly can
+    # render a failed conformance report for triage, but a failed compact
+    # floor still prevents Pages deploy. A missing summary degrades to a
+    # skipped render and warning here; assembly does not override the
+    # separate publication guards.
+    needs: [build-site, build-wasm, campfire-conformance, writebook-conformance, campfire-archive-build, archive-results, plan]
     if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && needs.build-site.result == 'success' && needs.build-wasm.result == 'success' && needs.archive-results.result == 'success' }}
     # actions: read lets Progress list this workflow's runs on main (its CI trend);
     # the scheduled caller already grants it.
@@ -4402,10 +4558,31 @@ jobs:
       - name: Render campfire conformance page
         run: |
           if [ -f _site/bench/campfire-suite/summary.json ]; then
-            scripts/campfire-suite-report _site/bench/campfire-suite _site/bench/campfire-suite/index.html
+            scripts/app-suite-report _site/bench/campfire-suite _site/bench/campfire-suite/index.html
           else
             echo "::warning::campfire conformance summary unavailable; skipping conformance page render"
             rm -rf _site/bench/campfire-suite
+            rmdir _site/bench 2>/dev/null || true
+          fi
+
+      # Writebook conformance — the second app on the same floor, same
+      # contract. `scripts/app-suite-report` names the app from the summary
+      # and serves both, so this is the campfire step with another artifact
+      # and another directory.
+      - name: Fetch writebook conformance data
+        id: fetch-writebook-suite
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: writebook-conformance-summary
+          path: _site/bench/writebook-suite
+      - name: Render writebook conformance page
+        run: |
+          if [ -f _site/bench/writebook-suite/summary.json ]; then
+            scripts/app-suite-report _site/bench/writebook-suite _site/bench/writebook-suite/index.html
+          else
+            echo "::warning::writebook conformance summary unavailable; skipping conformance page render"
+            rm -rf _site/bench/writebook-suite
             rmdir _site/bench 2>/dev/null || true
           fi
 
@@ -4505,7 +4682,7 @@ jobs:
     # can still require them. Unselected PR skips must not fail this gate.
     # cancelled() overrides GitHub's implicit success(): evaluate skipped
     # or failed needs, but do not schedule gates after workflow cancellation.
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, writebook-conformance, campfire-compare]
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -4525,7 +4702,7 @@ jobs:
   # Informational validation summary; no branch-protection or merge policy.
   ci-summary:
     name: CI summary
-    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain-plan, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, docs-site, assemble-site]
+    needs: [plan, generate-fixture, unit-build, unit, build-roundhouse, store-check, compare, compare-ruby, compare-ruby-next, browser-smoke-typescript, campfire-conformance, writebook-conformance, campfire-compare, compact-required, compare-extra, compare-jruby, build-wasm, browser-smoke-ide, build-site, smoke, smoke-extra, spinel-build, spinel-framework, sidekiq-live, campfire-spinel-build, campfire-spinel-compare, campfire-spinel-db, spinel-toolchain-build, spinel-toolchain-plan, spinel-toolchain, spinel-compare, spinel-smoke, campfire-archive-build, campfire-smoke, campfire-smoke-docker, spinel-timings, archive-results, docs-site, assemble-site]
     # Report selected failures and expected skips; stop on workflow cancellation.
     if: ${{ !cancelled() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest

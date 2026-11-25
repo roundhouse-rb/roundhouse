@@ -18,10 +18,11 @@
 //!     the same reason.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use roundhouse::emit::ruby;
 use roundhouse::ingest::ingest_app_from_tree;
+use roundhouse::project::BuildTarget;
 
 fn shim() -> String {
     let files: HashMap<PathBuf, Vec<u8>> = [
@@ -141,4 +142,78 @@ fn a_failing_teardown_after_a_failing_test_counts_once() {
     assert!(src.contains("__ok = true"), "{src}");
     assert!(src.contains("__ok = false"), "{src}");
     assert!(src.contains("if __ok"), "{src}");
+}
+
+/// The whole emitted tree for one target, so the assertion covers what
+/// the ruby and spinel lanes actually ship rather than the shared
+/// `emit_spinel` entry (which is the spinel text).
+fn target_test_file(target: BuildTarget) -> String {
+    let files: HashMap<PathBuf, Vec<u8>> = [
+        (
+            PathBuf::from("db/schema.rb"),
+            b"ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"body\", null: false\n  end\nend\n".to_vec(),
+        ),
+        (
+            PathBuf::from("app/models/post.rb"),
+            b"class Post < ApplicationRecord\nend\n".to_vec(),
+        ),
+        (
+            PathBuf::from("test/models/post_test.rb"),
+            b"require \"test_helper\"\n\nclass PostTest < ActiveSupport::TestCase\n  test \"one\" do\n    assert_equal 1, Post.count\n  end\nend\n".to_vec(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    let mut app = ingest_app_from_tree(files).expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files =
+        roundhouse::project::target_files(&app, Path::new("."), target).expect("target files");
+    // The two trees lay the same test out at different paths
+    // (`test/models/post_test.rb` on ruby, `test/post_test.rb` on
+    // spinel, which flattens the suite), so match on the stem.
+    let paths: Vec<String> = files
+        .iter()
+        .map(|(p, _)| p.clone())
+        .filter(|p| p.contains("post_test"))
+        .collect();
+    files
+        .into_iter()
+        .find(|(path, _)| path.ends_with("post_test.rb"))
+        .map(|(_, content)| content)
+        .unwrap_or_else(|| panic!("no post_test.rb emitted for {}: {paths:?}", target.as_str()))
+}
+
+/// A `FAIL` line carries the message only, so a suite ranking its walls
+/// cannot tell where a failure happened. The ruby and jruby trees name
+/// the exception class and the first backtrace frame on a SECOND line
+/// (the `FAIL` line's own shape is pinned by parsers that split it on
+/// its first `: `), with the emit root stripped so it reads relative.
+///
+/// Spinel AOT compiles that same shim text and has no
+/// `Exception#backtrace`, so its tree must not grow the line.
+#[test]
+fn only_the_ruby_tree_names_the_exception_and_where_it_was_raised() {
+    for target in [BuildTarget::Ruby, BuildTarget::Jruby] {
+        let src = target_test_file(target);
+        assert!(
+            src.contains("puts \"  at \" + __e.class.name.to_s + \" \" + __frame"),
+            "{} must print the exception class and frame:\n{src}",
+            target.as_str(),
+        );
+        assert!(
+            src.contains("__backtrace = __e.backtrace"),
+            "{} must read the backtrace:\n{src}",
+            target.as_str(),
+        );
+        assert!(
+            src.contains("__frame = __frame.delete_prefix(Dir.pwd + \"/\")"),
+            "{} must strip the emit root:\n{src}",
+            target.as_str(),
+        );
+    }
+    let spinel = target_test_file(BuildTarget::Spinel);
+    assert!(
+        !spinel.contains("backtrace") && !spinel.contains("  at "),
+        "spinel AOT has no Exception#backtrace:\n{spinel}",
+    );
 }

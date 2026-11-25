@@ -119,7 +119,7 @@ if (( STUBS )) && [[ -f "$REPO_ROOT/scripts/campfire-walk-stubs.rb" ]]; then
     # (main.rb is boot plus the server), taking `app/models` — the first
     # emitted code to reference an unmodeled base class at LOAD time,
     # which the stubs have to precede — out of the file this used to
-    # patch. Same splice scripts/campfire-suite makes, for the same reason.
+    # patch. Same splice scripts/app-suite makes, for the same reason.
     ruby -e '
       path = ARGV[0]
       src = File.read(path)

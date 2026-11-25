@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # scripts/campfire-suite-publish — one run of the COMPILED conformance
-# lane, written where the bench box already serves it.
+# lane for campfire, written where the bench box already serves it. The
+# cron wrapper's path is why this script keeps its campfire name while
+# the suite it calls is now generic (scripts/app-suite --app campfire).
 #
 # THE SPLIT: REPO LOGIC HERE, MACHINE LAYOUT THERE. What a publisher
 # does — pin the app, sweep, keep the compile logs, repoint `latest`,
@@ -95,7 +97,8 @@ echo "campfire-suite-publish: $STAMP → $OUT"
 echo "  spinel:  $(spinel --version 2>&1 | head -1)"
 echo "  app:     $APP $(git -C "$APP" rev-parse --short HEAD 2>/dev/null)"
 
-scripts/campfire-suite \
+scripts/app-suite \
+    --app campfire \
     --target spinel \
     --jobs "$JOBS" \
     --out "$EMIT" \
@@ -124,7 +127,7 @@ if [[ -d "$EMIT/build-logs" ]]; then
 fi
 rm -rf "$EMIT"
 
-scripts/campfire-suite-report "$OUT" "$OUT/index.html" || exit 1
+scripts/app-suite-report "$OUT" "$OUT/index.html" || exit 1
 
 ln -sfn "$STAMP" "$OUT_ROOT/latest"
 echo "campfire-suite-publish: published $OUT_ROOT/latest -> $STAMP"

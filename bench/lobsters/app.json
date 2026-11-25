@@ -1,0 +1,8 @@
+{
+  "name": "lobsters",
+  "repo": "lobsters/lobsters",
+  "src": "~/git/lobsters",
+  "framework": "rspec",
+  "suites": ["spec/models"],
+  "prepare": ["cp config/database.yml.sample config/database.yml", "bin/rails db:prepare"]
+}

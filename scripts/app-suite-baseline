@@ -1,0 +1,207 @@
+#!/usr/bin/env ruby
+# scripts/app-suite-baseline — run an app's OWN test suite on Rails and
+# record one row per test, the Rails half of scripts/app-suite's
+# row-by-row comparison.
+#
+# The emit side reports what it ran; only Rails can say what the suite
+# HAS. A test Rails runs and the emit never generates is the quietest
+# gap there is — no failure, no diagnostic, a smaller denominator — and
+# the join can only see it against this list. So can a test that fails
+# on Rails too (a missing system library, an order-dependent fixture):
+# that is the environment, not the compiler, and the join sets it aside.
+#
+# RECORDED ONCE PER PIN. The baseline is a function of the app's SHA and
+# the Ruby that ran it, not of Roundhouse, so it is committed as
+# bench/<app>/rails-baseline.json and re-recorded when the pin moves.
+# CI never boots the app's Rails (Campfire and Writebook track Rails
+# main) to compare against it.
+#
+# THE CHECKOUT IS NEVER TOUCHED. The suite runs in a scratch copy, where
+# two things may differ from the app's own files, both recorded:
+#   * `.ruby-version` names the Ruby running this script. The apps pin
+#     their own (Writebook 3.4.x), and a Gemfile `ruby file:` refuses any
+#     other; the emit runs on this Ruby, so the baseline does too.
+#   * the recipe's `rails_extra_gems` are appended to the Gemfile. Gems
+#     that left Ruby 4's default set (`benchmark`, reached by mini_magick)
+#     are the case.
+# A minitest app's test/test_helper.rb also gains one line requiring
+# scripts/lib/minitest/app_suite_plugin.rb, the reporter that writes the
+# rows; it changes no test.
+#
+# Usage:  scripts/app-suite-baseline --app NAME [options] [APP_PATH]
+#
+#   --app NAME    recipe bench/NAME/app.json (required)
+#   APP_PATH      the app checkout (default: the recipe's `src`)
+#   --sha S       record S as the app's SHA (CI tarballs have no .git)
+#   --out FILE    where to write (default bench/NAME/rails-baseline.json)
+#   --bundle DIR  BUNDLE_PATH for the app's gems
+#                 (default build/app-suite/NAME/bundle)
+#   --suite PATH  an rspec suite path, relative to the checkout
+#                 (repeatable; default: the recipe's `suites`). The
+#                 caller passes the SAME paths it ran on the emit side,
+#                 so the two runs describe one suite — lobsters-specs
+#                 hands its own --suite through here.
+#   --keep        keep the scratch copy and print its path
+#
+# Recipe keys read here: framework (minitest | rspec), src, suites
+# (rspec paths, overridden by --suite), rails_extra_gems, prepare (shell
+# commands run in the copy with RAILS_ENV=test before the suite).
+#
+# Rows: name (`Class#test_x` as Minitest names it; rspec: the full
+# description), file, line, status (pass | fail | error | skip),
+# exception, message (first line), location.
+
+require "json"
+require "fileutils"
+require "open3"
+require "time"
+require "tmpdir"
+
+ROOT = File.expand_path("..", __dir__)
+PLUGIN_DIR = File.join(ROOT, "scripts", "lib")
+
+opts = { app: nil, src: nil, sha: nil, out: nil, bundle: nil, suites: [], keep: false }
+args = ARGV.dup
+until args.empty?
+  case (a = args.shift)
+  when "--app"    then opts[:app] = args.shift
+  when "--sha"    then opts[:sha] = args.shift
+  when "--out"    then opts[:out] = File.expand_path(args.shift)
+  when "--bundle" then opts[:bundle] = File.expand_path(args.shift)
+  when "--suite"  then opts[:suites] << args.shift.to_s
+  when "--keep"   then opts[:keep] = true
+  when "-h", "--help"
+    puts File.readlines(__FILE__).drop(1).take_while { _1.start_with?("#") }.map { _1.sub(/^# ?/, "") }
+    exit 0
+  when /\A-/ then abort "app-suite-baseline: unknown flag #{a}"
+  else opts[:src] = File.expand_path(a)
+  end
+end
+abort "app-suite-baseline: --app NAME is required" unless opts[:app]
+recipe_path = File.join(ROOT, "bench", opts[:app], "app.json")
+abort "app-suite-baseline: no recipe at #{recipe_path}" unless File.exist?(recipe_path)
+recipe = JSON.parse(File.read(recipe_path))
+src = opts[:src] || File.expand_path(recipe.fetch("src"))
+abort "app-suite-baseline: no app at #{src}" unless File.directory?(src)
+out = opts[:out] || File.join(ROOT, "bench", opts[:app], "rails-baseline.json")
+bundle = opts[:bundle] || File.join(ROOT, "build", "app-suite", opts[:app], "bundle")
+framework = recipe.fetch("framework", "minitest")
+
+def run!(env, cmd, chdir:)
+  warn "  $ #{cmd.is_a?(Array) ? cmd.join(" ") : cmd}"
+  out, st = Open3.capture2e(env, *Array(cmd), chdir: chdir)
+  return out if st.success?
+  warn out.lines.last(30).join
+  abort "app-suite-baseline: failed (exit #{st.exitstatus})"
+end
+
+sha = opts[:sha] || begin
+  o, st = Open3.capture2("git", "-C", src, "rev-parse", "HEAD")
+  st.success? ? o.strip : nil
+end
+# The copy below is the tree on disk, so uncommitted changes would run
+# under HEAD's SHA. Recorded; the joins refuse a dirty baseline.
+dirty = if opts[:sha] then false
+        else
+          o, st = Open3.capture2("git", "-C", src, "status", "--porcelain")
+          st.success? && !o.strip.empty?
+        end
+pinned_ruby = File.read(File.join(src, ".ruby-version")).strip rescue nil
+
+work = Dir.mktmpdir("app-suite-baseline-")
+copy = File.join(work, opts[:app])
+warn "app-suite-baseline: copying #{src} → #{copy}"
+FileUtils.cp_r(src, copy)
+FileUtils.rm_rf(Dir[File.join(copy, "{tmp,log}/*")])
+File.write(File.join(copy, ".ruby-version"), "#{RUBY_VERSION}\n")
+extra = Array(recipe["rails_extra_gems"])
+File.open(File.join(copy, "Gemfile"), "a") { |f| extra.each { f.puts %(gem "#{_1}") } } unless extra.empty?
+if framework == "minitest"
+  File.open(File.join(copy, "test", "test_helper.rb"), "a") { _1.puts %(\nrequire "minitest/app_suite_plugin") }
+end
+
+env = {
+  "BUNDLE_GEMFILE" => File.join(copy, "Gemfile"),
+  "BUNDLE_PATH" => bundle,
+  "BUNDLE_WITHOUT" => "development",
+  "RAILS_ENV" => "test",
+}
+run!(env, %w[bundle install --jobs 8], chdir: copy)
+Array(recipe["prepare"]).each { |c| run!(env, ["bash", "-c", c], chdir: copy) }
+
+rows_file = File.join(work, "rows.json")
+suites =
+  if framework == "rspec"
+    # The caller's paths win over the recipe's: a caller that ran a
+    # subset on the emit side records the same subset here, or the join
+    # reads every example it left out as dropped.
+    opts[:suites].empty? ? Array(recipe["suites"]) : opts[:suites]
+  end
+command =
+  if framework == "rspec"
+    ["bundle", "exec", "rspec", *suites, "--format", "json", "--out", rows_file]
+  else
+    %w[bin/rails test]
+  end
+warn "  $ #{command.join(" ")}"
+log, status = Open3.capture2e(env.merge("RUBYLIB" => [PLUGIN_DIR, ENV["RUBYLIB"]].compact.join(":"),
+                                        "APP_SUITE_JSON" => rows_file),
+                              *command, chdir: copy)
+File.write(File.join(work, "suite.log"), log)
+abort "app-suite-baseline: the suite wrote no rows (see #{work}/suite.log)\n#{log.lines.last(20).join}" unless File.exist?(rows_file)
+if framework == "rspec"
+  # A spec file that fails to load contributes no examples, so its tests
+  # would leave the baseline silently. Failing examples are fine (they are
+  # the join's env rows), and so is an error in an after(:context) hook.
+  load_errors = JSON.parse(File.read(rows_file))["messages"].to_a.grep(/An error occurred while loading/)
+  unless load_errors.empty?
+    abort "app-suite-baseline: #{load_errors.size} spec file(s) failed to load on Rails, so the baseline " \
+          "would be missing their examples:\n#{load_errors.first.to_s.lines.first(4).join}"
+  end
+end
+
+rows =
+  if framework == "rspec"
+    JSON.parse(File.read(rows_file))["examples"].map do |e|
+      x = e["exception"]
+      {
+        "name" => e["full_description"],
+        "id" => e["id"].sub(%r{\A\./}, ""),
+        "file" => e["file_path"].sub(%r{\A\./}, ""),
+        "line" => e["line_number"],
+        "status" => { "passed" => "pass", "pending" => "skip" }.fetch(e["status"], "fail"),
+        "exception" => x && x["class"],
+        "message" => x && x["message"].to_s.lines.map(&:strip).reject(&:empty?).first.to_s[0, 200],
+      }.compact
+    end
+  else
+    JSON.parse(File.read(rows_file))
+  end
+rows.sort_by! { [_1["file"].to_s, _1["name"]] }
+
+baseline = {
+  "app" => opts[:app],
+  "repo" => recipe["repo"],
+  "sha" => sha,
+  "dirty" => dirty,
+  "framework" => framework,
+  "rails" => File.read(File.join(copy, "Gemfile.lock"))[/^    rails \(([^)]+)\)/, 1],
+  "ruby" => { "used" => RUBY_VERSION, "pinned" => pinned_ruby },
+  "rails_extra_gems" => extra,
+  "command" => command.join(" ").sub(rows_file, "ROWS"),
+  "suite_exit" => status.exitstatus,
+  "generated_at" => Time.now.utc.iso8601,
+  "counts" => rows.map { _1["status"] }.tally.sort.to_h,
+  "tests" => rows,
+}
+# Only an rspec recipe has suites; the key names the scope the rows cover.
+baseline["suites"] = suites if suites
+FileUtils.mkdir_p(File.dirname(out))
+File.write(out, JSON.pretty_generate(baseline) + "\n")
+counts = baseline["counts"].map { |k, v| "#{v} #{k}" }.join(", ")
+puts "#{opts[:app]} #{sha.to_s[0, 12]} on Rails #{baseline["rails"]} / Ruby #{RUBY_VERSION}: #{rows.size} tests (#{counts}) → #{out}"
+if opts[:keep]
+  puts "scratch copy kept at #{copy}"
+else
+  FileUtils.rm_rf(work)
+end

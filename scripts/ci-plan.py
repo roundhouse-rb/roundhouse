@@ -45,8 +45,10 @@ EXTRA_COMPARE_TARGETS = [
 ]
 COMPARE_TARGETS = ["rust", "typescript"]
 FLOOR_SMOKE_TARGETS = ["rust", "typescript", "ruby", "jruby"]
-# PR floor: the Ruby shape plus Campfire. Extra languages, Rust/TS
-# compare, WASM, and Spinel are not in this list.
+# PR floor: the Ruby shape plus the two pinned apps. Extra languages,
+# Rust/TS compare, WASM, and Spinel are not in this list. Both app lanes
+# are blocking: they are the only place a PR that keeps `check` quiet
+# while dropping a construct is visible.
 BASE = [
     "generate-fixture",
     "unit-build",
@@ -56,6 +58,7 @@ BASE = [
     "compare-ruby",
     "compare-ruby-next",
     "campfire-conformance",
+    "writebook-conformance",
     "campfire-compare",
 ]
 # Compact publication additionally waits on Rust/TS when those jobs were

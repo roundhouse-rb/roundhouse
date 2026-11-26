@@ -566,6 +566,60 @@ fn spinel_gate_literal_json_routes_match() {
     std::fs::remove_dir_all(scratch).expect("clean passing tree");
 }
 
+/// `main.rb` starts no server when it is required: a compile root that
+/// only requires it runs the boot chain, reaches its last line and
+/// exits. The app's own root, `bin/blog.rb`, is the one that calls
+/// `Main.start`. A program that links the tree as a library (spinel's
+/// `--ext-entry`) relies on this: it calls `Main.start` after its own
+/// setup.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn spinel_gate_main_starts_no_server_when_required() {
+    let scratch = emit_spinel("main-starts-nothing");
+    std::fs::write(
+        scratch.join("bin/loaded.rb"),
+        "require_relative \"../main\"\nputs \"main.rb is loaded\"\n",
+    )
+    .expect("write the compile root");
+    compile(&scratch, "spin", &["build", "loaded"]);
+
+    let log = scratch.join("loaded.log");
+    let out = std::fs::File::create(&log).expect("create loaded.log");
+    let err = out.try_clone().expect("clone loaded.log");
+    let mut child = Command::new(scratch.join("build/bin/loaded"))
+        .current_dir(&scratch)
+        .env("BLOG_DB", scratch.join("tiny_api.sqlite3"))
+        .env("SPINEL_WORKERS", "1")
+        .stdout(out)
+        .stderr(err)
+        .spawn()
+        .expect("start build/bin/loaded");
+    // A root that started the server would never exit.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll the program") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "a root that only requires main.rb did not exit within 30s:\n{}",
+                std::fs::read_to_string(&log).unwrap_or_default()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let printed = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(status.success(), "the program failed ({status}):\n{printed}");
+    assert_eq!(printed, "main.rb is loaded\n");
+    assert!(
+        !scratch.join("tiny_api.sqlite3").exists(),
+        "requiring main.rb opened the database"
+    );
+    std::fs::remove_dir_all(scratch).expect("clean passing tree");
+}
+
 /// The app entry builds with `spin build`, the binary boots and serves
 /// HTTP, and a path no route matches answers 404, `/` included because
 /// the app has no `root`. The CRuby gate of the same name says the

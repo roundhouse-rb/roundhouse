@@ -6780,8 +6780,8 @@ fn apply_postgresql_tree(files: &mut Vec<(String, String)>, app: &App, target: R
         RequireTarget::Spinel => &[
             ("    path = Main.default_db_path\n", SERVER_POSTGRESQL),
             (
-                "    puts \"  SQLite file: BLOG_DB env (default storage/development.sqlite3)\"\n",
-                "    puts \"  PostgreSQL: DATABASE_URL env, else libpq's PG* variables\"\n",
+                "        puts \"  SQLite file: BLOG_DB env (default storage/development.sqlite3)\"\n",
+                "        puts \"  PostgreSQL: DATABASE_URL env, else libpq's PG* variables\"\n",
             ),
         ],
     };
@@ -6873,7 +6873,8 @@ fn apply_app_initializers(files: &mut [(String, String)], app: &App, target: Req
     // entry serves); the call goes ahead of that line and the comment
     // above it, at its indentation.
     let sites: &[(&str, &str, bool)] = match target {
-        RequireTarget::Spinel => &[("main.rb", "  SidekiqWorker.cli(ARGV)", false), ("main.rb", "Thread.new do", true)],
+        // Both lines are in `Main.start`, the body of the server's entry.
+        RequireTarget::Spinel => &[("main.rb", "      SidekiqWorker.cli(argv)", false), ("main.rb", "    Thread.new do", true)],
         RequireTarget::RubyFamily => &[
             ("main.rb", "  env = {", false),
             ("config.ru", "use ThrusterCache::Middleware", true),
@@ -8595,11 +8596,12 @@ fn apply_puma_boot_hooks(files: &mut [(String, String)], app: &App, target: Requ
                 source.push_str("\nrequire_relative \"../boot\"\nroundhouse_puma_hooks = RoundhousePumaBoot.__roundhouse_puma_register\nafter_booted { Db.with_connection { RoundhousePumaBoot.__roundhouse_puma_after_booted(roundhouse_puma_hooks) } }\n");
             }
             RequireTarget::Spinel if path == "main.rb" => {
-                let anchor = "begin\nMain.configure_default_adapter!\n";
+                // In `Main.start`, at the indentation of its body.
+                let anchor = "    begin\n    Main.configure_default_adapter!\n";
                 if !source.contains(anchor) {
                     return Err("apply_puma_boot_hooks: main.rb lost its configure_default_adapter! anchor".into());
                 }
-                *source = source.replace(anchor, "begin\nif workers != 1 || (ENV[\"TEP_SERVER\"] || \"thread\") == \"fiber\"\n  raise ArgumentError, \"Puma after_booted hooks require one threaded server process\"\nend\nTep.prepare_boot_hooks\nMain.configure_default_adapter!\n");
+                *source = source.replace(anchor, "    begin\n    if workers != 1 || (ENV[\"TEP_SERVER\"] || \"thread\") == \"fiber\"\n      raise ArgumentError, \"Puma after_booted hooks require one threaded server process\"\n    end\n    Tep.prepare_boot_hooks\n    Main.configure_default_adapter!\n");
             }
             RequireTarget::Spinel if path == "runtime/tep/tep_core.rb" => {
                 source.push_str("\nmodule Tep\n  @@roundhouse_puma_hooks = [false]\n  def self.boot_hooks?\n    true\n  end\n  def self.prepare_boot_hooks\n    @@roundhouse_puma_hooks = RoundhousePumaBoot.__roundhouse_puma_register\n    nil\n  end\n  def self.on_booted\n    Db.with_connection { RoundhousePumaBoot.__roundhouse_puma_after_booted(@@roundhouse_puma_hooks) }\n    nil\n  end\nend\n");
@@ -13650,8 +13652,8 @@ fn trim_gemfile(content: &str, has_js: bool, has_cable: bool) -> String {
 ///    skips spin's no-snapshot CRuby diff lane, which cannot load this
 ///    tree (runtime/db.rb is spinel-FFI) — the same pattern the
 ///    published spinel-redis/spinel-pg packages use.
-/// 6. `spin.toml` and `bin/blog.rb` (compile root; main.rb boots
-///    unconditionally on require) land, and the Makefile's spinel
+/// 6. `spin.toml` and `bin/blog.rb` (compile root; it requires main.rb
+///    and calls `Main.start`) land, and the Makefile's spinel
 ///    recipes are re-pointed at the sidecar layout with the
 ///    SPINEL_TESTS list regenerated from the actual lane. Patches are
 ///    exact-match — a scaffold edit that invalidates one fails the
@@ -14833,10 +14835,16 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
     files.push((
         "bin/blog.rb".to_string(),
         "# spin compile root: `spin build` → build/bin/blog; `spin run`.\n\
-         # The application lives in main.rb (see SPECIMEN.md) — it boots\n\
-         # the server unconditionally on require; this file exists because\n\
-         # spin's unit of build is bin/<name>.rb.\n\
-         require_relative \"../main\"\n"
+         # The application lives in main.rb (see SPECIMEN.md), which starts\n\
+         # no server when it is required: this file starts the server (or the\n\
+         # worker role). Unconditional — the binary's sole purpose is to\n\
+         # start; an `if __FILE__ == $PROGRAM_NAME` guard is always false\n\
+         # under spinel-AOT (`$PROGRAM_NAME` is the binary's argv[0]). A\n\
+         # program that links the tree as a library (spinel's --ext-entry)\n\
+         # compiles a root of its own and calls `Main.start` as an entry.\n\
+         require_relative \"../main\"\n\
+         \n\
+         Main.start(ARGV)\n"
             .to_string(),
     ));
 
@@ -14954,6 +14962,11 @@ fn spin_shape(files: Vec<(String, String)>) -> Result<Vec<(String, String)>, Str
             for (from, to) in dep_patches {
                 makefile.1 = makefile.1.replacen(from, to, 1);
             }
+            // The root `spin build` compiles is a prerequisite too. It is
+            // not in $(RUBY_SRC) (main.rb, runtime, app, config), and it
+            // holds the call that starts the server: an edit of it alone
+            // left `make build` with nothing to do.
+            makefile.1 = makefile.1.replacen("$(BUILD)/blog: $(RUBY_SRC)", "$(BUILD)/blog: bin/blog.rb $(RUBY_SRC)", 1);
         } else if needs_bcrypt || needs_vips || needs_rqrcode || needs_nokogiri || needs_commonmarker || needs_redis {
             return Err(
                 "spin_shape: Makefile dep-patch anchors not found (scaffold \
@@ -15723,14 +15736,16 @@ mod tests {
         let main = &spinel[0].1;
         assert_eq!((main.matches(serving).count(), main.matches(not_serving).count()), (1, 1), "{main}");
         let at = |text: &str, needle: &str| text.find(needle).unwrap_or_else(|| panic!("no `{needle}`"));
-        let worker_role = &main[at(main, "if ARGV.length > 0 && ARGV[0] == \"sidekiq\"")..at(main, "\nport = ")];
+        // Both roles are in `Main.start`, at the indentation of its body.
+        let start = &main[at(main, "\n  def self.start(argv)\n")..];
+        let worker_role = &start[at(start, "    if argv.length > 0 && argv[0] == \"sidekiq\"")..at(start, "\n    port = ")];
         assert!(!worker_role.contains(serving), "{worker_role}");
-        assert!(at(worker_role, "  ActiveJob.register_drain") < at(worker_role, &format!("  {not_serving}")));
-        assert!(at(worker_role, &format!("  {not_serving}")) < at(worker_role, "  SidekiqWorker.cli(ARGV)"));
-        let server = &main[at(main, "\nMain.configure_default_adapter!\n")..];
+        assert!(at(worker_role, "      ActiveJob.register_drain") < at(worker_role, &format!("      {not_serving}")));
+        assert!(at(worker_role, &format!("      {not_serving}")) < at(worker_role, "      SidekiqWorker.cli(argv)"));
+        let server = &start[at(start, "\n    Main.configure_default_adapter!\n")..];
         assert!(!server.contains(not_serving), "{server}");
-        assert!(at(server, "\nActiveJob.register_drain\n") < at(server, &format!("\n{serving}\n")));
-        assert!(at(server, &format!("\n{serving}\n")) < at(server, "\nThread.new do\n  Main.job_loop\n"));
+        assert!(at(server, "\n    ActiveJob.register_drain\n") < at(server, &format!("\n    {serving}\n")));
+        assert!(at(server, &format!("\n    {serving}\n")) < at(server, "\n    Thread.new do\n      Main.job_loop\n"));
 
         let overlay = "runtime/spinel/scaffold/ruby_overlay";
         let mut ruby: Vec<(String, String)> = ["main.rb", "config.ru", "sidekiq.rb"]
@@ -15752,6 +15767,21 @@ mod tests {
         assert!(at(config_ru, "Broadcasts.set_transport(") < at(config_ru, serving), "{config_ru}");
     }
 
+    /// The Spinel main.rb defines the server's start and never calls it:
+    /// the compile root does (`bin/blog.rb`, written by `spin_shape`). A
+    /// test or a host program that requires main.rb starts no server, so
+    /// the file ends with the method and has no statement after it.
+    #[test]
+    fn the_spinel_main_defines_its_start_and_does_not_call_it() {
+        let main = crate::runtime_files::read_to_string("runtime/spinel/scaffold/main.rb").unwrap();
+        assert!(main.contains("\nmodule Main\n  def self.start(argv)\n"), "main.rb lost Main.start");
+        assert!(!main.contains("Main.start("), "main.rb must not start the server itself");
+        assert!(main.ends_with("    ensure\n      unix_listener.close\n    end\n  end\nend\n"), "a statement follows Main.start");
+        // ARGV is the compile root's to pass: the start reads its parameter.
+        let start = &main[main.find("\n  def self.start(argv)\n").unwrap()..];
+        assert!(!start.contains("ARGV"), "Main.start reads ARGV, not its argv");
+    }
+
     /// An app with no callbacks keeps its entries as written, and an entry
     /// that lost the line the callbacks run before is an error, not a tree
     /// that silently skips them.
@@ -15763,7 +15793,7 @@ mod tests {
         assert_eq!(files[0].1, "Main.configure_default_adapter!\n");
         app.runs_after_initialize = true;
         let error = apply_app_initializers(&mut files, &app, RequireTarget::Spinel).unwrap_err();
-        assert!(error.contains("main.rb has 0 lines `  SidekiqWorker.cli(ARGV)`"), "{error}");
+        assert!(error.contains("main.rb has 0 lines `      SidekiqWorker.cli(argv)`"), "{error}");
     }
 
     /// A symlinked data file is carried by its contents only when its
@@ -17186,7 +17216,9 @@ mod tests {
         // the how-to comment only).
         assert!(get("spin.toml").contains("[dependencies]"));
         assert!(!get("spin.toml").contains("bcrypt"));
-        assert!(get("bin/blog.rb").contains("require_relative \"../main\""));
+        // The compile root starts the server; main.rb only defines the
+        // start (`the_spinel_main_defines_its_start_and_does_not_call_it`).
+        assert!(get("bin/blog.rb").contains("require_relative \"../main\"\n\nMain.start(ARGV)\n"));
 
         // Makefile re-pointed at the sidecar layout + actual lane list.
         let mk = get("Makefile");
@@ -17250,6 +17282,8 @@ mod tests {
         assert!(mk.contains("SPIN   ?= spin"), "{mk}");
         assert!(mk.contains("\t$(SPIN) build\n\tcp build/bin/blog $@"), "{mk}");
         assert!(!mk.contains("$(SPINEL) main.rb"), "{mk}");
+        // The root `spin build` compiles is a prerequisite of the binary.
+        assert!(mk.contains("$(BUILD)/blog: bin/blog.rb $(RUBY_SRC) $(RBS_SRC)\n"), "{mk}");
     }
 
     /// An app that names RQRCode (a QR code rendered as SVG) gets the

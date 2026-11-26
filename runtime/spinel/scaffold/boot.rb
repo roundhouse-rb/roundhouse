@@ -2,13 +2,16 @@
 # Boot chain — every `require_relative` the app needs, in the order it
 # needs them, and NOTHING that starts anything.
 #
-# Split out of main.rb so `test/test_helper.rb` can share it. The two
-# cannot share main.rb itself: the spinel-AOT main.rb boots the server
-# UNCONDITIONALLY (its own comment explains why the
-# `__FILE__ == $PROGRAM_NAME` guard cannot work under AOT — `__FILE__`
-# is "main.rb" and `$PROGRAM_NAME` is the binary's argv[0]), so a test
-# that required it opened `storage/development.sqlite3` and died with
-# `sqlite3_open(...) failed (14)` before running an assertion.
+# Split out of main.rb so `test/test_helper.rb` can share it. When the
+# split was made the two could not share main.rb itself: the spinel-AOT
+# main.rb booted the server at its top level (a
+# `__FILE__ == $PROGRAM_NAME` guard cannot work under AOT —
+# `$PROGRAM_NAME` is the binary's argv[0]), so a test that required it
+# opened `storage/development.sqlite3` and died with
+# `sqlite3_open(...) failed (14)` before running an assertion. main.rb
+# now starts the server in `Main.start`, which only the compile root
+# (`bin/blog.rb`) calls: requiring main.rb runs this chain and starts
+# no server.
 #
 # ONE owner for the order. The harness previously kept its own
 # hand-maintained subset of this list; by the time anyone noticed it was

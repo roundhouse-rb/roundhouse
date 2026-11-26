@@ -534,8 +534,8 @@ fn rails_root_join_takes_any_number_of_parts_natively() {
 
 /// The native half of `rails_health_check::the_rails_health_check_answers_up`:
 /// `/up` routes to the synthesized `Rails::HealthController`, which
-/// compiles and answers the green page. `main.rb` boots the server
-/// under AOT, so its `instantiate_controller` arm is checked as text.
+/// compiles and answers the green page. The `instantiate_controller`
+/// arm of `main.rb` is checked as text.
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn the_rails_health_check_answers_up_natively() {

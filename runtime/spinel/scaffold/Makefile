@@ -3,7 +3,9 @@
 # Targets:
 #   make             — assets + tests + lint (default)
 #   make assets      — build static/assets/* (css + importmap JS) + root icons
-#   make build       — spinel main.rb → build/blog (requires spinel on PATH)
+#   make build       — the spinel binary, build/blog. An emitted tree builds it
+#                      with `spin build` from bin/blog.rb, which calls Main.start
+#                      (requires spin and spinel on PATH)
 #   make test        — bundle exec rake test
 #   make lint        — bundle exec rake lint (spinel-subset linter)
 #   make run         — single-shot CRuby smoke (REQUEST_METHOD=GET PATH_INFO=/articles)
@@ -205,8 +207,11 @@ storage/development.sqlite3: db/seed.sql
 	@mkdir -p storage
 	sqlite3 $@ < db/seed.sql
 
-# spinel AOT-compiles main.rb (+ its whole require graph) straight to a
-# native binary. The HTTP/WebSocket transport now rides spinel's built-in,
+# spinel AOT-compiles the app (+ its whole require graph) straight to a
+# native binary. The recipe below is the raw lane; an emitted tree gets
+# `spin build` in its place (`spin_shape`), whose compile root is
+# bin/blog.rb. That root requires main.rb and calls `Main.start`: main.rb
+# compiled alone starts no server. The HTTP/WebSocket transport now rides spinel's built-in,
 # auto-linked `sp_net` — there's no vendored C extension to compile or
 # link (the former runtime/tep/sphttp.c + `@TEP_SPHTTP_O@` placeholder
 # were retired in the sp_net migration, matz/spinel#1466).

@@ -17,9 +17,10 @@ end
 "#)
         .emit(roundhouse::project::BuildTarget::Spinel);
     assert!(errors.is_empty(), "{errors:?}");
-    let main = tree.join("main.rb");
+    // The compile root starts the server; `main.rb` only defines it.
+    let main = tree.join("bin/blog.rb");
     let source = std::fs::read_to_string(&main).unwrap();
-    let at = source.find("# Unconditional entry").unwrap();
+    let at = source.find("Main.start(ARGV)").unwrap();
     let direct = r#"
 if ENV["TEP_DIRECT"] == "1"
   port = ENV["PORT"].to_i

@@ -996,7 +996,7 @@ fn prepend_setup(setup: &Expr, body: &Expr) -> Expr {
 
 /// `"creates an article with valid attributes"` →
 /// `"creates_an_article_with_valid_attributes"`.
-fn sanitize_test_name(name: &str) -> String {
+pub(crate) fn sanitize_test_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut prev_underscore = false;
     for c in name.chars() {

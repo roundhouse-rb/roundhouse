@@ -66,7 +66,7 @@ class EvidenceTests(unittest.TestCase):
             "steps": [
                 {"name": "cargo build", "conclusion": "success"},
                 {
-                    "name": "The analyzer reports no errors, no warnings and no ingest gaps on the store",
+                    "name": "The analyzer reports no errors, only the mailer-test warning and no ingest gaps on the store",
                     "conclusion": "success",
                 },
             ],

@@ -600,6 +600,7 @@ impl Reader<'_> {
             helpers,
             constants: Vec::new(),
             includes: Vec::new(),
+            unharnessed: None,
         });
         Ok(())
     }

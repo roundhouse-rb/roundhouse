@@ -339,6 +339,8 @@ mod controller_test_case;
 mod assert_recognizes;
 #[path = "emit_and_run/assert_routing.rs"]
 mod assert_routing;
+#[path = "emit_and_run/test_folders.rs"]
+mod test_folders;
 #[path = "emit_and_run/class_new_constants.rs"]
 mod class_new_constants;
 #[path = "emit_and_run/i18n_subtree.rs"]

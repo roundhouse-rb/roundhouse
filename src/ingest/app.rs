@@ -2810,23 +2810,15 @@ end
     // the mixin means, and it needs nothing from a target's mixin
     // semantics.
     let shared_test_helpers = ingest_test_helper_modules(vfs, dir)?;
-    // Test files under the Rails defaults and the additional roots from
-    // `roundhouse.yml`. Select every Ruby file recursively.
-    let mut test_roots: Vec<PathBuf> = [
-        "test/models",
-        "test/controllers",
-        "test/helpers",
-        "test/channels",
-        "test/lib",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .collect();
+    // Test files: every Ruby file under the default roots and the
+    // additional roots from `roundhouse.yml`, plus every file Rails'
+    // own default glob runs (`test/integration/*_test.rb`, …).
+    let mut test_roots: Vec<PathBuf> = DEFAULT_TEST_ROOTS.into_iter().map(PathBuf::from).collect();
     test_roots.extend(additional_test_paths);
     test_roots.sort();
     test_roots.dedup();
 
-    let mut test_files = Vec::new();
+    let mut test_files = rails_default_test_files(vfs, dir)?;
     for root in test_roots {
         let tests_dir = dir.join(root);
         if !path_has_symlink_component(vfs, dir, &tests_dir) && vfs.is_dir(&tests_dir) {
@@ -2887,19 +2879,27 @@ end
             .iter()
             .map(|s| s.as_str().trim_start_matches("::").to_string())
             .collect();
-        super::test::TestConcerns { concerns, case_wide }
+        super::test::TestConcerns { concerns, case_wide, unharnessed: Vec::new(), harnessed: Vec::new() }
     };
 
+    // Test classes left out for a base the emitted harness lacks.
+    let mut unharnessed: Vec<String> = Vec::new();
     // A test-case base the helper DEFINES (`class GemCompat::TestCase
     // < ActiveSupport::TestCase`), which the app's tests then subclass. A
     // reopen (`class ActiveSupport::TestCase` with no superclass) is the
     // helper configuring Rails' own base, not a class of the app's.
     if vfs.exists(&helper_rb) {
         if let Some(source) = read_or_ledger(vfs, &helper_rb)? {
-            if let Some(tms) =
-                unwrap_or_record(ingest_test_bases(&source, &helper_rb.display().to_string()))?
-            {
+            // In a scope of its own, so a base left out for its base is
+            // known to the classes after it in the file.
+            let bases = super::test::with_test_concerns(super::test::TestConcerns::default(), || {
+                ingest_test_bases(&source, &helper_rb.display().to_string())
+            });
+            if let Some(tms) = unwrap_or_record(bases)? {
                 for mut tm in tms.into_iter().filter(|tm| tm.parent.is_some()) {
+                    if drop_unharnessed(&mut app, &tm, &helper_rb, &mut unharnessed) {
+                        continue;
+                    }
                     splice_test_helpers(&mut tm, &shared_test_helpers);
                     app.test_modules.push(tm);
                 }
@@ -2936,11 +2936,19 @@ end
             }
             continue;
         }
-        let ingested = super::test::with_test_concerns(test_concerns.clone(), || {
+        let concerns = super::test::TestConcerns {
+            unharnessed: unharnessed.clone(),
+            harnessed: app.test_modules.iter().map(|tm| tm.name.0.as_str().to_string()).collect(),
+            ..test_concerns.clone()
+        };
+        let ingested = super::test::with_test_concerns(concerns, || {
             ingest_test_files(&source, &entry.display().to_string())
         });
         if let Some(tms) = unwrap_or_record(ingested)? {
             for mut tm in tms {
+                if drop_unharnessed(&mut app, &tm, &entry, &mut unharnessed) {
+                    continue;
+                }
                 // A module every test case already includes, included
                 // again: a no-op in Ruby, and spliced rather than
                 // carried here, so the `include` would name nothing.
@@ -11208,6 +11216,59 @@ fn read_test_rb_files<V: Vfs + ?Sized>(
     Ok(files)
 }
 
+/// Whether test class `tm` derives from a base the emitted harness lacks
+/// (`TestModule::unharnessed`, resolved at ingest against the framework
+/// bases and the app classes `unharnessed` holds). Such a class is
+/// reported in `app.test_drops`, added to `unharnessed`, and left out
+/// rather than emitted to fail at load.
+fn drop_unharnessed(app: &mut App, tm: &TestModule, path: &Path, unharnessed: &mut Vec<String>) -> bool {
+    let name = tm.name.0.as_str();
+    let base = match tm.unharnessed.as_ref().map(|b| b.0.as_str()) {
+        None => return false,
+        // A reopen (`class NoticeTest` with no superclass) of a class
+        // already left out is the same class, still on its base.
+        Some(found) if found == name => return true,
+        Some(base) => base,
+    };
+    app.test_drops.push(crate::app::IngestDrop {
+        span: crate::span::Span { file: super::sources::file_id(&path.display().to_string()), start: 0, end: 0 },
+        message: format!("`{} < {base}`: the emitted tests have no harness for {base}, so its tests are not emitted", tm.name.0),
+    });
+    unharnessed.push(tm.name.0.as_str().to_string());
+    true
+}
+
+/// The folders whose `.rb` files are all read as tests, beside the
+/// Rails default glob ([`rails_default_test_files`]).
+const DEFAULT_TEST_ROOTS: [&str; 5] =
+    ["test/models", "test/controllers", "test/helpers", "test/channels", "test/lib"];
+
+/// The files `bin/rails test` runs with no arguments: Rails'
+/// `test/**/*_test.rb`, less `test/{system,dummy,fixtures}`
+/// (`Rails::TestUnit::Runner.default_test_exclude_glob`). This is what
+/// reaches `test/integration`, `test/mailers`, `test/middleware` and an
+/// app's own folders, which Rails runs as tests too.
+fn rails_default_test_files<V: Vfs + ?Sized>(vfs: &V, app_root: &Path) -> IngestResult<Vec<PathBuf>> {
+    let test_dir = app_root.join("test");
+    if path_has_symlink_component(vfs, app_root, &test_dir) || !vfs.is_dir(&test_dir) {
+        return Ok(Vec::new());
+    }
+    let excluded = ["system", "dummy", "fixtures"].map(|d| test_dir.join(d));
+    let mut files = Vec::new();
+    for entry in vfs.read_dir(&test_dir)? {
+        if excluded.contains(&entry) || path_has_symlink_component(vfs, app_root, &entry) {
+            continue;
+        }
+        if vfs.is_dir(&entry) {
+            files.extend(read_test_rb_files(vfs, app_root, &entry)?);
+        } else {
+            files.push(entry);
+        }
+    }
+    files.retain(|f| f.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("_test.rb")));
+    Ok(files)
+}
+
 /// The app's `roundhouse.yml`. An absent file is the default configuration.
 #[derive(Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -12066,18 +12127,12 @@ fn route_helper_sources<V: Vfs + ?Sized>(
             }
         }
     }
-    let mut test_roots: Vec<PathBuf> = [
-        "test/models",
-        "test/controllers",
-        "test/helpers",
-        "test/channels",
-        "test/lib",
-        "test/test_helpers",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .collect();
+    let mut test_roots: Vec<PathBuf> =
+        DEFAULT_TEST_ROOTS.into_iter().chain(["test/test_helpers"]).map(PathBuf::from).collect();
     test_roots.extend(additional_test_paths.iter().cloned());
+    if let Ok(files) = rails_default_test_files(vfs, dir) {
+        rb_files.extend(files);
+    }
     test_roots.sort();
     test_roots.dedup();
     for test_root in test_roots {
@@ -16171,11 +16226,13 @@ fn ingest_included_test_helper_files<V: Vfs + ?Sized>(
     for (entry, in_test_folder) in candidates {
         let Some(source) = read_or_ledger(vfs, &entry)? else { continue };
         // A test folder's file is a helper only when it holds no test
-        // class; the test-file pass below reads the others.
-        // The probe's diagnostics are forgotten: the test-file pass reports them.
+        // class; the test-file pass below reads the others, and reports
+        // what it finds there, so this look records nothing: neither
+        // its diagnostics nor its survey gaps.
         let mark = super::prism::mark();
         let holds_tests = in_test_folder
-            && !ingest_test_files(&source, &entry.display().to_string()).is_ok_and(|tms| tms.is_empty());
+            && !super::survey::without_recording(|| ingest_test_files(&source, &entry.display().to_string()))
+                .is_ok_and(|tms| tms.is_empty());
         super::prism::rewind(mark);
         if holds_tests {
             continue;

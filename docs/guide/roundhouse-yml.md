@@ -50,6 +50,25 @@ default:
 - `test/channels`
 - `test/lib`
 
+It also reads every file `bin/rails test` runs by default:
+`test/**/*_test.rb`, except under `test/system`, `test/dummy` and
+`test/fixtures`. That covers `test/integration`, `test/mailers` and an
+app's own folders, such as `test/middleware`. A test class whose base
+has no harness in the emitted tests (`ActionMailer::TestCase`,
+`ActiveJob::TestCase`, `ActionMailbox::TestCase`,
+`ActionDispatch::SystemTestCase`), or on a base `test/test_helper.rb`
+defines on one of them, is reported as a warning and its tests are not
+emitted.
+
+A class-body loop that declares tests becomes one test per element
+when it is `each` over a literal Array or Hash of plain literals and
+each test's name is a string the loop's parameters complete
+(`test "#{name} is allowed"`). Any other class-body statement that
+declares tests (another loop, an `if`, a `define_method("test_…")`)
+is an error, as is a test whose name is not a string literal, repeats
+one the class already has, or would be emitted under the same method
+name as another (`YouTube` and `youtube`). Those tests are not emitted.
+
 `test_paths` adds folders:
 
 ```yaml

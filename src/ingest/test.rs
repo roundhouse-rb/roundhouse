@@ -99,10 +99,28 @@ fn ingest_test_classes(
         test_nodes.push(helper_nodes.remove(first));
         return ingest_test_class(&test_nodes[0], &helper_nodes, file).map(|tm| vec![tm]);
     }
-    test_nodes
+    // A later class in this file on one of these (or reopening it) sees
+    // it left out or kept. Only for this file: the caller's lists are
+    // put back.
+    let known = TEST_CONCERNS.with(|c| (c.borrow().unharnessed.len(), c.borrow().harnessed.len()));
+    let modules: IngestResult<Vec<TestModule>> = test_nodes
         .iter()
-        .map(|class| ingest_test_class(class, &helper_nodes, file))
-        .collect()
+        .map(|class| {
+            let tm = ingest_test_class(class, &helper_nodes, file)?;
+            let name = tm.name.0.as_str().to_string();
+            TEST_CONCERNS.with(|c| {
+                let mut c = c.borrow_mut();
+                if tm.unharnessed.is_some() { c.unharnessed.push(name) } else { c.harnessed.push(name) }
+            });
+            Ok(tm)
+        })
+        .collect();
+    TEST_CONCERNS.with(|c| {
+        let mut c = c.borrow_mut();
+        c.unharnessed.truncate(known.0);
+        c.harnessed.truncate(known.1);
+    });
+    modules
 }
 
 fn ingest_test_class(
@@ -129,15 +147,29 @@ fn ingest_test_class(
         .map(|stem| ClassId(Symbol::from(stem)));
 
     let mut acc = ClassBody { target, ..ClassBody::default() };
+    // A class on a base with no harness is left out whole by the app
+    // ingest (`drop_unharnessed`): its body is not read, so a construct
+    // in it cannot fail the ingest that only means to report it.
+    // The base as written, with the `::` of a rooted `::BaseTest` kept
+    // for the lookup (the stored `parent` drops it).
+    let written = class.superclass().and_then(|n| {
+        let rooted = n.as_constant_path_node().is_some_and(|p| super::util::constant_path_is_rooted(&p));
+        parent.as_ref().map(|p| if rooted { format!("::{}", p.0) } else { p.0.to_string() })
+    });
+    let unharnessed_base = TEST_CONCERNS.with(|c| {
+        let c = c.borrow();
+        unharnessed_class(scope, name.0.as_str(), written.as_deref(), &c.unharnessed, &c.harnessed)
+    });
+    let unharnessed = unharnessed_base.is_some();
     // Concerns `test_helper.rb` mixes into `ActiveSupport::TestCase`: a
     // class that derives from a framework base inherits their `included`
     // registrations ahead of its own, as a parent's callbacks run first.
-    if parent.as_ref().is_some_and(|p| is_framework_test_base(p.0.as_str())) {
+    if !unharnessed && parent.as_ref().is_some_and(|p| is_framework_test_base(p.0.as_str())) {
         for concern in test_case_wide_concerns() {
             apply_test_concern(&concern, &mut acc, &name, 0)?;
         }
     }
-    if let Some(class_body) = class.body() {
+    if let Some(class_body) = class.body().filter(|_| !unharnessed) {
         for stmt in flatten_statements(class_body) {
             if !class_body_statement(&stmt, file, &mut acc, &name, 0)? {
                 report_dropped_statement(&stmt, file, &name);
@@ -327,6 +359,7 @@ fn ingest_test_class(
         helpers,
         constants,
         includes,
+        unharnessed: unharnessed_base.map(|b| ClassId(Symbol::from(b.as_str()))),
     })
 }
 
@@ -632,6 +665,9 @@ fn is_test_class_node(c: &ruby_prism::ClassNode<'_>) -> bool {
 #[derive(Default)]
 struct ClassBody {
     tests: Vec<Test>,
+    /// Each test's Ruby method name, beside it in `tests`
+    /// (`test "a b"` is `test_a_b`, `def test_a__b` is itself).
+    test_methods: Vec<String>,
     setup: Option<Expr>,
     inner_classes: Vec<crate::dialect::LibraryClass>,
     helpers: Vec<MethodDef>,
@@ -655,7 +691,13 @@ fn class_body_statement(
     depth: usize,
 ) -> IngestResult<bool> {
     if let Some(test) = ingest_test_declaration(&stmt, file)? {
-        acc.tests.push(test);
+        let method = match stmt.as_def_node() {
+            Some(def) => constant_id_str(&def.name()).to_string(),
+            None => test_method_name(&test.name),
+        };
+        if let Err(err) = add_test(acc, test, method, stmt.as_def_node().is_some(), file) {
+            super::survey::continue_or_fail(err)?;
+        }
         return Ok(true);
     }
     if let Some(body) = ingest_teardown_block(&stmt, file)? {
@@ -708,6 +750,39 @@ fn class_body_statement(
     if let Some(def) = stmt.as_def_node() {
         let m = ingest_library_method(&def, name, file)?;
         acc.helpers.push(m);
+        return Ok(true);
+    }
+    // `{ … }.each do |name, url| test "#{name} …" do … end end`: the
+    // tests a class-body loop declares, one per element. A loop it
+    // cannot unroll is reported, not skipped with its tests.
+    match ingest_test_loop(stmt, file) {
+        Ok(None) => {}
+        Ok(Some(tests)) => {
+            // All of the loop's tests or none of them.
+            let before = acc.tests.len();
+            for test in tests {
+                let method = test_method_name(&test.name);
+                if let Err(err) = add_test(acc, test, method, false, file) {
+                    acc.tests.truncate(before);
+                    acc.test_methods.truncate(before);
+                    super::survey::continue_or_fail(err)?;
+                    break;
+                }
+            }
+            return Ok(true);
+        }
+        Err(err) => {
+            super::survey::continue_or_fail(err)?;
+            return Ok(true);
+        }
+    }
+    // A `test` call `ingest_test_declaration` did not read: its name is
+    // not a string literal (`test "#{KIND} works"`).
+    if declares_test(stmt) {
+        super::survey::continue_or_fail(IngestError::Unsupported {
+            file: file.into(),
+            message: "a test whose name is not a string literal is not emitted".into(),
+        })?;
         return Ok(true);
     }
     // `include ModName` at class-body scope. Captured for
@@ -772,6 +847,15 @@ fn class_body_statement(
         }
         return Ok(true);
     }
+    // Tests declared inside a statement it does not model (`if ENV[…]`,
+    // `define_method("test_#{x}")`): reported, never skipped with it.
+    if contains_test(stmt) {
+        super::survey::continue_or_fail(IngestError::Unsupported {
+            file: file.into(),
+            message: "tests declared inside this class-body statement are not emitted".into(),
+        })?;
+        return Ok(true);
+    }
 
     Ok(false)
 }
@@ -792,6 +876,13 @@ pub struct TestConcern {
 pub struct TestConcerns {
     pub concerns: Vec<TestConcern>,
     pub case_wide: Vec<String>,
+    /// App test bases left out for a base with no harness (one
+    /// `test/test_helper.rb` defines on `ActionMailer::TestCase`): a
+    /// class on one has its body skipped as on a framework one.
+    pub unharnessed: Vec<String>,
+    /// Test classes kept so far: a base resolved to one has a harness,
+    /// and shadows a left-out class of that name further out.
+    pub harnessed: Vec<String>,
 }
 
 thread_local! {
@@ -822,6 +913,51 @@ fn test_case_wide_concerns() -> Vec<TestConcern> {
         let c = c.borrow();
         c.case_wide.iter().filter_map(|n| c.concerns.iter().find(|tc| &tc.name == n).cloned()).collect()
     })
+}
+
+/// Framework test-case bases the emitted test harness does not define
+/// (`runtime/spinel/test/test_helper.rb` has `ActiveSupport::TestCase`'s,
+/// the integration, controller, view and cable ones).
+pub(crate) const UNHARNESSED_TEST_BASES: [&str; 4] = [
+    "ActionMailer::TestCase",
+    "ActiveJob::TestCase",
+    "ActionMailbox::TestCase",
+    "ActionDispatch::SystemTestCase",
+];
+
+/// The base test class `name` (on `parent` as written, inside the modules
+/// `scope`) is left out for, or `name` itself when it is in `left_out`
+/// already (a reopen): a framework base in [`UNHARNESSED_TEST_BASES`], or
+/// a class in `left_out`. A parent written relative to the enclosing
+/// modules (`Base` inside `module Mailers`) is looked up innermost module
+/// first, approximately as Ruby does: the first candidate in `left_out`
+/// or in `kept` (test classes with a harness) decides, so a kept inner
+/// class shadows a left-out outer one.
+fn unharnessed_class(
+    scope: &[String],
+    name: &str,
+    parent: Option<&str>,
+    left_out: &[String],
+    kept: &[String],
+) -> Option<String> {
+    let is_left_out = |class: &str| left_out.iter().any(|u| u == class);
+    if is_left_out(name) {
+        return Some(name.to_string());
+    }
+    let parent = parent?;
+    if let Some(rooted) = parent.strip_prefix("::") {
+        return (UNHARNESSED_TEST_BASES.contains(&rooted) || is_left_out(rooted)).then(|| rooted.to_string());
+    }
+    for depth in (0..=scope.len()).rev() {
+        let candidate = scope[..depth].iter().map(String::as_str).chain([parent]).collect::<Vec<_>>().join("::");
+        if is_left_out(&candidate) {
+            return Some(candidate);
+        }
+        if kept.contains(&candidate) {
+            return None;
+        }
+    }
+    UNHARNESSED_TEST_BASES.contains(&parent).then(|| parent.to_string())
 }
 
 /// A framework test case: one `ActiveSupport::TestCase` is, or derives
@@ -1111,8 +1247,9 @@ fn ingest_test_declaration(
     stmt: &Node<'_>,
     file: &str,
 ) -> IngestResult<Option<Test>> {
-    // `def test_*; ...; end` form (vanilla Minitest).
-    if let Some(def) = stmt.as_def_node() {
+    // `def test_*; ...; end` form (vanilla Minitest). `def self.test_order`
+    // is a class method, not a test.
+    if let Some(def) = stmt.as_def_node().filter(|d| d.receiver().is_none()) {
         let name_bytes = def.name().as_slice();
         let Some(method_name) = std::str::from_utf8(name_bytes).ok() else {
             return Ok(None);
@@ -1167,6 +1304,342 @@ fn ingest_test_declaration(
     };
 
     Ok(Some(Test { name, body }))
+}
+
+/// Whether `stmt` declares a test: `test "name" do` or `def test_name`.
+fn declares_test(stmt: &Node<'_>) -> bool {
+    if let Some(def) = stmt.as_def_node() {
+        return constant_id_str(&def.name()).starts_with("test_");
+    }
+    stmt.as_call_node()
+        .is_some_and(|c| c.receiver().is_none() && constant_id_str(&c.name()) == "test")
+}
+
+/// Whether `node` declares a test anywhere inside it, as Ruby would run
+/// it with the class body: a `test` call, a `def test_*`, or a
+/// `define_method` whose name starts `test_`. A nested class or module
+/// body is its own.
+fn contains_test(node: &Node<'_>) -> bool {
+    struct Find(bool);
+    impl<'pr> ruby_prism::Visit<'pr> for Find {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            let name = constant_id_str(&node.name());
+            let test_name = || {
+                node.arguments().and_then(|a| a.arguments().iter().next()).is_some_and(|arg| {
+                    // A name it cannot read (`define_method(name)`,
+                    // `"#{prefix}_x"`) may be a test's, so it counts.
+                    let whole = |t: &[u8]| t.starts_with(b"test_");
+                    // An interpolation's leading text may stop short of `test_`.
+                    let lead = |t: &[u8]| whole(t) || b"test_".starts_with(t);
+                    let parts = if let Some(s) = arg.as_symbol_node() {
+                        return whole(s.unescaped());
+                    } else if let Some(s) = arg.as_string_node() {
+                        return whole(s.unescaped());
+                    } else if let Some(s) = arg.as_interpolated_string_node() {
+                        s.parts()
+                    } else if let Some(s) = arg.as_interpolated_symbol_node() {
+                        s.parts()
+                    } else {
+                        return true;
+                    };
+                    parts.iter().next().and_then(|p| p.as_string_node()).is_none_or(|s| lead(s.unescaped()))
+                })
+            };
+            // Rails' `test` takes a name and a block (a blockless one
+            // flunks); `Kernel#test(?e, path)` takes two or more and none.
+            let declares = node.block().is_some() || node.arguments().is_some_and(|a| a.arguments().iter().count() == 1);
+            if node.receiver().is_none()
+                && ((name == "test" && declares) || (name == "define_method" && test_name()))
+            {
+                self.0 = true;
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+        fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+            if node.receiver().is_none() && constant_id_str(&node.name()).starts_with("test_") {
+                self.0 = true;
+            }
+        }
+        // `class << self; def test_order` is the class's own method,
+        // as a nested class or module body is its own.
+        fn visit_singleton_class_node(&mut self, _: &ruby_prism::SingletonClassNode<'pr>) {}
+        fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'pr>) {}
+        fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'pr>) {}
+    }
+    let mut find = Find(false);
+    ruby_prism::Visit::visit(&mut find, node);
+    find.0
+}
+
+/// The tests a class-body loop declares, one per element:
+///
+/// ```ruby
+/// { "short" => "Hi", "long" => "Hello" }.each do |label, title|
+///   test "a #{label} title is kept" do
+///     assert_equal title, Article.new(title: title).title
+///   end
+/// end
+/// ```
+///
+/// Minitest runs the loop when the class body does, so each `test`
+/// call defines one method per element, named by its interpolated
+/// string. Over a literal Array (or Array of Arrays, destructured) or
+/// a literal Hash of plain literals, the names are known now: one test
+/// per element, its body the block's with each loop parameter it reads
+/// bound to the element's literal first, the value its closure saw.
+///
+/// `Ok(None)` for a statement that is no loop declaring tests. A loop
+/// that declares them in any other shape is an error naming the file,
+/// never a silent drop of its tests.
+fn ingest_test_loop(stmt: &Node<'_>, file: &str) -> IngestResult<Option<Vec<Test>>> {
+    let Some(call) = stmt.as_call_node() else { return Ok(None) };
+    let Some(block) = call.block().and_then(|b| b.as_block_node()) else { return Ok(None) };
+    let statements = block.body().map(flatten_statements).unwrap_or_default();
+    if !block.body().is_some_and(|b| contains_test(&b)) {
+        return Ok(None);
+    }
+    let method = constant_id_str(&call.name()).to_string();
+    let refuse = |why: &str| IngestError::Unsupported {
+        file: file.into(),
+        message: format!(
+            "tests declared inside a class-body `{method}` block are not emitted: {why}; \
+             only `each` over a literal Array or Hash of plain literals is unrolled"
+        ),
+    };
+    let Some(recv) = call.receiver().filter(|_| method == "each" && call.arguments().is_none()) else {
+        return Err(refuse("the loop is not `each` over a literal"));
+    };
+    let params: Vec<String> = match block.parameters().map(|p| p.as_block_parameters_node()) {
+        None => Vec::new(),
+        Some(Some(p)) if p.locals().iter().next().is_none() => match p.parameters() {
+            None => Vec::new(),
+            Some(list)
+                if list.optionals().iter().next().is_none()
+                    && list.rest().is_none()
+                    && list.posts().iter().next().is_none()
+                    && list.keywords().iter().next().is_none()
+                    && list.keyword_rest().is_none()
+                    && list.block().is_none() =>
+            {
+                let names: Option<Vec<String>> = list
+                    .requireds()
+                    .iter()
+                    .map(|r| Some(constant_id_str(&r.as_required_parameter_node()?.name()).to_string()))
+                    .collect();
+                names.ok_or_else(|| refuse("its block parameters are not plain names"))?
+            }
+            Some(_) => return Err(refuse("its block parameters are not plain names")),
+        },
+        _ => return Err(refuse("its block parameters are not plain names")),
+    };
+    // Each element as the values its parameters read, in order.
+    let rows: Option<Vec<Vec<Node<'_>>>> = if let Some(array) = recv.as_array_node() {
+        array
+            .elements()
+            .iter()
+            .map(|e| match params.len() {
+                // Nothing reads the element, but Ruby still evaluates it.
+                0 => literal_text(&e).map(|_| Vec::new()),
+                1 => Some(vec![e]),
+                n => e.as_array_node().map(|a| a.elements().iter().collect::<Vec<_>>()).filter(|v| v.len() == n),
+            })
+            .collect()
+    } else if let Some(hash) = recv.as_hash_node() {
+        let rows: Option<Vec<Vec<Node<'_>>>> = (params.len() == 2)
+            .then(|| {
+                hash.elements()
+                    .iter()
+                    .map(|e| e.as_assoc_node().map(|a| vec![a.key(), a.value()]))
+                    .collect()
+            })
+            .flatten();
+        // `{ "x" => 1, "x" => 2 }` iterates one entry, the last value.
+        let kind = |n: &Node<'_>| {
+            [n.as_string_node().is_some(), n.as_symbol_node().is_some(), n.as_integer_node().is_some()]
+                .iter()
+                .position(|is| *is)
+        };
+        let keys: Vec<(Option<usize>, Option<String>)> =
+            rows.iter().flatten().map(|row| (kind(&row[0]), literal_text(&row[0]))).collect();
+        if keys.iter().enumerate().any(|(i, k)| k.1.is_some() && keys[..i].contains(k)) {
+            return Err(refuse("its Hash repeats a key"));
+        }
+        rows
+    } else {
+        None
+    };
+    let rows = rows.ok_or_else(|| refuse("it does not iterate a literal its parameters destructure"))?;
+    let texts: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| row.iter().map(literal_text).collect::<Option<Vec<_>>>())
+        .collect::<Option<_>>()
+        .ok_or_else(|| refuse("an element is not a plain literal"))?;
+    let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+    let mut tests = Vec::new();
+    for (row, text) in rows.iter().zip(&texts) {
+        for s in &statements {
+            let Some(test) = s.as_call_node().filter(|c| declares_test(s) && c.arguments().is_some()) else {
+                return Err(refuse("its block holds more than `test` declarations"));
+            };
+            // Only the name: Ruby would evaluate any further argument.
+            let args: Vec<Node<'_>> = test.arguments().map(|a| a.arguments().iter().collect()).unwrap_or_default();
+            let [name_node] = args.as_slice() else {
+                return Err(refuse("a test takes other than one name argument"));
+            };
+            let name = test_name(&name_node, &param_refs, row, text).ok_or_else(|| refuse("a test name is not a string the loop's parameters complete"))?;
+            // A blockless `test` is Rails' `flunk`; a forwarded block
+            // (`&body`) is not one this reads.
+            let Some(body) = test.block().and_then(|b| b.as_block_node()) else {
+                return Err(refuse("a test has no literal block"));
+            };
+            if body.parameters().is_some() {
+                return Err(refuse("a test block takes parameters"));
+            }
+            let body = body.body();
+            if body.as_ref().is_some_and(|b| !super::define_method_loop::closure_reads_only(b, &param_refs)) {
+                return Err(refuse("a test body writes a loop parameter or reaches another outer local"));
+            }
+            let mut exprs = Vec::new();
+            if let Some(body) = &body {
+                let reads = local_reads(body);
+                for (param, value) in params.iter().zip(row) {
+                    if reads.contains(param) {
+                        let name = Symbol::from(param.as_str());
+                        exprs.push(Expr::new(
+                            Span::synthetic(),
+                            ExprNode::Assign { target: LValue::Var { id: VarId(0), name }, value: ingest_expr(value, file)? },
+                        ));
+                    }
+                }
+                exprs.push(ingest_expr(body, file)?);
+            }
+            // Rails refuses a second test of one method name at load.
+            if tests.iter().any(|t: &Test| test_method_name(&t.name) == test_method_name(&name)) {
+                return Err(refuse(&format!("two elements name the same test `{name}`")));
+            }
+            tests.push(Test { name, body: Expr::new(Span::synthetic(), ExprNode::Seq { exprs }) });
+        }
+    }
+    Ok(Some(tests))
+}
+
+/// The method Rails' `test "name"` defines: `test_#{name.gsub(/\s+/, "_")}`.
+fn test_method_name(name: &str) -> String {
+    let mut out = String::from("test_");
+    let mut in_space = false;
+    for c in name.chars() {
+        // Ruby's `\s`.
+        if matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r') {
+            if !in_space {
+                out.push('_');
+            }
+            in_space = true;
+        } else {
+            out.push(c);
+            in_space = false;
+        }
+    }
+    out
+}
+
+/// Add a test the class body declares as Ruby method `method`. A second
+/// `def` of one method replaces the first, as Ruby does; a second `test`
+/// of one is refused, as Rails raises at load. Two different methods the
+/// emit would name alike (`"YouTube"` and `"youtube"` are both
+/// `test_youtube` there) are refused too: one would replace the other.
+fn add_test(acc: &mut ClassBody, test: Test, method: String, redefine: bool, file: &str) -> IngestResult<()> {
+    if let Some(at) = acc.test_methods.iter().position(|m| *m == method) {
+        if redefine {
+            acc.tests[at] = test;
+            return Ok(());
+        }
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!("`{method}` is declared twice, which Rails refuses at load"),
+        });
+    }
+    let emitted = crate::lower::test_module_to_library::sanitize_test_name(&test.name);
+    if let Some(other) = acc.tests.iter().find(|t| crate::lower::test_module_to_library::sanitize_test_name(&t.name) == emitted) {
+        return Err(IngestError::Unsupported {
+            file: file.into(),
+            message: format!(
+                "the tests `{}` and `{}` would both be emitted as `test_{emitted}`, so one would replace the other",
+                other.name, test.name
+            ),
+        });
+    }
+    acc.tests.push(test);
+    acc.test_methods.push(method);
+    Ok(())
+}
+
+/// What `"#{node}"` reads for a plain literal, or `None` for anything
+/// else (a Float's text is Ruby's to decide, not its source's).
+fn literal_text(node: &Node<'_>) -> Option<String> {
+    if let Some(s) = node.as_string_node() {
+        return Some(String::from_utf8_lossy(s.unescaped()).into_owned());
+    }
+    if let Some(s) = node.as_symbol_node() {
+        return Some(String::from_utf8_lossy(s.unescaped()).into_owned());
+    }
+    if let Some(i) = node.as_integer_node() {
+        let text = String::from_utf8_lossy(i.location().as_slice()).replace('_', "");
+        // `010` (and `-010`) is octal in Ruby; only plain decimal text
+        // reads as written.
+        let digits = text.trim_start_matches(['-', '+']);
+        if digits.len() > 1 && digits.starts_with('0') {
+            return None;
+        }
+        return text.parse::<i64>().ok().map(|n| n.to_string());
+    }
+    if node.as_true_node().is_some() {
+        return Some("true".into());
+    }
+    if node.as_false_node().is_some() {
+        return Some("false".into());
+    }
+    node.as_nil_node().map(|_| String::new())
+}
+
+/// A loop test's name: a plain string, a parameter holding a String, or
+/// a string interpolating only the loop's parameters, read with this
+/// element's `texts`.
+fn test_name(node: &Node<'_>, params: &[&str], row: &[Node<'_>], texts: &[String]) -> Option<String> {
+    if let Some(s) = node.as_string_node() {
+        return Some(String::from_utf8_lossy(s.unescaped()).into_owned());
+    }
+    if let Some(read) = node.as_local_variable_read_node().filter(|r| r.depth() == 0) {
+        let at = params.iter().position(|p| *p == constant_id_str(&read.name()))?;
+        // `test kind` names the test by the String itself; Rails'
+        // `name.gsub` raises for anything else.
+        return row[at].as_string_node().map(|_| texts[at].clone());
+    }
+    let mut out = String::new();
+    for part in node.as_interpolated_string_node()?.parts().iter() {
+        if let Some(s) = part.as_string_node() {
+            out.push_str(&String::from_utf8_lossy(s.unescaped()));
+            continue;
+        }
+        let stmts: Vec<Node<'_>> = part.as_embedded_statements_node()?.statements()?.body().iter().collect();
+        let [only] = stmts.as_slice() else { return None };
+        let read = only.as_local_variable_read_node().filter(|r| r.depth() == 0)?;
+        let at = params.iter().position(|p| *p == constant_id_str(&read.name()))?;
+        out.push_str(&texts[at]);
+    }
+    Some(out)
+}
+
+/// The names of the locals `node` reads, at any depth.
+fn local_reads(node: &Node<'_>) -> Vec<String> {
+    struct Reads(Vec<String>);
+    impl<'pr> ruby_prism::Visit<'pr> for Reads {
+        fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+            self.0.push(constant_id_str(&node.name()).to_string());
+        }
+    }
+    let mut reads = Reads(Vec::new());
+    ruby_prism::Visit::visit(&mut reads, node);
+    reads.0
 }
 
 #[cfg(test)]
@@ -1305,5 +1778,91 @@ end
         let helpers: Vec<&str> =
             tms[0].inner_classes.iter().map(|lc| lc.name.0.as_str()).collect();
         assert_eq!(helpers, ["Fakes::Client"]);
+    }
+
+    fn loop_test_names(src: &str) -> IngestResult<Vec<String>> {
+        let tms = ingest_test_files(src.as_bytes(), "loop_test.rb")?;
+        Ok(tms[0].tests.iter().map(|t| t.name.clone()).collect())
+    }
+
+    // A test per element, as Minitest defines them when the class body
+    // runs the loop. They used to be skipped with the loop.
+    #[test]
+    fn a_class_body_loop_declares_a_test_per_element() {
+        let src = r##"
+class LoopTest < ActiveSupport::TestCase
+  { "short" => "Hi", "long" => "Hello" }.each do |label, title|
+    test "a #{label} title" do
+      assert_equal title, title.dup
+    end
+  end
+
+  [[:one, 1], [:two, 2]].each do |name, n|
+    test "#{name} is #{n}" do
+      assert n
+    end
+  end
+
+  %w[a b].each do |letter|
+    test "letter #{letter}" do
+    end
+  end
+end
+"##;
+        let names = loop_test_names(src).expect("ingest");
+        assert_eq!(names, ["a short title", "a long title", "one is 1", "two is 2", "letter a", "letter b"]);
+    }
+
+    // Rails names `def test_a__b` itself and `test "a b"` `test_a_b`:
+    // two tests, and a second `def` only redefines the first.
+    #[test]
+    fn test_methods_keep_their_ruby_names() {
+        let src = "class NamesTest < ActiveSupport::TestCase\n  def test_a__b\n    assert false\n  end\n  def test_a__b\n  end\n  test \"a b c\" do\n  end\nend\n";
+        assert_eq!(loop_test_names(src).expect("ingest"), ["a  b", "a b c"]);
+    }
+
+    // Neither is a test: Minitest's `self.test_order`, and `Kernel#test`.
+    #[test]
+    fn methods_named_like_tests_are_not_refused() {
+        let src = "class OrderTest < ActiveSupport::TestCase\n  class << self\n    def test_order\n      :alphabetical\n    end\n  end\n  READY = test(?e, __FILE__)\n  [1].each { |n| test(?d, n.to_s) }\n  define_method(:t) { 1 }\n  def self.test_order\n    :alpha\n  end\n\n  test \"runs\" do\n  end\n  test \"order\" do\n  end\n  { 1 => \"one\", \"1\" => \"string one\" }.each do |k, v|\n    test v do\n    end\n  end\nend\n";
+        assert_eq!(loop_test_names(src).expect("ingest"), ["runs", "order", "one", "string one"]);
+    }
+
+    // A loop it cannot unroll is an error naming the file, not a drop.
+    #[test]
+    fn a_loop_it_cannot_unroll_is_reported() {
+        for (shape, why) in [
+            ("KINDS.each do |kind|\n    test \"#{kind}\" do\n    end\n  end", "does not iterate a literal"),
+            ("2.times do |n|\n    test \"#{n}\" do\n    end\n  end", "not `each` over a literal"),
+            ("%w[a b].each do |kind|\n    test \"same\" do\n    end\n  end", "two elements name the same test"),
+            ("%w[a b].each do |kind|\n    test \"#{kind.upcase}\" do\n    end\n  end", "not a string the loop's parameters complete"),
+            ("test \"#{KIND} works\" do\n  end", "not a string literal"),
+            ("[\"a b\", \"a  b\"].each do |kind|\n    test kind do\n    end\n  end", "two elements name the same test"),
+            ("[010].each do |n|\n    test \"n#{n}\" do\n    end\n  end", "not a plain literal"),
+            ("test \"one\" do\n  end\n  %w[one].each do |n|\n    test n do\n    end\n  end", "declared twice"),
+            ("[prepare].each do\n    test \"ready\" do\n    end\n  end", "does not iterate a literal"),
+            ("%w[a].each do |n|\n    test(n, &BODY)\n    test \"#{n} 2\" do\n    end\n  end", "no literal block"),
+            ("%w[a].each do |n|\n    test \"#{n} pending\"\n    test \"#{n}\" do\n    end\n  end", "no literal block"),
+            ("%w[a b].each do |n|\n    test \"#{n} pending\"\n  end", "no literal block"),
+            ("{ \"x\" => 1, \"x\" => 2 }.each do |k, v|\n    test \"#{k} #{v}\" do\n    end\n  end", "repeats a key"),
+            ("[:test_generated].each do |m|\n    define_method(m) do\n    end\n  end", "holds more than `test` declarations"),
+            ("%w[YouTube youtube].each do |n|\n    test n do\n    end\n  end", "would both be emitted as `test_youtube`"),
+            ("[1].each do |n|\n    test \"#{n}\", (raise \"bad\") do\n    end\n  end", "other than one name argument"),
+            // One Ruby method; then two Ruby methods the emit names alike.
+            ("def test_a__b\n  end\n  test \"a__b\" do\n  end", "`test_a__b` is declared twice"),
+            ("def test_a__b\n  end\n  test \"a b\" do\n  end", "would both be emitted as `test_a_b`"),
+            ("%w[one].each do |n|\n    test n do\n    end\n  end\n  test \"one\" do\n  end", "declared twice"),
+            ("[-010].each do |n|\n    test \"n#{n}\" do\n    end\n  end", "not a plain literal"),
+            ("%w[a b].each do |x|\n    %w[c d].each do |y|\n      test \"#{x}#{y}\" do\n      end\n    end\n  end", "holds more than `test` declarations"),
+            ("%w[a b].each do |x|\n    if x\n      test x do\n      end\n    end\n  end", "holds more than `test` declarations"),
+            ("if ENV[\"SLOW\"]\n    test \"slow\" do\n    end\n  end", "inside this class-body statement"),
+            ("define_method(\"test_dynamic\") do\n  end", "inside this class-body statement"),
+        ] {
+            let src = format!("class LoopTest < ActiveSupport::TestCase\n  {shape}\nend\n");
+            let err = loop_test_names(&src).expect_err(shape);
+            let IngestError::Unsupported { file, message } = err else { panic!("{err:?}") };
+            assert_eq!(file, "loop_test.rb");
+            assert!(message.contains(why), "{shape}: {message}");
+        }
     }
 }

@@ -188,6 +188,7 @@ fn tiny_blog_round_trips() {
         database_refusals: Vec::new(),
         database_routes: None,
         ingest_drops: Vec::new(),
+        test_drops: Vec::new(),
         library_class_files: Vec::new(),
         rbs_includes: Default::default(),
         rbs_spellings: Default::default(),

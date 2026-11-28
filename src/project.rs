@@ -7996,8 +7996,12 @@ fn apply_database_pragmas(files: &mut [(String, String)], app: &App) {
 /// one `route` per shard and role, under an arm per environment whose
 /// configurations the runtime can open (`Database::routable`). The
 /// primary is the database `configure` was given, so its route names no
-/// file. An environment without an arm raises at boot: a model is never
-/// left on the primary because its own database is unknown.
+/// file; every other route reads its file from `::AppDatabase.path_for_name`
+/// (boot.rb, `apply_database_paths`), beside the `path_for` that
+/// `Main.default_db_path` asks for the primary. Rooted, so an app's own
+/// `Db::AppDatabase` does not answer it. An environment without an arm
+/// raises at boot: a model is never left on the primary because its own
+/// database is unknown.
 fn apply_database_routes(files: &mut [(String, String)], app: &App) {
     const MARK: &str = "    # >>> generated: database-routes\n";
     let Some(routes) = &app.database_routes else { return };
@@ -8024,12 +8028,13 @@ fn apply_database_routes(files: &mut [(String, String)], app: &App) {
         let readers = routes.routes.iter().filter(|(_, role, _)| role != "writing");
         for (shard, role, name) in writers.chain(readers) {
             let Some(database) = config(name) else { continue };
-            let file = if database.primary { "" } else { database.database.as_deref().unwrap_or("") };
+            // `routable` admits only a literal SQLite file, which `apply_database_paths` answers under the same env and name.
+            let file = if database.primary { lit("") } else { format!("::AppDatabase.path_for_name({}, {})", lit(env), lit(name)) };
             generated.push_str(&format!(
                 "      route({}, {}, {}, {}, {}, n)\n",
                 symbol(shard),
                 symbol(role),
-                lit(file),
+                file,
                 database.replica,
                 role == "writing"
             ));
@@ -8801,9 +8806,20 @@ fn apply_rails_version(files: &mut [(String, String)], app: &App) {
 
 /// `config/database.yml`'s main database per environment, as
 /// `AppDatabase.path_for(env)` in boot.rb, for `Main.default_db_path`:
-/// with `RAILS_ENV=production` the binary opens the file Rails would,
-/// not `storage/development.sqlite3`. Always defined (nil for an
+/// with `RAILS_ENV=production` the binary opens the file the file names
+/// there, not `storage/development.sqlite3`. That is ingest's primary (the
+/// configuration named `primary`, else the first); Rails boots on the
+/// environment's first configuration even when a later one is named
+/// `primary`, so the two differ for that order. Always defined (nil for an
 /// environment the file does not name), so main.rb can call it as is.
+///
+/// Beside it, in an app with role and shard routes, which call it
+/// (`apply_database_routes`): `AppDatabase.path_for_name(env, name)`, the
+/// literal `database:` of each SQLite configuration ingest reads, by
+/// environment and String name. Only the forms ingest reads are there: a
+/// configuration under a String key with its own keys and merges, not a
+/// top-level `shared:` block, a non-String key, or a `:name` key by its
+/// Symbol name.
 fn apply_database_paths(files: &mut [(String, String)], app: &App) {
     const MARK: &str = "# The app's database per environment, from config/database.yml";
     let Some((_, boot)) = files.iter_mut().find(|(p, _)| p == "boot.rb") else { return };
@@ -8829,9 +8845,32 @@ fn apply_database_paths(files: &mut [(String, String)], app: &App) {
     if paths.is_empty() {
         body = "    nil\n".to_string();
     }
+    let lit = |text: &str| crate::emit::ruby::expr::ruby_str_literal(text);
+    // A method of its own, so that no name stands for the primary (a quoted `""` key names a configuration too) and
+    // the one-argument call keeps its shape. Only an app with routes has it: they are what call it.
+    let routed = app.database_routes.is_some();
+    let named: Vec<_> = app.databases.iter().filter(|d| routed && d.adapter == crate::database::DatabaseAdapter::Sqlite3 && d.database.is_some()).collect();
+    let mut envs: Vec<&str> = Vec::new();
+    for database in &named {
+        if !envs.contains(&database.env.as_str()) {
+            envs.push(&database.env);
+        }
+    }
+    let mut by_name = String::new();
+    if !envs.is_empty() {
+        by_name.push_str("\n  # Each SQLite configuration's literal file, by environment and name.\n  def self.path_for_name(env, name)\n    case env\n");
+        for env in &envs {
+            by_name.push_str(&format!("    when {}\n      case name\n", lit(env)));
+            for database in named.iter().filter(|d| d.env == *env) {
+                by_name.push_str(&format!("      when {} then {}\n", lit(&database.name), lit(database.database.as_deref().unwrap_or_default())));
+            }
+            by_name.push_str("      end\n");
+        }
+        by_name.push_str("    end\n  end\n");
+    }
     boot.push_str(&format!(
         "\n{MARK} (see project.rs::apply_database_paths).\n\
-         module AppDatabase\n  def self.path_for(env)\n{body}  end\nend\n"
+         module AppDatabase\n  def self.path_for(env)\n{body}  end\n{by_name}end\n"
     ));
 }
 

@@ -13,6 +13,8 @@
 mod emit_and_run;
 #[path = "support/database_routes.rs"]
 mod contract;
+#[path = "support/prerequisite.rs"]
+mod prerequisite;
 
 use roundhouse::project::BuildTarget;
 
@@ -40,10 +42,10 @@ fn spinel_registers_each_shard_and_role_and_no_other_target_takes_the_app() {
     for line in [
         "when \"development\", \"\"\n",
         "when \"test\"\n",
-        "route(:left, :writing, \"storage/left.sqlite3\", false, true, n)\n",
-        "route(:left, :reading, \"storage/left.sqlite3\", true, false, n)\n",
-        "route(:right, :writing, \"storage/right.sqlite3\", false, true, n)\n",
-        "route(:right, :reading, \"storage/right.sqlite3\", true, false, n)\n",
+        "route(:left, :writing, ::AppDatabase.path_for_name(\"development\", \"left\"), false, true, n)\n",
+        "route(:left, :reading, ::AppDatabase.path_for_name(\"development\", \"left_reader\"), true, false, n)\n",
+        "route(:right, :writing, ::AppDatabase.path_for_name(\"development\", \"right\"), false, true, n)\n",
+        "route(:right, :reading, ::AppDatabase.path_for_name(\"development\", \"right_reader\"), true, false, n)\n",
         "@default_shard = :left\n",
     ] {
         assert!(routes.contains(line), "missing {line:?} in:\n{routes}");
@@ -58,6 +60,106 @@ fn spinel_registers_each_shard_and_role_and_no_other_target_takes_the_app() {
     assert!(ruby.iter().any(|e| e.contains("only the spinel target's runtime opens them")), "{ruby:#?}");
 }
 
+/// The emitted app's generated route region, run in Ruby inside `module Db`
+/// as `Db.configure` runs it, with boot.rb's `AppDatabase` and an app's own
+/// `Db::AppDatabase` beside it: one line per route, `shard role file`,
+/// after the primary `Main.default_db_path` asks for.
+fn routed_files(emitted: &std::path::Path, env: &str) -> String {
+    let db = std::fs::read_to_string(emitted.join("runtime/db.rb")).unwrap();
+    let boot = std::fs::read_to_string(emitted.join("boot.rb")).unwrap();
+    let routes = generated(&db);
+    let start = boot.find("module AppDatabase\n").expect("module AppDatabase");
+    let resolver = &boot[start..start + boot[start..].find("\nend\n").expect("module end") + 5];
+    let script = format!(
+        "module Rails\n  def self.env_name\n    ENV[\"RAILS_ENV\"]\n  end\nend\n{resolver}\
+         module Db\n  module AppDatabase\n    def self.path_for_name(env, name)\n      \"storage/decoy.sqlite3\"\n    end\n  end\n\n\
+         \x20 def self.route(shard, role, path, replica, schema, n)\n    puts \"#{{shard}} #{{role}} #{{path}}\"\n  end\n\n  def self.run\n    n = 8\n{routes}\n  end\nend\n\
+         puts AppDatabase.path_for(Rails.env_name.to_s.empty? ? \"development\" : Rails.env_name)\nDb.run\n"
+    );
+    let output = std::process::Command::new("ruby").env("RAILS_ENV", env).args(["-e", &script]).output().expect("run ruby");
+    assert!(output.status.success(), "{script}\n{}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// The registrations read their files from boot.rb's resolver, beside the
+/// one `Main.default_db_path` asks for the primary, by its root name: an
+/// app's own `Db::AppDatabase` does not answer them. Run in Ruby, the
+/// generated region routes each shard and role of `RAILS_ENV=production`
+/// to the file config/database.yml names for it there.
+#[test]
+fn each_route_reads_its_file_from_the_resolver() {
+    let development = contract::database_yml();
+    let production = development.split("test:\n").next().unwrap().replacen("development:", "production:", 1).replace("storage/", "/data/app/");
+    let (emitted, errors) = shards().write("config/database.yml", &format!("{development}{production}")).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let db = std::fs::read_to_string(emitted.join("runtime/db.rb")).unwrap();
+    assert!(!generated(&db).contains("sqlite3\""), "a route names a file of its own:\n{}", generated(&db));
+    assert_eq!(
+        routed_files(&emitted, "production"),
+        "/data/app/primary.sqlite3\nleft writing /data/app/left.sqlite3\nright writing /data/app/right.sqlite3\nleft reading /data/app/left.sqlite3\nright reading /data/app/right.sqlite3\n"
+    );
+    assert_eq!(
+        routed_files(&emitted, ""),
+        "storage/primary.sqlite3\nleft writing storage/left.sqlite3\nright writing storage/right.sqlite3\nleft reading storage/left.sqlite3\nright reading storage/right.sqlite3\n"
+    );
+}
+
+/// A quoted `""` key names a configuration, as in Rails: a reading role
+/// that names it reads its file, not the primary's.
+#[test]
+fn an_empty_configuration_name_is_a_name() {
+    let yml = "test:\n  primary: { adapter: sqlite3, database: storage/primary.sqlite3 }\n  \"\": { adapter: sqlite3, database: storage/reader.sqlite3, replica: true }\n";
+    let record = "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\n  connects_to database: { writing: :primary, reading: :\"\" }\nend\n";
+    let report = "class RouteReport\n  def self.run\n    ApplicationRecord.connected_to(role: :reading) { Note.count }\n  end\nend\n";
+    let (emitted, errors) = contract::app(record, report).write("config/database.yml", yml).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert_eq!(routed_files(&emitted, "test"), "storage/primary.sqlite3\ndefault writing \ndefault reading storage/reader.sqlite3\n");
+}
+
+/// `AppDatabase.path_for_name` answers as Rails 8.1.4's
+/// `configs_for(env_name:, name:, include_hidden: true).database` for each
+/// SQLite configuration (`load_defaults` plays no part), including a
+/// replica and an empty name, and nil where Rails finds none. Rails runs
+/// on this file alone: RAILS_ENV pinned, no `DATABASE_URL` or
+/// `<NAME>_DATABASE_URL` from the caller.
+#[test]
+fn the_named_lookup_answers_as_rails_configs_for() {
+    let yml = "test:\n  primary: { adapter: sqlite3, database: storage/primary.sqlite3 }\n  reader: { adapter: sqlite3, database: storage/reader.sqlite3, replica: true }\n  \"\": { adapter: sqlite3, database: storage/empty.sqlite3, replica: true }\n  cache: { adapter: sqlite3, database: storage/cache.sqlite3 }\n\
+               production:\n  primary: { adapter: sqlite3, database: /data/app/primary.sqlite3 }\n  reader: { adapter: sqlite3, database: /data/app/reader.sqlite3, replica: true }\n";
+    let record = "class ApplicationRecord < ActiveRecord::Base\n  self.abstract_class = true\n  connects_to database: { writing: :primary, reading: :reader }\nend\n";
+    let report = "class RouteReport\n  def self.run\n    ApplicationRecord.connected_to(role: :reading) { Note.count }\n  end\nend\n";
+    let (emitted, errors) = contract::app(record, report).write("config/database.yml", yml).emit(BuildTarget::Spinel);
+    assert!(errors.is_empty(), "{errors:#?}");
+    let calls = [("test", "primary"), ("test", "reader"), ("test", ""), ("test", "cache"), ("test", "queue"), ("production", "primary"), ("production", "reader"), ("production", "cache"), ("staging", "primary")];
+    let oracle = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/rails_oracle.rb");
+    let lookups: String = calls.iter().map(|(env, name)| format!("p configs.configs_for(env_name: {env:?}, name: {name:?}, include_hidden: true)&.database\n")).collect();
+    let script = format!(
+        "require {oracle:?}\nexit 77 unless RailsOracle.available?(\"activerecord\")\nRailsOracle.activate(\"activerecord\")\n\
+         require \"active_record\"\nrequire \"active_record/database_configurations\"\nrequire \"yaml\"\n\
+         configs = ActiveRecord::DatabaseConfigurations.new(YAML.safe_load({yml:?}))\n{lookups}"
+    );
+    let mut command = std::process::Command::new("ruby");
+    command.env("RAILS_ENV", "test").env_remove("RACK_ENV").env_remove("DATABASE_URL");
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().ends_with("_DATABASE_URL") {
+            command.env_remove(key);
+        }
+    }
+    let rails = command.args(["-e", &script]).output().expect("run ruby");
+    if rails.status.code() == Some(77) {
+        prerequisite::missing("Rails oracle with activerecord");
+        return;
+    }
+    assert!(rails.status.success(), "{}", String::from_utf8_lossy(&rails.stderr));
+    let boot = std::fs::read_to_string(emitted.join("boot.rb")).unwrap();
+    let start = boot.find("module AppDatabase\n").expect("module AppDatabase");
+    let resolver = &boot[start..start + boot[start..].find("\nend\n").expect("module end") + 5];
+    let probes: String = calls.iter().map(|(env, name)| format!("p AppDatabase.path_for_name({env:?}, {name:?})\n")).collect();
+    let emitted_answers = std::process::Command::new("ruby").args(["-e", &format!("{resolver}{probes}")]).output().expect("run ruby");
+    assert!(emitted_answers.status.success(), "{resolver}\n{}", String::from_utf8_lossy(&emitted_answers.stderr));
+    assert_eq!(String::from_utf8_lossy(&emitted_answers.stdout), String::from_utf8_lossy(&rails.stdout), "{resolver}");
+}
+
 /// A shard whose name starts with a digit is written quoted, as Ruby
 /// reads it: `:2026` does not parse.
 #[test]
@@ -66,8 +168,8 @@ fn a_shard_named_with_a_leading_digit_is_quoted() {
     let (db, errors) = spinel_db(contract::app(&record, "class RouteReport\nend\n"));
     assert!(errors.is_empty(), "{errors:#?}");
     let routes = generated(&db);
-    assert!(routes.contains("route(:\"2026\", :writing, \"storage/left.sqlite3\", false, true, n)\n"), "{routes}");
-    assert!(routes.contains("route(:right, :writing, \"storage/right.sqlite3\", false, true, n)\n"), "{routes}");
+    assert!(routes.contains("route(:\"2026\", :writing, ::AppDatabase.path_for_name(\"development\", \"left\"), false, true, n)\n"), "{routes}");
+    assert!(routes.contains("route(:right, :writing, ::AppDatabase.path_for_name(\"development\", \"right\"), false, true, n)\n"), "{routes}");
     assert!(routes.contains("@default_shard = :\"2026\"\n"), "{routes}");
 }
 
@@ -153,7 +255,7 @@ fn a_primary_writer_with_a_reading_role_routes_once_a_block_reads_from_it() {
     assert!(errors.is_empty(), "{errors:#?}");
     let routes = generated(&db);
     assert!(routes.contains("route(:default, :writing, \"\", false, true, n)\n"), "{routes}");
-    assert!(routes.contains("route(:default, :reading, \"storage/left.sqlite3\", true, false, n)\n"), "{routes}");
+    assert!(routes.contains("route(:default, :reading, ::AppDatabase.path_for_name(\"development\", \"left_reader\"), true, false, n)\n"), "{routes}");
     assert!(routes.contains("@default_shard = :default\n"), "{routes}");
     let (_, ruby) = contract::app(&record, report).emit(BuildTarget::Ruby);
     assert!(ruby.iter().any(|e| e.contains("only the spinel target's runtime opens them")), "{ruby:#?}");

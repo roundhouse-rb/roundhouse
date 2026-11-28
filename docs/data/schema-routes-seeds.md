@@ -357,7 +357,14 @@ Rails' default for another database is a schema file of its own, which
 is not read. `Db.configure` then opens a pool per shard and role, in an
 arm per environment the file describes this way, and creates the
 schema's tables in each writable file; an environment without an arm
-raises at boot. The roles are Rails' defaults, `writing` and `reading`.
+raises at boot. Each pool's file comes from
+`AppDatabase.path_for_name(env, name)` in boot.rb, beside the
+`AppDatabase.path_for(env)` the server asks for the primary: the literal
+`database:` of each SQLite configuration read as above, by environment
+and String name. Rails' other spellings are not read there: a top-level
+`shared:` block, a non-String key such as `2026`, and a `:cache` key,
+which Rails names `cache`. The roles are Rails' defaults, `writing` and
+`reading`.
 
 In such an app `connected_to` and `while_preventing_writes` run as in
 Rails 8.1.4, on `ActiveRecord::Base` or the connection class, with a

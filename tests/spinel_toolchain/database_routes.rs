@@ -97,6 +97,23 @@ fn writable_routes_create_missing_parent_directories() {
     assert_eq!(run.stdout, "0\ntrue\n");
 }
 
+/// `Db.configure` opens each route's file from boot.rb's resolver by its
+/// root name, so an app's own `Db::AppDatabase` does not redirect it: the
+/// write lands in the shard's file, as in Rails.
+#[test]
+#[ignore = "requires the Spinel toolchain, run in its CI lane"]
+fn an_apps_own_db_app_database_does_not_redirect_a_route() {
+    let decoy = "module Db\n  module AppDatabase\n    def self.path_for_name(env, name)\n      \"storage/decoy.sqlite3\"\n    end\n  end\nend\n";
+    let run = contract::app(contract::SHARDS, &contract::shards_report())
+        .write("app/models/db/app_database.rb", decoy)
+        .run_spinel(&format!(
+            "{}ApplicationRecord.connected_to(shard: :right) {{ Note.create!(tag: \"r\") }}\nApplicationRecord.connected_to(shard: :right) {{ puts Note.count }}\nputs File.exist?(\"storage/decoy.sqlite3\")",
+            contract::BOOT
+        ));
+    run.assert_passes();
+    assert_eq!(run.stdout, "1\nfalse\n", "{}", run.stderr);
+}
+
 #[test]
 #[ignore = "requires the Spinel toolchain, run in its CI lane"]
 fn writable_route_parents_tolerate_concurrent_creators() {

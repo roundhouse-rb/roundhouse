@@ -494,7 +494,10 @@ pub(crate) fn classes_with_own_url_options(app: &App) -> crate::det::HashSet<cra
     fn owns(methods: &[&crate::dialect::MethodDef]) -> bool {
         let sides: Vec<&crate::dialect::MethodReceiver> =
             methods.iter().filter(|m| m.name.as_str() == "default_url_options").map(|m| &m.receiver).collect();
-        !sides.is_empty() && methods.iter().all(|m| sides.contains(&&m.receiver) || !calls_url_with_options(&m.body))
+        // A class side's covers the instance side too (Rails' class_attribute reader), not the other way round.
+        let class_side = sides.contains(&&crate::dialect::MethodReceiver::Class);
+        !sides.is_empty()
+            && methods.iter().all(|m| sides.contains(&&m.receiver) || class_side || !calls_url_with_options(&m.body))
     }
     let mut out = crate::det::HashSet::default();
     for lc in &app.library_classes {

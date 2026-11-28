@@ -4635,6 +4635,13 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 MethodReceiver::Instance => inherited_instance.iter().cloned(),
                 MethodReceiver::Class => inherited_class.iter().cloned(),
             });
+            let url_options = Symbol::from("default_url_options");
+            if m.receiver == MethodReceiver::Instance
+                && !own_methods.contains(&url_options)
+                && (declared_class.contains(&url_options) || inherited_class.contains(&url_options))
+            {
+                own_methods.insert(Symbol::from(CLASS_URL_OPTIONS));
+            }
             for default in m.params.iter_mut().filter_map(|p| p.default.as_mut()) {
                 rewrite_url_helpers_absolute(default);
                 rewrite_helper_calls(
@@ -5909,7 +5916,9 @@ fn rewrite_helper_calls(
             let path_name = Symbol::from(format!("{stem}_path"));
             if route_helpers.contains(&path_name) {
                 *expr = if own_methods.contains(&Symbol::from("default_url_options")) {
-                    url_for_own_options(stem, args.clone())
+                    url_for_own_options(stem, args.clone(), false)
+                } else if own_methods.contains(&Symbol::from(CLASS_URL_OPTIONS)) {
+                    url_for_own_options(stem, args.clone(), true)
                 } else {
                     crate::lower::view_to_library::absolute_url_interp(stem, args.clone())
                 };
@@ -6471,7 +6480,11 @@ fn typed_layout_expr(span: crate::span::Span, node: ExprNode, ty: crate::ty::Ty)
 ///     as Rails' `build_host_url` leaves it out.
 /// `ActionView::ViewHelpers.url_for_options(RouteHelpers.<stem>_path(args), default_url_options)`:
 /// a bare `<x>_url` in a class that defines its own `default_url_options`.
-fn url_for_own_options(stem: &str, mut args: Vec<Expr>) -> Expr {
+/// Not a method name Ruby can define, so it marks an instance side whose `default_url_options` is the class's
+/// (Rails' class_attribute reader) without colliding with a real method.
+const CLASS_URL_OPTIONS: &str = "class.default_url_options";
+
+fn url_for_own_options(stem: &str, mut args: Vec<Expr>, class_side: bool) -> Expr {
     let synth = |node: ExprNode| Expr::new(crate::span::Span::synthetic(), node);
     // The call's own `protocol:` over the class's (Rails merges the call's options over `default_url_options`); the
     // path helper renders no scheme.
@@ -6495,7 +6508,10 @@ fn url_for_own_options(stem: &str, mut args: Vec<Expr>) -> Expr {
         block: None,
         parenthesized: true,
     });
-    let mut options = synth(ExprNode::Send { recv: None, method: Symbol::from("default_url_options"), args: vec![], block: None, parenthesized: false });
+    let options_recv = class_side.then(|| {
+        synth(ExprNode::Send { recv: Some(synth(ExprNode::SelfRef)), method: Symbol::from("class"), args: vec![], block: None, parenthesized: false })
+    });
+    let mut options = synth(ExprNode::Send { recv: options_recv, method: Symbol::from("default_url_options"), args: vec![], block: None, parenthesized: false });
     if !taken.is_empty() {
         options = synth(ExprNode::Send {
             recv: Some(options),

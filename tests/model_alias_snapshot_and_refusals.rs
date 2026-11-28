@@ -173,3 +173,65 @@ fn a_name_defined_nowhere_refuses() {
     assert!(diags.iter().all(|d| d.severity != Severity::Error), "survey mode: demoted, not fatal");
     assert_eq!(gaps.len(), 1, "survey mode: recorded as a gap: {gaps:?}");
 }
+
+/// **Refusal shape**: an alias whose new name is an association reader.
+/// The methods the association generates (`gadget_ids`, its cache, its
+/// dependents) call the reader by name, so a copy in its place breaks
+/// them; the model keeps the association reader instead.
+#[test]
+fn an_alias_that_replaces_an_association_reader_refuses() {
+    let (app, _lc, mut diags) = lower_widget(
+        "class Widget < ApplicationRecord\n  has_many :gadgets\n\n  def first_gadget\n    gadgets.first\n  end\n  alias gadgets first_gadget\nend\n",
+    );
+    let unresolved = alias_unresolved_diags(&diags);
+    assert_eq!(unresolved.len(), 1, "exactly one gap: {diags:?}");
+    assert_eq!(unresolved[0].severity, Severity::Error, "strict mode: an error");
+    assert!(unresolved[0].message.contains("association reader"), "{}", unresolved[0].message);
+
+    let mut gaps = Vec::new();
+    attribute_analysis_gaps(&mut diags, &app, &mut gaps);
+    assert!(diags.iter().all(|d| d.severity != Severity::Error), "survey mode: demoted, not fatal");
+    assert_eq!(gaps.len(), 1, "survey mode: recorded as a gap: {gaps:?}");
+}
+
+/// **Refusal shape**: an alias of a name whose own alias was refused.
+/// The model keeps that name's earlier definition (the association
+/// reader), which is not what Ruby's alias would copy.
+#[test]
+fn an_alias_of_a_refused_alias_refuses() {
+    let (_app, lc, diags) = lower_widget(
+        "class Widget < ApplicationRecord\n  has_many :gadgets\n\n  def first_gadget\n    gadgets.first\n  end\n  alias gadgets first_gadget\n  alias parts gadgets\nend\n",
+    );
+    let unresolved = alias_unresolved_diags(&diags);
+    assert_eq!(unresolved.len(), 2, "both aliases refused: {diags:?}");
+    assert!(unresolved[1].message.contains("refused above"), "{}", unresolved[1].message);
+    assert!(!lc.methods.iter().any(|m| m.name.as_str() == "parts"));
+}
+
+/// A later `def` takes the association's name back, so the alias copy is
+/// never kept and nothing is refused.
+#[test]
+fn an_alias_over_an_association_a_later_def_replaces_does_not_refuse() {
+    let (_app, _lc, diags) = lower_widget(
+        "class Widget < ApplicationRecord\n  has_many :gadgets\n\n  def first_gadget\n    gadgets.first\n  end\n  alias gadgets first_gadget\n\n  def gadgets\n    super\n  end\nend\n",
+    );
+    assert!(alias_unresolved_diags(&diags).is_empty(), "{diags:?}");
+}
+
+/// A name whose alias was refused, defined again below by a `def` or by
+/// an alias that resolves, is that new definition from there on: an
+/// alias of it copies it and is not refused.
+#[test]
+fn a_refused_alias_name_defined_again_can_be_copied() {
+    let (_app, lc, diags) = lower_widget(
+        "class Widget < ApplicationRecord\n  has_many :gadgets\n\n  def first_gadget\n    gadgets.first\n  end\n  alias gadgets first_gadget\n  alias parts gadgets\n\n  def parts\n    42\n  end\n  alias pieces parts\nend\n",
+    );
+    assert_eq!(alias_unresolved_diags(&diags).len(), 2, "only `gadgets` and the `parts` alias: {diags:?}");
+    assert!(lc.methods.iter().any(|m| m.name.as_str() == "pieces"), "`pieces` copies `def parts`");
+
+    let (_app, lc, diags) = lower_widget(
+        "class Widget < ApplicationRecord\n  has_many :gadgets\n\n  def first_gadget\n    gadgets.first\n  end\n  alias gadgets first_gadget\n  alias parts gadgets\n  alias parts first_gadget\n  alias pieces parts\nend\n",
+    );
+    assert_eq!(alias_unresolved_diags(&diags).len(), 2, "only `gadgets` and the first `parts` alias: {diags:?}");
+    assert!(lc.methods.iter().any(|m| m.name.as_str() == "pieces"), "`pieces` copies the second `parts` alias");
+}

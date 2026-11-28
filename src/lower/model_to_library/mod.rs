@@ -2136,10 +2136,135 @@ fn resolve_model_aliases(
     pre_user_methods: &[MethodDef],
     schema: &Schema,
 ) {
+    // An association reader or `attr_accessor` pair is copied from
+    // `pre_user_methods` — the PRISTINE synthesized copy, from before
+    // any hand-written override collapsed it in the real `methods`.
+    let synthesized = |name: &Symbol| -> Option<&MethodDef> {
+        pre_user_methods.iter().find(|m| m.name == *name && m.receiver == MethodReceiver::Instance)
+    };
+    let table = schema.tables.get(&model.table.0);
+    for alias in model_aliases(model, schema, &|name| synthesized(name).is_some()) {
+        let Some(source) = alias.source else {
+            match alias.refusal {
+                Some(AliasRefusal::ReplacesAssociation) => push_alias_refused_gap(
+                    alias.span,
+                    format!(
+                        "alias {new} {old} on {model}: {new} is an association reader, and the methods \
+                         the association generates (its ids, cache and dependents) would call the \
+                         replacement",
+                        new = alias.new,
+                        old = alias.old,
+                        model = model.name.0
+                    ),
+                ),
+                Some(AliasRefusal::CopiesRefusedAlias) => push_alias_refused_gap(
+                    alias.span,
+                    format!(
+                        "alias {new} {old} on {model}: {old} names an alias refused above",
+                        new = alias.new,
+                        old = alias.old,
+                        model = model.name.0
+                    ),
+                ),
+                Some(AliasRefusal::Unresolved) | None => {
+                    let lazy_attribute = !includes_active_model_attributes(model) && attribute_api_names(model).contains(&alias.old);
+                    push_alias_target_unresolved_gap(alias.span, model, &alias.old, &alias.new, table, lazy_attribute);
+                }
+            }
+            continue;
+        };
+        let mut copy = match source {
+            AliasSource::Method(method) => method.clone(),
+            AliasSource::Synthesized { name, .. } => synthesized(&name).expect("model_aliases asked `synthesized`").clone(),
+            AliasSource::Inherited(name) => inherited_forwarder(model, &name).expect("model_aliases asked `inherited_forwarder`"),
+        };
+        copy.name = alias.new.clone();
+        copy.name_span = Span::synthetic();
+        // Snapshot semantics cut both ways: `model_aliases` tracks what
+        // `old` meant AT THE ALIAS LINE, and the same body-order
+        // reasoning applies to `new` on the way out. Ruby's class body
+        // runs top to bottom, so a hand-written `def new` AFTER this
+        // alias statement is the last definition and wins —
+        // `push_user_methods` (which ran before this function) already
+        // put that later def in `methods`, so leave it there untouched.
+        // Only a `def new` BEFORE the alias (or no `def new` at all)
+        // lets the alias copy win.
+        if alias.redefined_later {
+            continue;
+        }
+        if let Some(midx) = methods.iter().position(|m| m.name == alias.new && m.receiver == MethodReceiver::Instance) {
+            methods[midx] = copy;
+        } else {
+            methods.push(copy);
+        }
+    }
+}
+
+/// What a model's `alias new old` copies, as the body above the alias
+/// line defines `old`.
+#[derive(Clone, Debug)]
+pub(crate) enum AliasSource<'m> {
+    /// A hand-written `def` or enum method, as defined at the alias line.
+    Method(&'m MethodDef),
+    /// A name the model's synthesis defines: an association reader, an
+    /// `attr_accessor` pair or an eager `attribute`. `item` is the body
+    /// item that declares it, so a reader's type comes from its
+    /// declaration whatever a later alias assigns to the same name.
+    Synthesized { name: Symbol, item: &'m crate::dialect::ModelBodyItem },
+    /// An `ActiveRecord::Base` instance method the body never redefines,
+    /// which the copy forwards to.
+    Inherited(Symbol),
+}
+
+/// One `alias new old` of a model's body and what it resolves to.
+#[derive(Clone, Debug)]
+pub(crate) struct ModelAlias<'m> {
+    pub new: Symbol,
+    pub old: Symbol,
+    pub span: Span,
+    /// `None` when the alias is refused (`alias_target_unresolved`).
+    pub source: Option<AliasSource<'m>>,
+    /// Why the alias is refused, when `source` is `None`.
+    pub refusal: Option<AliasRefusal>,
+    /// A hand-written `def new` follows the alias line: that last
+    /// definition stays, and the copy does not replace it.
+    pub redefined_later: bool,
+}
+
+/// Why a model's `alias new old` is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AliasRefusal {
+    /// `old` resolves to nothing the alias line can copy.
+    Unresolved,
+    /// `new` is one of the model's association readers. The methods the
+    /// association generates (`comment_ids`, its cache, its dependents)
+    /// call the reader by name, so a copy in its place breaks them.
+    ReplacesAssociation,
+    /// `old` is the `new` of an alias refused above: the model keeps the
+    /// name's earlier definition, which is not what Ruby's alias copies.
+    CopiesRefusedAlias,
+}
+
+/// Every `alias new old` of `model`'s body, in source order, resolved
+/// with the snapshot semantics and per-source rules
+/// [`resolve_model_aliases`] documents. The lowering copies each
+/// resolved alias's source into the model; the analysis gives the new
+/// name the source's type, so the rest of the app can call it. Both
+/// read this one resolution, so the analysis never answers for a name
+/// the emitted model does not define.
+///
+/// `synthesized` says whether the model's synthesis defines an
+/// association reader, `attr_accessor` pair or `attribute` reader of
+/// that name.
+pub(crate) fn model_aliases<'m>(
+    model: &'m Model,
+    schema: &Schema,
+    synthesized: &dyn Fn(&Symbol) -> bool,
+) -> Vec<ModelAlias<'m>> {
     use crate::dialect::ModelBodyItem;
 
     if !model.body.iter().any(|item| matches!(item, ModelBodyItem::Alias { .. })) {
-        return;
+        return Vec::new();
     }
 
     let table = schema.tables.get(&model.table.0);
@@ -2176,102 +2301,97 @@ fn resolve_model_aliases(
     // Body-order snapshot: `live[name]` is what `name` resolves to AT
     // THE CURRENT POSITION, updated as each defining item is reached.
     // A hand-written `def`/enum method carries its own body; an
-    // association reader or `attr_accessor` pair is looked up in
-    // `pre_user_methods` — the PRISTINE synthesized copy, from before
-    // any hand-written override collapsed it in the real `methods`
-    // (Rails apps declare each of those exactly once per model, so
-    // that one synthesized copy is what's live from here on, until a
-    // later hand-written redefinition — tracked by the arm below —
-    // changes it again).
-    let mut live: HashMap<Symbol, MethodDef> = HashMap::default();
+    // association reader or `attr_accessor` pair is the one synthesized
+    // method of its name (Rails apps declare each of those exactly once
+    // per model, so that one synthesized copy is what's live from here
+    // on, until a later hand-written redefinition — tracked by the arm
+    // below — changes it again).
+    let mut live: HashMap<Symbol, AliasSource<'m>> = HashMap::default();
+    // The `new` names of aliases refused for what they replace, whose
+    // earlier definition the model keeps.
+    let mut refused: HashSet<Symbol> = HashSet::default();
+    let mut out = Vec::new();
 
     for (idx, item) in model.body.iter().enumerate() {
         match item {
             ModelBodyItem::Method { method, .. } if method.receiver == MethodReceiver::Instance => {
-                live.insert(method.name.clone(), method.clone());
+                // A `def` defines the name again, whatever alias was refused for it above.
+                refused.remove(&method.name);
+                live.insert(method.name.clone(), AliasSource::Method(method));
             }
             ModelBodyItem::Association { assoc, .. } => {
                 let name = assoc.name();
-                if let Some(m) =
-                    pre_user_methods.iter().find(|m| m.name == *name && m.receiver == MethodReceiver::Instance)
-                {
-                    live.insert(name.clone(), m.clone());
+                if synthesized(name) {
+                    live.insert(name.clone(), AliasSource::Synthesized { name: name.clone(), item });
                 }
             }
             ModelBodyItem::Unknown { expr, .. } => {
                 let attribute = attribute_api_arg_name(expr).filter(|_| eager_attributes);
                 for name in attr_accessor_arg_names(expr).into_iter().chain(attribute) {
-                    if let Some(m) = pre_user_methods
-                        .iter()
-                        .find(|m| m.name == name && m.receiver == MethodReceiver::Instance)
-                    {
-                        live.insert(name, m.clone());
+                    if synthesized(&name) {
+                        live.insert(name.clone(), AliasSource::Synthesized { name, item });
                     }
                 }
             }
             ModelBodyItem::Alias { new, old, span, .. } => {
-                let resolved = if let Some(m) = live.get(old) {
-                    Some(m.clone())
+                let redefined_later = model.body[idx + 1..].iter().any(|later| matches!(
+                    later,
+                    ModelBodyItem::Method { method, .. }
+                        if method.receiver == MethodReceiver::Instance
+                            && method.name == *new
+                ));
+                // Wherever the association is declared: the lowering puts
+                // the copy in the reader's place either way. Not when a
+                // later `def` takes the name back: the copy is never kept.
+                let replaces_association = !redefined_later
+                    && model.body.iter().any(|item| matches!(
+                        item,
+                        ModelBodyItem::Association { assoc, .. } if assoc.name() == new
+                    ));
+                let source = if replaces_association || refused.contains(old) {
+                    None
+                } else if let Some(source) = live.get(old) {
+                    Some(source.clone())
                 } else if declared_anywhere.contains(old) {
                     // Declared later in the body — not live yet, and
                     // resolving against the eventual definition would
-                    // break snapshot semantics, so this is a refusal
-                    // (the `None` arm below), not a fallback.
+                    // break snapshot semantics, so this is a refusal,
+                    // not a fallback.
                     None
                 } else if table.is_some_and(|t| t.columns.iter().any(|c| c.name == *old))
                     || (!eager_attributes && attribute_api_names(model).contains(old))
                 {
                     // A plain AR column reader — Rails itself raises
                     // NameError here (attribute methods are generated
-                    // lazily), so this never resolves; the `None` arm
-                    // below names `alias_attribute` instead.
+                    // lazily), so this never resolves; the refusal
+                    // names `alias_attribute` instead.
                     None
                 } else {
-                    inherited_forwarder(model, old)
+                    inherited_forwarder(model, old).map(|_| AliasSource::Inherited(old.clone()))
                 };
-                match resolved {
-                    Some(mut copy) => {
-                        copy.name = new.clone();
-                        copy.name_span = Span::synthetic();
-                        // Snapshot semantics cut both ways: `live`
-                        // above tracks what `old` meant AT THE ALIAS
-                        // LINE, and the same body-order reasoning
-                        // applies to `new` on the way out. Ruby's
-                        // class body runs top to bottom, so a
-                        // hand-written `def new` AFTER this alias
-                        // statement is the last definition and wins —
-                        // `push_user_methods` (which ran before this
-                        // function) already put that later def in
-                        // `methods`, so leave it there untouched. Only
-                        // a `def new` BEFORE the alias (or no `def
-                        // new` at all) lets the alias copy win.
-                        let redefined_later = model.body[idx + 1..].iter().any(|later| matches!(
-                            later,
-                            ModelBodyItem::Method { method, .. }
-                                if method.receiver == MethodReceiver::Instance
-                                    && method.name == *new
-                        ));
-                        if !redefined_later {
-                            if let Some(midx) = methods
-                                .iter()
-                                .position(|m| m.name == *new && m.receiver == MethodReceiver::Instance)
-                            {
-                                methods[midx] = copy.clone();
-                            } else {
-                                methods.push(copy.clone());
-                            }
-                        }
-                        live.insert(new.clone(), copy);
+                let refusal = if replaces_association {
+                    Some(AliasRefusal::ReplacesAssociation)
+                } else if refused.contains(old) {
+                    Some(AliasRefusal::CopiesRefusedAlias)
+                } else {
+                    source.is_none().then_some(AliasRefusal::Unresolved)
+                };
+                match &source {
+                    Some(source) => {
+                        refused.remove(new);
+                        live.insert(new.clone(), source.clone());
                     }
-                    None => {
-                        let lazy_attribute = !eager_attributes && attribute_api_names(model).contains(old);
-                        push_alias_target_unresolved_gap(*span, model, old, new, table, lazy_attribute);
+                    None if refusal != Some(AliasRefusal::Unresolved) => {
+                        refused.insert(new.clone());
                     }
+                    None => {}
                 }
+                out.push(ModelAlias { new: new.clone(), old: old.clone(), span: *span, source, refusal, redefined_later });
             }
             _ => {}
         }
     }
+    out
 }
 
 /// The symbol names an `attr_accessor` / `attr_reader` / `attr_writer`
@@ -2397,6 +2517,13 @@ fn push_alias_target_unresolved_gap(
             model.name.0
         )
     };
+    push_alias_refused_gap(span, detail);
+}
+
+/// Refuse a model alias under the one construct every refused alias
+/// shares, so survey mode demotes it (`attribute_analysis_gaps`) and the
+/// Roda emitter leaves it out.
+fn push_alias_refused_gap(span: Span, detail: String) {
     crate::emit::diagnostics::push(crate::diagnostic::Diagnostic::unsupported(
         span,
         None,

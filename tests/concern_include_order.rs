@@ -1124,3 +1124,42 @@ fn a_loop_hosts_include_filtered_alone_falls_back_to_the_span_reading() {
     assert_eq!(includes, ["LoopFilterX", "LoopFilterY"], "the hook's include is filtered out");
     single_case(&files, "  include LoopFilterHost\n", "label", "filter y");
 }
+
+/// A loop's string that runs its own `class_eval` loop: the inner loop's
+/// `include` statements run in order, so NestPlainB is nearest (#2278).
+#[test]
+fn a_nested_class_eval_loops_include_statements_run_in_order() {
+    let host = (
+        "nest_plain_host",
+        "module NestPlainHost\n  def nest_plain_host_own\n    \"own\"\n  end\n\n  [:once].each { |u| class_eval '%w[NestPlainA NestPlainB].each { |name| class_eval \"include #{name}\" }' }\nend\n",
+    );
+    let a = labelled("nest_plain_a", "NestPlainA", "nest a");
+    let b = labelled("nest_plain_b", "NestPlainB", "nest b");
+    single_case(&[(a.0.as_str(), a.1.as_str()), (b.0.as_str(), b.1.as_str()), host], "  include NestPlainHost\n", "label", "nest b");
+}
+
+/// The same nested loop in a concern's body, whose strings are walked with
+/// the concern's own names (#2278).
+#[test]
+fn a_concerns_nested_class_eval_loops_include_statements_run_in_order() {
+    let host = (
+        "nest_concern_host",
+        "module NestConcernHost\n  extend ActiveSupport::Concern\n\n  def nest_concern_host_own\n    \"own\"\n  end\n\n  [:once].each { |u| class_eval '%w[NestConcernA NestConcernB].each { |name| class_eval \"include #{name}\" }' }\nend\n",
+    );
+    let a = labelled("nest_concern_a", "NestConcernA", "concern a");
+    let b = labelled("nest_concern_b", "NestConcernB", "concern b");
+    single_case(&[(a.0.as_str(), a.1.as_str()), (b.0.as_str(), b.1.as_str()), host], "  include NestConcernHost\n", "label", "concern b");
+}
+
+/// A nested loop's `include A, B` stays one statement: Ruby includes its
+/// arguments last first, so NestCommaA is nearest (#2278).
+#[test]
+fn a_nested_class_eval_loops_include_of_two_modules_stays_one_statement() {
+    let host = (
+        "nest_comma_host",
+        "module NestCommaHost\n  def nest_comma_host_own\n    \"own\"\n  end\n\n  [:once].each { |u| class_eval '%w[x].each { |m| class_eval \"include NestCommaA, NestCommaB\" }' }\nend\n",
+    );
+    let a = labelled("nest_comma_a", "NestCommaA", "comma a");
+    let b = labelled("nest_comma_b", "NestCommaB", "comma b");
+    single_case(&[(a.0.as_str(), a.1.as_str()), (b.0.as_str(), b.1.as_str()), host], "  include NestCommaHost\n", "label", "comma a");
+}

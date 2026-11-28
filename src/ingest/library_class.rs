@@ -5016,7 +5016,7 @@ fn walk_decl_body_hosted<'pr>(
         // concern's hook (#2278): the wrapper extends it as well, and its body is walked with this body's own `def`
         // names (`walk_decl_body_hosted`), so the hoist keeps a colliding hook def in the block, as it does for
         // this body's own `included do`. The wrapper's `extend` is not the string's.
-        let (includes, string_include_spans, unknown_calls, methods) = match &concern_direct_defs {
+        let (includes, string_include_spans, string_statements, unknown_calls, methods) = match &concern_direct_defs {
             Some(direct) => {
                 let prefix = "class RoundhouseClassEval\nextend ActiveSupport::Concern\n";
                 let wrapped = format!("{prefix}{source}\nend\n");
@@ -5034,14 +5034,14 @@ fn walk_decl_body_hosted<'pr>(
                 // As a class body's are: its `@x = …` statements are not class-body calls.
                 take_class_ivar_initializers(&mut walked.unknown_calls);
                 walked.unknown_calls.retain(|call| call.span.is_synthetic() || call.span.start >= prefix.len() as u32);
-                (walked.includes, walked.include_spans, walked.unknown_calls, walked.methods)
+                (walked.includes, walked.include_spans, walked.include_statements, walked.unknown_calls, walked.methods)
             }
             None => {
                 let wrapped = format!("class RoundhouseClassEval\n{source}\nend\n");
                 let (parsed, _) = super::prism::scope(|| super::ingest_library_classes(wrapped.as_bytes(), file));
                 let mut classes = parsed?;
                 let Some(class) = classes.pop() else { continue };
-                (class.includes, class.include_spans, class.unknown_calls, class.methods)
+                (class.includes, class.include_spans, class.include_statements, class.unknown_calls, class.methods)
             }
         };
         // The string's `included` blocks, at their offsets in it, and a span inside the loop's own for them and the
@@ -5078,8 +5078,13 @@ fn walk_decl_body_hosted<'pr>(
             out.include_statements = crate::dialect::include_statements::of_spans(&out.include_spans);
         }
         let mut id = crate::dialect::include_statements::fresh(&out.include_statements);
-        let string_ids = (string_include_spans.len() == includes.len())
-            .then(|| crate::dialect::include_statements::of_spans(&string_include_spans));
+        // The string's own statements: its record when it has one in step (a loop the string runs itself, whose
+        // statements all have that inner loop's span), else read from its spans.
+        let string_ids = if !string_statements.is_empty() && string_statements.len() == includes.len() {
+            Some(string_statements)
+        } else {
+            (string_include_spans.len() == includes.len()).then(|| crate::dialect::include_statements::of_spans(&string_include_spans))
+        };
         for (i, include) in includes.iter().enumerate() {
             if i > 0 && string_ids.as_ref().is_none_or(|ids| ids[i] != ids[i - 1]) {
                 id += 1;

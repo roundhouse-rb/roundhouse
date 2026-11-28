@@ -23180,3 +23180,5 @@ fn only_kernel_s_require_of_a_built_name_is_reported_on_spinel() {
     let own = errors("  def self.load(name)\n    name.to_s\n  end\n\n  def self.fetch(name)\n    load(name)\n  end\n");
     assert!(!own.iter().any(|e| e.contains("require of a name built at run time")), "{own:#?}");
 }
+#[path = "emit_and_run/url_class_side_options.rs"]
+mod url_class_side_options;

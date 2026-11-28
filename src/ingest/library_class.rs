@@ -5104,6 +5104,40 @@ fn walk_decl_body_hosted<'pr>(
             }
             e.node.for_each_child_mut(&mut mark_constants);
         }
+        // `alias_method :to, :from` at the string's top level naming a `def` the body wrote before the loop (#2278):
+        // the walked string doesn't have that `def`, so its walk left the call unread. Ruby copies the method as it
+        // stands at the loop, as `alias_method` in the body would; a `def` written after the loop isn't one yet. In a
+        // concern, only the body's own `def`s: a hook's are the includer's. The keyword `alias` is refused in the walk.
+        let receiver = if mode.is_class_side() { MethodReceiver::Class } else { MethodReceiver::Instance };
+        let mut unknown_calls = unknown_calls;
+        unknown_calls.retain(|call| {
+            if in_hook(call.span) {
+                return true;
+            }
+            let ExprNode::Send { recv: None, method, args, block: None, .. } = &*call.node else { return true };
+            if method.as_str() != "alias_method" {
+                return true;
+            }
+            let [to, from] = args.as_slice() else { return true };
+            let (ExprNode::Lit { value: crate::expr::Literal::Sym { value: to } }, ExprNode::Lit { value: crate::expr::Literal::Sym { value: from } }) =
+                (&*to.node, &*from.node)
+            else {
+                return true;
+            };
+            let own = |name: &str| concern_direct_defs.as_ref().is_none_or(|direct| direct.contains(name));
+            let Some(source) = out.methods.iter().rposition(|m| {
+                m.name.as_str() == from.as_str() && m.receiver == receiver && !m.name_span.is_synthetic() && m.name_span.start < start
+            }) else {
+                return true;
+            };
+            if !own(from.as_str()) {
+                return true;
+            }
+            let mut copy = copy_aliased_method(&out.methods[source], to.as_str());
+            copy.name_span = at_loop;
+            out.methods.push(copy);
+            false
+        });
         out.unknown_calls.extend(unknown_calls.iter().map(|call| {
             let mut call = call.clone();
             call.span = if in_hook(call.span) { at_hook } else { at_loop };

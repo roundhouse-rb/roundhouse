@@ -1012,19 +1012,26 @@ fn a_concern_with_only_its_extend_is_still_not_a_library_class() {
     assert_eq!(classes.iter().map(|c| c.name.0.as_str()).collect::<Vec<_>>(), ["LoopOnly"]);
 }
 
-/// An `alias` a concern's `class_eval` loop string writes names the body's
-/// own `def`, which the wrapped string doesn't define: it is not answered
-/// with an empty method of the name. `alias_method` stays unread and the
-/// keyword `alias` is refused, as before the string ran in the concern (#2278).
+/// A concern's `class_eval` loop string with the body's `value` in it.
+fn loop_aliased(file: &str, module: &str, string: &str) -> (String, String) {
+    (file.to_string(), format!("module {module}\n  extend ActiveSupport::Concern\n\n  def value\n    \"real\"\n  end\n\n  %w[x].each {{ |m| class_eval \"{string}\" }}\nend\n"))
+}
+
+/// `alias_method` in a concern's `class_eval` loop string copies the body's
+/// own `def`, written before the loop: the includer's `label` is `value`'s
+/// (#2278). The wrapped string doesn't define `value`, so it is not answered
+/// with an empty method of the name either.
 #[test]
-fn a_loops_alias_of_the_concerns_def_copies_no_empty_method() {
-    let aliased = |file: &str, module: &str, string: &str| {
-        (file.to_string(), format!("module {module}\n  extend ActiveSupport::Concern\n\n  def value\n    \"real\"\n  end\n\n  %w[x].each {{ |m| class_eval \"{string}\" }}\nend\n"))
-    };
-    let (file, source) = aliased("alias_method_host", "AliasMethodHost", "alias_method :label, :value");
-    let controller = emitted_controller(&[(file.as_str(), source.as_str())], "  include AliasMethodHost\n", BuildTarget::Ruby);
-    assert!(!controller.contains("def label"), "{controller}");
-    let (file, source) = aliased("alias_keyword_host", "AliasKeywordHost", "alias label value");
+fn a_loops_alias_method_of_the_concerns_def_copies_it() {
+    let (file, source) = loop_aliased("alias_method_host", "AliasMethodHost", "alias_method :label, :value");
+    single_case(&[(file.as_str(), source.as_str())], "  include AliasMethodHost\n", "label", "real");
+}
+
+/// The keyword `alias` in a loop string is still refused, as before the
+/// string ran in the concern (#2278).
+#[test]
+fn a_loops_keyword_alias_of_the_concerns_def_is_refused() {
+    let (file, source) = loop_aliased("alias_keyword_host", "AliasKeywordHost", "alias label value");
     let mut tree: std::collections::HashMap<std::path::PathBuf, Vec<u8>> = std::collections::HashMap::new();
     tree.insert(format!("app/controllers/concerns/{file}.rb").into(), source.into_bytes());
     let refused = roundhouse::ingest::ingest_app_from_tree(tree).map(|_| ()).expect_err("the keyword alias is refused");
@@ -1123,4 +1130,33 @@ fn a_loop_hosts_include_filtered_alone_falls_back_to_the_span_reading() {
     let includes: Vec<&str> = host_class.includes.iter().map(|i| i.0.as_str()).collect();
     assert_eq!(includes, ["LoopFilterX", "LoopFilterY"], "the hook's include is filtered out");
     single_case(&files, "  include LoopFilterHost\n", "label", "filter y");
+}
+
+
+/// An `alias_method` in a loop string naming a `def` the body writes after
+/// the loop gives the includer no `label`, as before. Ruby raises NameError
+/// at the loop, since `later` isn't defined yet (#2278).
+#[test]
+fn a_loops_alias_method_of_a_later_def_copies_nothing() {
+    let source = "module AliasLaterHost\n  extend ActiveSupport::Concern\n\n  %w[x].each { |m| class_eval \"alias_method :label, :later\" }\n\n  def later\n    \"late\"\n  end\nend\n";
+    let controller = emitted_controller(&[("alias_later_host", source)], "  include AliasLaterHost\n", BuildTarget::Ruby);
+    assert!(!controller.contains("def label"), "{controller}");
+}
+
+/// The same `alias_method` in a plain module's loop string copies its `def`
+/// (#2278).
+#[test]
+fn a_plain_modules_loop_alias_method_copies_its_def() {
+    let source = "module AliasPlainHost\n  def value\n    \"plain real\"\n  end\n\n  %w[x].each { |m| class_eval \"alias_method :label, :value\" }\nend\n";
+    single_case(&[("alias_plain_host", source)], "  include AliasPlainHost\n", "label", "plain real");
+}
+
+/// A concern's loop string aliasing a `def` only its `included do` writes
+/// copies nothing: that `def` is the includer's, not the concern's, and Ruby
+/// raises NameError at the loop (#2278).
+#[test]
+fn a_loops_alias_method_of_a_hook_def_copies_nothing() {
+    let source = "module AliasHookOnlyHost\n  extend ActiveSupport::Concern\n\n  included do\n    def hooked\n      \"hook\"\n    end\n  end\n\n  %w[x].each { |m| class_eval \"alias_method :label, :hooked\" }\nend\n";
+    let controller = emitted_controller(&[("alias_hook_only_host", source)], "  include AliasHookOnlyHost\n", BuildTarget::Ruby);
+    assert!(!controller.contains("def label"), "{controller}");
 }

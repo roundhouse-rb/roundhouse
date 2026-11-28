@@ -4636,9 +4636,11 @@ pub(crate) fn apply_helper_lowering(lcs: &mut [LibraryClass], app: &App) {
                 MethodReceiver::Class => inherited_class.iter().cloned(),
             });
             let url_options = Symbol::from("default_url_options");
+            // Not inherited_class: it holds only framework view helper names, so an ancestor's would be missed.
             if m.receiver == MethodReceiver::Instance
                 && !own_methods.contains(&url_options)
-                && (declared_class.contains(&url_options) || inherited_class.contains(&url_options))
+                && !source_methods.instance_method(&lc.name, "default_url_options")
+                && (declared_class.contains(&url_options) || source_methods.class_method(&lc.name, "default_url_options"))
             {
                 own_methods.insert(Symbol::from(CLASS_URL_OPTIONS));
             }

@@ -1,5 +1,6 @@
 //! A class that includes the url helpers and defines only `self.default_url_options`: Rails' `default_url_options`
-//! is a class_attribute, so an instance's `_url` call reads the class's value, a subclass's instance too.
+//! is a class_attribute, so an instance's `_url` call reads the class's value, a subclass's instance too, its own
+//! methods' calls included.
 //! `EXPECTED` is what Rails 8.1.4 answers (`class_side_url_options_match_rails`).
 
 use super::emit_and_run;
@@ -18,9 +19,15 @@ end
 
 class SubLinker < Linker
 end
+
+class ChildLinker < Linker
+  def child_links
+    [article_url(2), article_url(2, protocol: "https")].join(" ")
+  end
+end
 "#;
 
-const EXPECTED: &str = "http://class.example/articles/1 https://class.example/articles/1 /articles/1\nhttp://class.example/articles/1 https://class.example/articles/1 /articles/1";
+const EXPECTED: &str = "http://class.example/articles/1 https://class.example/articles/1 /articles/1\nhttp://class.example/articles/1 https://class.example/articles/1 /articles/1\nhttp://class.example/articles/2 https://class.example/articles/2";
 
 fn app() -> emit_and_run::Overlay {
     emit_and_run::real_blog().write("lib/linker.rb", LINKER)
@@ -30,7 +37,7 @@ fn app() -> emit_and_run::Overlay {
 fn an_instance_url_reads_the_class_side_url_options() {
     app()
         .run_ruby(&format!(
-            r##"got = [Linker.new.links, SubLinker.new.links].join("\n")
+            r##"got = [Linker.new.links, SubLinker.new.links, ChildLinker.new.child_links].join("\n")
 raise "urls: #{{got.inspect}}" unless got == {EXPECTED:?}
 puts "class side url options passed"
 "##
@@ -43,7 +50,7 @@ puts "class side url options passed"
 fn an_instance_url_reads_the_class_side_url_options_on_spinel() {
     app()
         .run_spinel(&format!(
-            r##"got = [Linker.new.links, SubLinker.new.links].join("\n")
+            r##"got = [Linker.new.links, SubLinker.new.links, ChildLinker.new.child_links].join("\n")
 raise "urls: #{{got.inspect}}" unless got == {EXPECTED:?}
 puts "class side url options passed"
 "##
@@ -72,7 +79,7 @@ class ClassSideUrlOracle < Rails::Application
   routes.append {{ resources :articles, only: [:show] }}
 end
 ClassSideUrlOracle.initialize!
-{LINKER}print [Linker.new.links, SubLinker.new.links].join("\n")
+{LINKER}print [Linker.new.links, SubLinker.new.links, ChildLinker.new.child_links].join("\n")
 "##
     );
     let output = std::process::Command::new("ruby").args(["-e", &script]).output().expect("Rails oracle");

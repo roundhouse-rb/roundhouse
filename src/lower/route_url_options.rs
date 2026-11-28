@@ -491,22 +491,27 @@ fn rewrite(expr: &mut Expr, helpers: &crate::det::HashSet<String>) {
 pub(crate) fn classes_with_own_url_options(app: &App) -> crate::det::HashSet<crate::ident::ClassId> {
     // Not either side for every call: a `class << self` that includes the url helpers (lobsters' Routes) defines its
     // own there, and an instance method's call would then read a `default_url_options` its side lacks.
-    fn owns(methods: &[&crate::dialect::MethodDef]) -> bool {
-        let sides: Vec<&crate::dialect::MethodReceiver> =
-            methods.iter().filter(|m| m.name.as_str() == "default_url_options").map(|m| &m.receiver).collect();
-        // A class side's covers the instance side too (Rails' class_attribute reader), not the other way round.
-        let class_side = sides.contains(&&crate::dialect::MethodReceiver::Class);
-        !sides.is_empty()
-            && methods.iter().all(|m| sides.contains(&&m.receiver) || class_side || !calls_url_with_options(&m.body))
-    }
+    let index = crate::analyze::SourceMethodIndex::new(app);
+    let owns = |name: &crate::ident::ClassId, methods: &[&crate::dialect::MethodDef]| -> bool {
+        use crate::dialect::MethodReceiver;
+        let side = |receiver: &MethodReceiver| match receiver {
+            MethodReceiver::Instance => index.instance_method(name, "default_url_options"),
+            MethodReceiver::Class => index.class_method(name, "default_url_options"),
+        };
+        // A class side's (an ancestor's too) covers the instance side (Rails' class_attribute reader), not the
+        // other way round.
+        let covered = |receiver: &MethodReceiver| side(receiver) || side(&MethodReceiver::Class);
+        let defines = methods.iter().any(|m| m.name.as_str() == "default_url_options") || side(&MethodReceiver::Class);
+        defines && methods.iter().all(|m| covered(&m.receiver) || !calls_url_with_options(&m.body))
+    };
     let mut out = crate::det::HashSet::default();
     for lc in &app.library_classes {
-        if owns(&lc.methods.iter().collect::<Vec<_>>()) {
+        if owns(&lc.name, &lc.methods.iter().collect::<Vec<_>>()) {
             out.insert(lc.name.clone());
         }
     }
     for m in &app.models {
-        if owns(&m.methods().collect::<Vec<_>>()) {
+        if owns(&m.name, &m.methods().collect::<Vec<_>>()) {
             out.insert(m.name.clone());
         }
     }

@@ -1,0 +1,89 @@
+# Typing contract for the WebAuthn raising façade (webauthn_facade.rb
+# beside this file). Dropped alongside the façade when the spin-shaped
+# spinel tree swaps in the real webauthn package (its surface is
+# inferred from the package source).
+module WebAuthn
+  class Error < StandardError
+  end
+
+  class VerificationError < Error
+  end
+
+  class ChallengeVerificationError < VerificationError
+  end
+
+  class OriginVerificationError < VerificationError
+  end
+
+  class RpIdVerificationError < VerificationError
+  end
+
+  class TypeVerificationError < VerificationError
+  end
+
+  class UserPresenceVerificationError < VerificationError
+  end
+
+  class UserVerifiedVerificationError < VerificationError
+  end
+
+  class SignatureVerificationError < VerificationError
+  end
+
+  class SignCountVerificationError < VerificationError
+  end
+
+  class AttestationStatementVerificationError < VerificationError
+  end
+
+  class Configuration
+    @allowed_origins: Array[String]
+    @rp_name: String
+    @rp_id: String
+
+    def initialize: () -> void
+    def allowed_origins: () -> Array[String]
+    def allowed_origins=: (Array[String] origins) -> Array[String]
+    def rp_name: () -> String
+    def rp_name=: (String name) -> String
+    def rp_id: () -> String
+    def rp_id=: (String id) -> String
+  end
+
+  def self.configuration: () -> Configuration
+  def self.configure: () { (Configuration) -> untyped } -> untyped
+  def self.generate_user_id: () -> String
+
+  module PublicKeyCredential
+    class CreationOptions
+      def challenge: () -> String
+      def as_json: (?untyped _options) -> Hash[Symbol, String]
+    end
+
+    class RequestOptions
+      def challenge: () -> String
+      def as_json: (?untyped _options) -> Hash[Symbol, String]
+    end
+  end
+
+  class PublicKeyCredentialWithAttestation
+    def id: () -> String
+    def verify: (String _challenge, ?user_presence: untyped, ?user_verification: untyped) -> bool
+    def public_key: () -> String
+    def sign_count: () -> Integer
+  end
+
+  class PublicKeyCredentialWithAssertion
+    def id: () -> String
+    def verify: (String _challenge, public_key: String, sign_count: Integer, ?user_presence: untyped, ?user_verification: untyped) -> bool
+    def sign_count: () -> Integer
+    def user_handle: () -> String
+  end
+
+  module Credential
+    def self.options_for_create: (user: untyped, ?attestation: untyped, ?authenticator_selection: untyped, ?exclude_credentials: untyped, ?exclude: untyped, ?pub_key_cred_params: untyped, ?algs: untyped, ?rp: untyped, ?timeout: untyped, ?extensions: untyped) -> PublicKeyCredential::CreationOptions
+    def self.options_for_get: (?rp_id: untyped, ?allow_credentials: untyped, ?allow: untyped, ?user_verification: untyped, ?timeout: untyped, ?extensions: untyped) -> PublicKeyCredential::RequestOptions
+    def self.from_create: (untyped _credential) -> PublicKeyCredentialWithAttestation
+    def self.from_get: (untyped _credential) -> PublicKeyCredentialWithAssertion
+  end
+end

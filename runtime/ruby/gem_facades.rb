@@ -221,6 +221,11 @@ require_relative "bcrypt_facade"
 # spinel-rqrcode spin package) when the app names RQRCode.
 require_relative "rqrcode_facade"
 
+# WebAuthn façade lives in its own file for the same reason: the
+# spin-shaped spinel tree swaps that FILE for `require "webauthn"` (the
+# spinel-webauthn spin package) when the app names WebAuthn.
+require_relative "webauthn_facade"
+
 # Nokogiri façade lives in its own file for the same reason: the
 # spin-shaped spinel tree swaps that FILE for `require "nokogiri"` (the
 # spinel-nokogiri spin package) when the app names Nokogiri.

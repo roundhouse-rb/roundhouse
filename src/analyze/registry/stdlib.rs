@@ -1056,6 +1056,15 @@ pub(in crate::analyze) fn register(classes: &mut HashMap<ClassId, ClassInfo>) {
         // long to encode. rqrcode_core's classes on the ruby family, the
         // spinel-rqrcode package's (same names, same raise) on spinel.
         "RQRCodeCore::QRCodeRunTimeError", "RQRCodeCore::QRCodeArgumentError",
+        // `rescue WebAuthn::Error` around a passkey registration or sign-in:
+        // the webauthn gem's errors on the ruby family, the spinel-webauthn
+        // package's (same names, same raises) on spinel.
+        "WebAuthn::Error", "WebAuthn::VerificationError",
+        "WebAuthn::ChallengeVerificationError", "WebAuthn::OriginVerificationError",
+        "WebAuthn::RpIdVerificationError", "WebAuthn::TypeVerificationError",
+        "WebAuthn::UserPresenceVerificationError", "WebAuthn::UserVerifiedVerificationError",
+        "WebAuthn::SignatureVerificationError", "WebAuthn::SignCountVerificationError",
+        "WebAuthn::AttestationStatementVerificationError",
         // `rescue CSV::MalformedCSVError` around `CSV.parse` (csv is loaded
         // by the emitted require, on Spinel by its csv package).
         "CSV::MalformedCSVError",

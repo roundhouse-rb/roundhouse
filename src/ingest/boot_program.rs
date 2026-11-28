@@ -86,7 +86,8 @@ pub(super) fn build<V: Vfs + ?Sized>(
             .findings
             .iter()
             .filter(|f| if engine { is_engine_initializer_constant(f) } else { f.path.starts_with("config/initializers/") })
-            .filter(|f| match initializer_ledger::holder_of(&f.targets, lock, app_namespaces) {
+            // Not by the lock's holder: an app may name the gem's constant without locking it, and the tree still ships the gem.
+            .filter(|f| (!engine && f.targets.iter().all(|t| boot_configured(t))) || match initializer_ledger::holder_of(&f.targets, lock, app_namespaces) {
                 Holder::App => true,
                 // A gem compiled from source runs its own setting, as the real gem would.
                 Holder::Gem { names, .. } if !engine && lock.is_some_and(|l| names.iter().all(|n| l.is_source(n))) => true,
@@ -110,7 +111,11 @@ pub(super) fn build<V: Vfs + ?Sized>(
             let start = node.location().start_offset() as u32;
             // `Devise.setup do |config| … end` of a gem compiled from source: its `setup` is `yield self`, so the
             // block's statements are writes on the module, run where the initializer runs them.
-            if !engine && let Some((starts, exprs)) = yielded_self_setup(&node, app, &file_name, &wanted) {
+            // Not past the class-body read check below: a constant the block assigns would run after app/ reads it.
+            if !engine
+                && !written_constants(&node).iter().any(|name| class_body_reads.contains(name))
+                && let Some((starts, exprs)) = yielded_self_setup(&node, app, &file_name, &wanted)
+            {
                 app.boot_program.extend(exprs);
                 taken.extend(starts.into_iter().map(|inner| (path.clone(), inner)));
                 continue;
@@ -175,6 +180,14 @@ pub(super) fn build<V: Vfs + ?Sized>(
     Ok(taken)
 }
 
+/// Whether a ledger target is a statement inside a [`crate::gems::BOOT_CONFIGURED`] gem's `Mod.configure` block.
+fn boot_configured(target: &str) -> bool {
+    target.strip_prefix("block:").is_some_and(|within| {
+        let within = within.trim_start_matches("::");
+        crate::gems::BOOT_CONFIGURED.iter().any(|(_, root)| within == format!("{root}.configure"))
+    })
+}
+
 /// The statements of `Mod.setup do |config| … end`, the ledger's to take, with `config` read as `Mod`, where the
 /// app's `Mod.setup` is `yield self`. A `require` among them stays out: the gem's files are loaded already.
 /// A `setup` or `configure` that does more than yield itself (simple_form's `@@configured = true` before its yield,
@@ -201,7 +214,8 @@ fn yielded_self_setup(node: &ruby_prism::Node<'_>, app: &App, file: &str, wanted
             ExprNode::Seq { exprs } => matches!(exprs.as_slice(), [e] if yields_self(e)),
             _ => yields_self(&m.body),
         })
-    })?;
+    });
+    let shape = shape.or_else(|| crate::gems::BOOT_CONFIGURED.iter().any(|(_, root)| *root == name && method == "configure").then_some(false))?;
     let block = call.block()?.as_block_node()?;
     if !shape {
         let statements = block.body()?.as_statements_node()?;

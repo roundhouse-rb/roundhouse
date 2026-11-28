@@ -4977,6 +4977,164 @@ fn jwt_is_refused_off_ruby_and_jruby() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+const WEBAUTHN_LIB: &str = "class Passkeys
+  def self.registration_options(handle, existing)
+    WebAuthn::Credential.options_for_create(
+      user: { id: handle, name: \"ada\", display_name: \"Ada\" },
+      exclude: existing,
+      authenticator_selection: { user_verification: \"preferred\", resident_key: \"preferred\" }
+    )
+  end
+
+  def self.register(credential, challenge)
+    webauthn_credential = WebAuthn::Credential.from_create(credential)
+    webauthn_credential.verify(challenge)
+    [webauthn_credential.id, webauthn_credential.public_key, webauthn_credential.sign_count]
+  rescue WebAuthn::Error => e
+    e.class.name
+  end
+
+  def self.sign_in_options(ids)
+    WebAuthn::Credential.options_for_get(allow: ids, user_verification: \"preferred\")
+  end
+
+  def self.sign_in(credential, challenge, public_key, sign_count)
+    webauthn_credential = WebAuthn::Credential.from_get(credential)
+    webauthn_credential.verify(challenge, public_key: public_key, sign_count: sign_count)
+    webauthn_credential.sign_count
+  rescue WebAuthn::Error => e
+    e.class.name
+  end
+
+  def self.registration_request(handle, existing)
+    options = registration_options(handle, existing)
+    [options.challenge, options.as_json]
+  end
+
+  def self.sign_in_request(ids)
+    options = sign_in_options(ids)
+    [options.challenge, options.as_json]
+  end
+end
+";
+
+/// WebAuthn runs as the real gem on Ruby: the options' JSON is the gem's,
+/// a registration and an assertion from the gem's software authenticator
+/// verify, and a stale challenge or a sign count that went backwards
+/// raises its own `WebAuthn::Error`. The relying party is the one the
+/// initializer's `WebAuthn.configure` block sets, which the boot program runs.
+#[test]
+fn webauthn_runs_as_the_real_gem_on_ruby() {
+    let run = emit_and_run::real_blog()
+        .write("lib/passkeys.rb", WEBAUTHN_LIB)
+        .write(
+            "config/initializers/webauthn.rb",
+            "WebAuthn.configure do |config|\n  config.allowed_origins = [ENV.fetch(\"WEBAUTHN_ORIGIN\", \"https://example.com\")]\n  config.rp_name = \"Example\"\n  config.rp_id = \"example.com\"\nend\n",
+        )
+        .run_ruby(
+            r#"require "webauthn/fake_client"
+client = WebAuthn::FakeClient.new("https://example.com")
+challenge, json = Passkeys.registration_request(WebAuthn.generate_user_id, ["old-id"])
+raise json.inspect unless json[:rp] == { name: "Example", id: "example.com" }
+raise json.inspect unless json[:excludeCredentials] == [{ type: "public-key", id: "old-id" }]
+raise json.inspect unless json[:authenticatorSelection] == { userVerification: "preferred", residentKey: "preferred" }
+attestation = client.create(challenge: challenge)
+id, public_key, count = Passkeys.register(attestation, challenge)
+raise "registered #{id.inspect}" unless id == attestation["id"] && count == 0
+stale, _json = Passkeys.registration_request("other", [])
+raise "stale challenge" unless Passkeys.register(client.create(challenge: challenge), stale) == "WebAuthn::ChallengeVerificationError"
+challenge, json = Passkeys.sign_in_request([id])
+raise json.inspect unless json[:allowCredentials] == [{ type: "public-key", id: id }] && json[:rpId] == "example.com"
+raise "sign in" unless Passkeys.sign_in(client.get(challenge: challenge, sign_count: 5), challenge, public_key, count) == 5
+raise "replay" unless Passkeys.sign_in(client.get(challenge: challenge, sign_count: 2), challenge, public_key, 5) == "WebAuthn::SignCountVerificationError""#,
+        );
+    run.assert_passes();
+    let gemfile = std::fs::read_to_string(run.emitted.join("Gemfile")).expect("Gemfile");
+    assert!(gemfile.contains("gem \"webauthn\""), "Gemfile does not declare webauthn:\n{gemfile}");
+}
+
+/// WebAuthn compiles clean on Ruby, JRuby and Spinel. Spinel's tree swaps
+/// the raising façade for the spinel-webauthn package and declares it in
+/// the manifest; each other target refuses each reference.
+#[test]
+fn webauthn_is_refused_off_ruby_jruby_and_spinel() {
+    let dir = std::env::temp_dir().join(format!("rh-webauthn-targets-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in [
+        (
+            "db/schema.rb",
+            "ActiveRecord::Schema.define do\n  create_table \"posts\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n",
+        ),
+        ("config/routes.rb", "Rails.application.routes.draw do\n  get \"/posts\", to: \"posts#index\"\nend\n"),
+        (
+            "config/initializers/webauthn.rb",
+            "WebAuthn.configure do |config|\n  config.allowed_origins = [\"https://example.com\"]\n  config.rp_name = \"Example\"\n  config.rp_id = \"example.com\"\nend\n",
+        ),
+        ("app/models/post.rb", "class Post < ApplicationRecord\nend\n"),
+        ("app/models/passkeys.rb", WEBAUTHN_LIB),
+        (
+            "app/controllers/posts_controller.rb",
+            "class PostsController < ApplicationController\n  def index\n    \
+             options = Passkeys.sign_in_options([\"id\"])\n    \
+             render json: options.as_json.merge(hints: [\"client-device\"])\n  \
+             rescue WebAuthn::Error => e\n    \
+             render json: { error: e.message }, status: :unprocessable_entity\n  end\nend\n",
+        ),
+    ] {
+        let full = dir.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+    }
+    let mut app = roundhouse::ingest::ingest_app(&dir).expect("ingest");
+    let lower_diags = roundhouse::session::analyze_and_lower(&mut app);
+    assert!(
+        lower_diags.iter().all(|d| d.severity != roundhouse::diagnostic::Severity::Error),
+        "check is not clean: {lower_diags:?}"
+    );
+    for target in [roundhouse::project::BuildTarget::Ruby, roundhouse::project::BuildTarget::Jruby] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        assert!(!errors.iter().any(|e| e.contains("WebAuthn")), "{target:?} refused a gem it ships:\n{}", errors.join("\n"));
+        let gemfile = files.get("Gemfile").map(String::as_str).unwrap_or("");
+        assert!(gemfile.contains("gem \"webauthn\""), "{target:?} Gemfile:\n{gemfile}");
+    }
+    let (errors, files) = oj_target_errors_and_text(&app, &dir, roundhouse::project::BuildTarget::Spinel);
+    assert!(!errors.iter().any(|e| e.contains("WebAuthn")), "Spinel refused a gem its spin package ships:\n{}", errors.join("\n"));
+    let facade = files.get("runtime/webauthn_facade.rb").map(String::as_str).unwrap_or("");
+    assert!(facade.contains("require \"webauthn\"") && !facade.contains("GemFacade"), "{facade}");
+    let manifest = files.get("spin.toml").map(String::as_str).unwrap_or("");
+    assert!(manifest.contains("webauthn = { git = \"https://github.com/sology/spinel-webauthn\""), "{manifest}");
+    let configured: Vec<_> = files.iter().filter(|(path, text)| path.ends_with(".rb") && text.contains("WebAuthn.configure")).map(|(path, _)| path.clone()).collect();
+    assert!(!configured.is_empty(), "Spinel's tree does not run the initializer's WebAuthn.configure");
+    for target in [
+        roundhouse::project::BuildTarget::Roda,
+        roundhouse::project::BuildTarget::Python,
+        roundhouse::project::BuildTarget::Crystal,
+        roundhouse::project::BuildTarget::Typescript,
+        roundhouse::project::BuildTarget::Rust,
+        roundhouse::project::BuildTarget::Go,
+        roundhouse::project::BuildTarget::Elixir,
+        roundhouse::project::BuildTarget::CSharp,
+        roundhouse::project::BuildTarget::Kotlin,
+        roundhouse::project::BuildTarget::Swift,
+    ] {
+        let (errors, files) = oj_target_errors_and_text(&app, &dir, target);
+        for site in ["`WebAuthn::Credential`", "`WebAuthn::Error`"] {
+            assert!(
+                errors.iter().any(|e| e.contains(site) && e.contains("only the ruby, jruby and spinel trees ship")),
+                "{target:?} did not refuse {site}:\n{}",
+                errors.join("\n")
+            );
+        }
+        let hits: Vec<_> = files
+            .iter()
+            .filter(|(path, text)| !path.ends_with(".map") && path.contains("passkeys") && text.contains("WebAuthn"))
+            .map(|(path, _)| path.clone())
+            .collect();
+        assert!(hits.is_empty(), "{target:?} emitted a WebAuthn reference in {hits:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 const ELASTIC_APM_LIB: &str = "module Traced
   include ElasticAPM::SpanHelpers
 

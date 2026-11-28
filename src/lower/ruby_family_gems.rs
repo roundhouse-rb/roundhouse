@@ -5,6 +5,10 @@
 //! the real gem (`gems::RUNTIME_GEMS`), so the app's own calls run there.
 //! No other transpile target has anything behind the constant: each
 //! reference is refused there, a `raise` with one unsupported diagnostic.
+//!
+//! A gem in [`SPIN_PACKAGED`] runs on spinel too: the spin-shaped tree
+//! swaps its raising façade for a spin package that ports the gem
+//! (`project::spin_shape`). It is refused on the remaining targets.
 
 use crate::App;
 use crate::build_target::BuildTarget;
@@ -18,6 +22,11 @@ const GEMS: &[(&str, &str, &str)] = &[
     ("JWT", "jwt", "a missing token codec"),
     ("RestClient", "rest-client", "a missing HTTP client"),
     ("ElasticAPM", "elastic-apm", "a missing APM agent"),
+];
+
+/// As [`GEMS`], for the gems spinel also ships, as a spin package.
+const SPIN_PACKAGED: &[(&str, &str, &str)] = &[
+    ("WebAuthn", "webauthn", "a missing passkey verifier"),
 ];
 
 /// Targets that run the real gem: Ruby and JRuby load it via
@@ -38,16 +47,19 @@ pub fn without_unshipped_gems(app: &App, target: BuildTarget) -> Option<App> {
     if ships_gem(target) {
         return None;
     }
+    let spin_packaged: &[(&str, &str, &str)] = if target == BuildTarget::Spinel { &[] } else { SPIN_PACKAGED };
     let named: Vec<_> = GEMS
         .iter()
-        .filter(|(root, _, _)| !(target == BuildTarget::Spinel && matches!(*root, "Faye" | "EventMachine")))
-        .filter(|(root, _, _)| crate::lower::gem_refusal::mentions(app, root))
+        .map(|gem| (gem, "only the ruby and jruby trees ship"))
+        .chain(spin_packaged.iter().map(|gem| (gem, "only the ruby, jruby and spinel trees ship")))
+        .filter(|((root, _, _), _)| !(target == BuildTarget::Spinel && matches!(*root, "Faye" | "EventMachine")))
+        .filter(|((root, _, _), _)| crate::lower::gem_refusal::mentions(app, root))
         .collect();
     if named.is_empty() {
         return None;
     }
     let mut app = app.clone();
-    for (root, gem, missing) in named {
+    for ((root, gem, missing), shipped_by) in named {
         crate::lower::gem_refusal::refuse_references(
             &mut app,
             target.as_str(),
@@ -55,7 +67,7 @@ pub fn without_unshipped_gems(app: &App, target: BuildTarget) -> Option<App> {
                 root,
                 construct: root,
                 why: &format!(
-                    "is the {gem} gem, which only the ruby and jruby trees ship. \
+                    "is the {gem} gem, which {shipped_by}. \
                      The reference is refused instead of being written against {missing}"
                 ),
                 raised: &format!("{gem} is not shipped on this target"),

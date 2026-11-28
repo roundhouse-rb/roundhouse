@@ -100,6 +100,7 @@ pub(crate) const GEM_REQUIRES: &[&str] = &[
     "faraday/retry",
     "retryable",
     "jwt",
+    "webauthn",
     // Not the gem's entry file: it loads the Railtie whenever `Rails::VERSION` is defined, which this tree's is, with no `Rails::Railtie` under it.
     "mini_profiler",
     "rest-client",
@@ -130,7 +131,7 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
     // (constant an emitted body names, gem that defines it). Only gems
     // whose absence is a RUNTIME error belong here — the list is the
     // façade's, not a survey of what an app might like.
-    const RUNTIME_GEMS: [(Marker, &str); 28] = [
+    const RUNTIME_GEMS: [(Marker, &str); 29] = [
         (Marker::Constant("Faye"), "faye-websocket"),
         (Marker::Constant("EventMachine"), "eventmachine"),
         (Marker::Constant("BCrypt"), "bcrypt"),
@@ -252,6 +253,11 @@ pub(crate) fn compiler_runtime_gems() -> &'static [(Marker, &'static str)] {
         // refused on the strict targets (`lower::ruby_family_gems`).
         (Marker::Constant("Retryable"), "retryable"),
         (Marker::Constant("JWT"), "jwt"),
+        // Passkey registration and sign-in. The real gem on this lane; the
+        // spinel tree swaps its façade for the spinel-webauthn spin package
+        // (`project::spin_shape`), and the strict targets refuse it
+        // (`lower::ruby_family_gems`).
+        (Marker::Constant("WebAuthn"), "webauthn"),
         // lobsters' `Rack::MiniProfiler.authorize_request` for every
         // moderator: the real gem on this lane, its package
         // (`GEM_PACKAGES`) on spinel.
@@ -814,6 +820,7 @@ const FATES: &[(&str, GemFate)] = &[
     ("web-push", GemFate::Modeled),    // WebPush pool (runtime/ruby)
     ("webpush", GemFate::Modeled),     // the gem's former name; same surface
     ("webmock", GemFate::Modeled),     // webmock double (runtime/ruby)
+    ("webauthn", GemFate::Modeled),    // catalog/gems: WebAuthn; the real gem on ruby and jruby, the spinel-webauthn spin package on spinel, lower/ruby_family_gems refuses every other target
     ("will_paginate", GemFate::Modeled), // catalog: paginate; registry/view: will_paginate, page_entries_info
     // ── Infrastructure ───────────────────────────────────────────
     ("active_record_doctor", GemFate::Infrastructure),
@@ -1035,6 +1042,12 @@ pub(crate) fn is_framework_feature(feature: &str) -> bool {
     )
 }
 
+/// Modeled gems whose `Mod.configure do |config| … end` in an initializer
+/// the boot program runs as written (`ingest::boot_program`): every target
+/// that ships the gem ships its real configuration — webauthn is the gem
+/// itself on ruby and jruby and the spinel-webauthn package on spinel.
+pub const BOOT_CONFIGURED: &[(&str, &str)] = &[("webauthn", "WebAuthn")];
+
 pub fn fate_of(name: &str) -> GemFate {
     if PRELOADED.iter().any(|(feature, _, _)| *feature == name) {
         return GemFate::Stdlib;
@@ -1154,6 +1167,7 @@ pub fn namespace_of(gem: &str) -> String {
         ("sqlite3", "SQLite3"),
         ("twilio-ruby", "Twilio"),
         ("web-push", "WebPush"),
+        ("webauthn", "WebAuthn"),
         ("zip_kit", "ZipKit"),
     ];
     if let Some((_, ns)) = IRREGULAR.iter().find(|(g, _)| *g == gem) {

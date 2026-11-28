@@ -584,6 +584,107 @@ pub const GEM_CATALOG: &[GemClass] = &[
     GemClass { name: "JWT::MissingRequiredClaim", class_methods: &[], instance_methods: JWT_ERROR },
     GemClass { name: "JWT::Base64DecodeError", class_methods: &[], instance_methods: JWT_ERROR },
     GemClass { name: "JWT::JWKError", class_methods: &[], instance_methods: JWT_ERROR },
+    // webauthn 3.x - passkey registration and sign-in, the relying-party
+    // half. The real gem on ruby and jruby; on spinel the spin-shaped tree
+    // swaps the raising façade for the spinel-webauthn spin package (the
+    // gem's classes and answers). Refused on every other target
+    // (`lower::ruby_family_gems`). The error classes are rescuable
+    // exceptions (`analyze::registry::stdlib`).
+    GemClass {
+        name: "WebAuthn",
+        class_methods: &[
+            ("generate_user_id", GemTy::Str),
+            ("configure", GemTy::Untyped),
+            ("configuration", GemTy::Instance("WebAuthn::Configuration")),
+        ],
+        instance_methods: &[],
+    },
+    GemClass {
+        name: "WebAuthn::Configuration",
+        class_methods: &[],
+        instance_methods: &[
+            ("allowed_origins", GemTy::Untyped),
+            ("allowed_origins=", GemTy::Untyped),
+            ("origin", GemTy::Untyped),
+            ("origin=", GemTy::Untyped),
+            ("rp_name", GemTy::Untyped),
+            ("rp_name=", GemTy::Untyped),
+            ("rp_id", GemTy::Untyped),
+            ("rp_id=", GemTy::Untyped),
+            ("algorithms", GemTy::Untyped),
+            ("algorithms=", GemTy::Untyped),
+            ("encoding", GemTy::Untyped),
+            ("encoding=", GemTy::Untyped),
+            ("credential_options_timeout", GemTy::Untyped),
+            ("credential_options_timeout=", GemTy::Untyped),
+            ("silent_authentication", GemTy::Untyped),
+            ("silent_authentication=", GemTy::Untyped),
+            ("verify_attestation_statement", GemTy::Untyped),
+            ("verify_attestation_statement=", GemTy::Untyped),
+            ("acceptable_attestation_types", GemTy::Untyped),
+            ("acceptable_attestation_types=", GemTy::Untyped),
+        ],
+    },
+    GemClass {
+        name: "WebAuthn::Credential",
+        class_methods: &[
+            ("options_for_create", GemTy::Instance("WebAuthn::PublicKeyCredential::CreationOptions")),
+            ("options_for_get", GemTy::Instance("WebAuthn::PublicKeyCredential::RequestOptions")),
+            ("from_create", GemTy::Instance("WebAuthn::PublicKeyCredentialWithAttestation")),
+            ("from_get", GemTy::Instance("WebAuthn::PublicKeyCredentialWithAssertion")),
+        ],
+        instance_methods: &[],
+    },
+    // `as_json` is the gem's own (`PublicKeyCredential::Options#as_json`):
+    // the options as the browser's `PublicKeyCredential*Options` JSON,
+    // Symbol keys in camelCase, so it is not ActiveSupport's Object
+    // extension.
+    GemClass {
+        name: "WebAuthn::PublicKeyCredential::CreationOptions",
+        class_methods: &[],
+        instance_methods: WEBAUTHN_OPTIONS,
+    },
+    GemClass {
+        name: "WebAuthn::PublicKeyCredential::RequestOptions",
+        class_methods: &[],
+        instance_methods: WEBAUTHN_OPTIONS,
+    },
+    // `verify` answers true or raises a `WebAuthn::Error` subclass.
+    GemClass {
+        name: "WebAuthn::PublicKeyCredentialWithAttestation",
+        class_methods: &[],
+        instance_methods: &[
+            ("id", GemTy::Str),
+            ("type", GemTy::Str),
+            ("raw_id", GemTy::Str),
+            ("authenticator_attachment", GemTy::Untyped),
+            ("client_extension_outputs", GemTy::Untyped),
+            ("verify", GemTy::Bool),
+            ("sign_count", GemTy::Int),
+            ("public_key", GemTy::Str),
+            ("raw_public_key", GemTy::Str),
+            ("backup_eligible?", GemTy::Bool),
+            ("backed_up?", GemTy::Bool),
+        ],
+    },
+    GemClass {
+        name: "WebAuthn::PublicKeyCredentialWithAssertion",
+        class_methods: &[],
+        instance_methods: &[
+            ("id", GemTy::Str),
+            ("type", GemTy::Str),
+            ("raw_id", GemTy::Str),
+            ("authenticator_attachment", GemTy::Untyped),
+            ("client_extension_outputs", GemTy::Untyped),
+            ("verify", GemTy::Bool),
+            ("sign_count", GemTy::Int),
+            // nil when the authenticator sent no user handle.
+            ("user_handle", GemTy::Untyped),
+            ("raw_user_handle", GemTy::Untyped),
+            ("backup_eligible?", GemTy::Bool),
+            ("backed_up?", GemTy::Bool),
+        ],
+    },
     // RestClient — the HTTP client (rest-client). As Faraday: the real gem
     // on ruby and jruby, refused elsewhere (`lower::ruby_family_gems`).
     GemClass {
@@ -669,6 +770,13 @@ pub const GEM_CATALOG: &[GemClass] = &[
     // `include ElasticAPM::SpanHelpers` gives the includer `span_method`
     // and `span_class_method`; the Ruby emit replays those calls.
     GemClass { name: "ElasticAPM::SpanHelpers", class_methods: &[], instance_methods: &[] },
+];
+
+const WEBAUTHN_OPTIONS: &[(&str, GemTy)] = &[
+    ("challenge", GemTy::Str),
+    ("timeout", GemTy::Untyped),
+    ("extensions", GemTy::Untyped),
+    ("as_json", GemTy::Untyped),
 ];
 
 const FARADAY_FILE_PART: &[(&str, GemTy)] = &[

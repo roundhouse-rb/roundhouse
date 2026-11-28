@@ -1408,6 +1408,44 @@ What is still not on the wire from that endpoint is the `Cache-Control`
 header — `expires_in` records it and emits nothing, the entry below —
 which the suite's test reads through the harness rather than the wire.
 
+### A passkey is the webauthn gem's check, on Ruby, JRuby and Spinel
+
+`WebAuthn::Credential.options_for_create` / `options_for_get`, their
+`as_json`, `from_create` / `from_get` and `verify` (passkey registration
+and sign-in, the webauthn gem's relying-party half) were refused on
+spinel: `WebAuthn` was a constant of an unknown gem, and `as_json` on the
+options was read as ActiveSupport's Object extension. The gem is now in
+the catalog, so the options type as the gem's classes and `as_json` is
+their own method (the browser's options JSON, Symbol keys in camelCase).
+Ruby and JRuby declare and require the real gem. On spinel the façade
+file (`runtime/ruby/webauthn_facade.rb`, raising, the write-path rule
+every gem façade follows) is swapped by `spin_shape` for
+`require "webauthn"` when the app names `WebAuthn`, and the manifest
+declares the spinel-webauthn spin package
+(github.com/sology/spinel-webauthn), the same seam bcrypt and rqrcode use.
+Every other target refuses each reference (`lower::ruby_family_gems`).
+
+The package is the gem's code where the gem is pure Ruby, and writes out
+the parts of its dependencies a relying party needs (a CBOR decoder, COSE
+keys, the ES256 / PS256 / RS256 checks over spinel's openssl package).
+Its tests compare each answer with the gem's under CRuby. Attestation
+formats that need X.509 chains raise `AttestationStatementVerificationError`,
+which is what the gem answers for them without root certificates; a
+browser asked for the default `attestation: "none"` sends none.
+
+The package is pinned: spin's manifest `ref` takes a tag or branch only,
+so the tree also writes a `spin.lock` naming the package's commit, and
+spin checks what it fetches against it.
+
+An initializer's `WebAuthn.configure do |config| ... end` is run at boot
+as written (`ingest::boot_program`, listed in `gems::BOOT_CONFIGURED`):
+the real gem's configuration on Ruby and JRuby, the package's on Spinel.
+Without it the program would run with the gem's default relying party,
+whose `verify` raises "Unspecified expected origin". Not yet: `config`
+inside the block is untyped (the gem catalog types no block parameter),
+so a setting the package lacks fails when Spinel compiles the tree, not
+at `check`.
+
 ### `ActionCable.server` exists; the registry did not say so
 
 `runtime/spinel/action_cable.rb` has had `ActionCable.server`,
